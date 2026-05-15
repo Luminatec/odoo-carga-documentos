@@ -339,18 +339,19 @@ def extract_pdf_fields(file_bytes, filename=""):
             fields["fecha_vto_iso"] = parse_ar_date(candidates[0])
     # Importe total — formato argentino: punto=miles, coma=decimales
     total_pats = [
-        r"(?:Importe\s+Total|Total\s+Factura|TOTAL\s+FACTURA)[:\s$]*\$?\s*([\d.,]+)",
-        r"(?:^|\n)\s*TOTAL[:\s$]*\$?\s*([\d.,]+)",
-        r"Total\s+a\s+pagar[:\s$]*\$?\s*([\d.,]+)",
-        r"(?:Subtotal|Sub\s+Total)[:\s$]*\$?\s*([\d.,]+)",
-        r"\$\s*([\d]{1,3}(?:[.,]\d{3})*(?:[.,]\d{2}))",
+        r"(?:PESOS\s+)?TOTAL\s*:\s*([\d.,]+)",
+        r"(?:Importe\s+Total|Total\s+Factura|TOTAL\s+FACTURA)[:\s]*\$?\s*([\d.,]+)",
+        r"Total\s+a\s+pagar[:\s]*\$?\s*([\d.,]+)",
     ]
     for pat in total_pats:
         m = re.search(pat, text, re.IGNORECASE | re.MULTILINE)
         if m:
             raw = m.group(1).strip()
             if "." in raw and "," in raw:
-                raw = raw.replace(".", "").replace(",", ".")
+                if raw.rfind(".") > raw.rfind(","):
+                    raw = raw.replace(",", "")
+                else:
+                    raw = raw.replace(".", "").replace(",", ".")
             elif "," in raw:
                 raw = raw.replace(",", ".")
             fields["total"] = raw
@@ -374,7 +375,7 @@ def extract_pdf_fields(file_bytes, filename=""):
                 "RESPONSABLE","INSCRIPTO","ORIGINAL","DUPLICADO","CODIGO","DOMICILIO",
                 "COD.","COD","COND","CONDICION","PAGO","FORMA","TIPO","NUMERO","NRO"}
         for line in (l.strip() for l in text.split("\n") if l.strip()):
-            if len(line) < 4 or re.match(r'^[\d$.,/\s\-()]+$', line) or any(line.upper().startswith(k) for k in skip) or re.search(r"N[\xb0\xba]\s*\d|Cod\.?\s*N[\xb0\xba]", line):
+            if len(line) < 4 or re.match(r'^[\d$.,/\s\-()]+$', line) or any(line.upper().startswith(k) for k in skip) or re.match(r"^[A-Za-z]\d{4,5}-\d{6,8}", line) or re.search(r"N[\xb0\xba]\s*\d|Cod\.?\s*N[\xb0\xba]", line):
                 continue
             fields["proveedor"] = line[:80]
             break
