@@ -117,28 +117,18 @@ DECALOGO = [
 # ───────────────────────────────────────────────────
 # CONEXIÓN DE SERVICIO (API key central, cacheada)
 # ───────────────────────────────────────────────────
-@st.cache_resource(show_spinner=False)
 def get_service_connection():
-    """
-    Establece la conexión de servicio usando la API key central de st.secrets.
-    Retorna (service_uid, models_proxy, api_key) o (None, None, "").
-    Requiere en secrets:
-      ODOO_API_KEY      = "la_api_key_del_usuario_de_servicio"
-      ODOO_SERVICE_EMAIL = "servicio@luminatec.com"  (el dueño de esa API key)
-    """
+    """Conecta a Odoo. Lanza excepción en error (no se cachea el fallo)."""
     api_key   = st.secrets.get("ODOO_API_KEY", "")
     svc_email = st.secrets.get("ODOO_SERVICE_EMAIL", "")
     if not api_key or not svc_email:
-        return None, None, "", "Faltan ODOO_API_KEY o ODOO_SERVICE_EMAIL en secrets."
-    try:
-        common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common", allow_none=True)
-        uid    = common.authenticate(ODOO_DB, svc_email, api_key, {})
+        raise RuntimeError("Faltan ODOO_API_KEY o ODOO_SERVICE_EMAIL en secrets.")
+    common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common", allow_none=True)
+    uid    = common.authenticate(ODOO_DB, svc_email, api_key, {})
         if not uid:
             return None, None, "", f"authenticate() devolvio uid=0 para {svc_email}. API key incorrecta."
-        models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object", allow_none=True)
-        return uid, models, api_key, ""
-    except Exception as e:
-        return None, None, "", f"Error XML-RPC: {e}"
+    models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object", allow_none=True)
+    return uid, models, api_key
 
 def verify_user(email, password):
     """
@@ -383,9 +373,10 @@ if not st.session_state.logged_in:
     st.stop()
 
 # Conexión de servicio (API key central)
-svc_uid, svc_models, svc_api_key, svc_err = get_service_connection()
-if not svc_uid:
-    st.error(f"⚠️ No se pudo conectar a Odoo: {svc_err}")
+try:
+    svc_uid, svc_models, svc_api_key = get_service_connection()
+except Exception as _conn_err:
+    st.error(f"⚠️ No se pudo conectar a Odoo: {_conn_err}")
     st.stop()
 
 uid        = svc_uid
