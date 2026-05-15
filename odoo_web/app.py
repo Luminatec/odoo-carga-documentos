@@ -117,16 +117,17 @@ DECALOGO = [
 # ───────────────────────────────────────────────────
 # CONEXIÓN DE SERVICIO (API key central, cacheada)
 # ───────────────────────────────────────────────────
+@st.cache_resource(show_spinner=False)
 def get_service_connection():
-    """Conecta a Odoo. Lanza excepción en error (no se cachea el fallo)."""
+    """Raises on error so @st.cache_resource never caches a failed attempt."""
     api_key   = st.secrets.get("ODOO_API_KEY", "")
     svc_email = st.secrets.get("ODOO_SERVICE_EMAIL", "")
     if not api_key or not svc_email:
-        raise RuntimeError("Faltan ODOO_API_KEY o ODOO_SERVICE_EMAIL en secrets.")
+        raise RuntimeError("Faltan ODOO_API_KEY o ODOO_SERVICE_EMAIL en los secrets.")
     common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common", allow_none=True)
     uid    = common.authenticate(ODOO_DB, svc_email, api_key, {})
     if not uid:
-        raise RuntimeError(f"uid=0 para {svc_email}. API key inv\u00e1lida o usuario de servicio incorrecto.")
+        raise RuntimeError(f"authenticate() devolvió uid=0. Verificá que la API key corresponde a {svc_email} en {ODOO_DB}.")
     models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object", allow_none=True)
     return uid, models, api_key
 
@@ -173,13 +174,17 @@ def search_partners(models_url, uid, api_key, name, limit=8):
         {"fields": ["id", "name"], "limit": limit, "order": "name asc"})
     return [(r["id"], r["name"]) for r in rows]
 
-@st.cache_data(ttl=300, show_spinner=False)
-def search_accounts(models_url, uid, api_key, query, limit=8):
-    m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
-    rows = m.execute_kw(ODOO_DB, uid, api_key, "account.account", "search_read",
-        [["|", ("name", "ilike", query), ("code", "ilike", query)]],
-        {"fields": ["id", "code", "name"], "limit": limit, "order": "code asc"})
-    return [(r["id"], f"{r['code']} · {r['name']}") for r in rows]
+@st.cache_data(ttl=600, show_spinner=False)
+def get_all_accounts(models_url, uid, api_key):
+    """Carga todas las cuentas contables activas de Odoo (cacheado 10 min)."""
+    try:
+        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        rows = m.execute_kw(ODOO_DB, uid, api_key, "account.account", "search_read",
+            [[("deprecated", "=", False)]],
+            {"fields": ["id", "code", "name"], "order": "code asc"})
+        return [(r["id"], f"{r['code']}  {r['name']}") for r in rows]
+    except Exception:
+        return []
 
 @st.cache_data(ttl=120, show_spinner=False)
 def search_purchase_orders(models_url, uid, api_key, query):
@@ -223,10 +228,10 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
     if doc_type_id:      vals["l10n_latam_document_type_id"] = doc_type_id
     if account_id and amount_neto:
         vals["invoice_line_ids"] = [(0, 0, {
-            "name": ref or "Factura proveedor",
             "account_id": account_id,
-            "quantity": 1.0,
+            "name": ref or "Factura proveedor",
             "price_unit": float(amount_neto),
+            "quantity": 1,
         })]
     move_id = call(models, uid, api_key, "account.move", "create", [vals])
     if file_bytes:
@@ -268,7 +273,7 @@ def _to_float(v):
         return 0.0
 
 def parse_ar_date(raw):
-    """Convierte DD/MM/YYYY -> YYYY-MM-DD. Devuelve '' si no parsea."""
+    """Convierte DD/MM/YYYY → YYYY-MM-DD. Retorna '' si no puede parsear."""
     if not raw:
         return ""
     raw = raw.strip()
@@ -281,17 +286,40 @@ def parse_ar_date(raw):
         return raw[:10]
     return ""
 
+def normalize_amount(raw):
+    """
+    Normaliza un número extraído de factura a float string con punto decimal.
+    Soporta formato argentino (1.234,56) y formato US (1,234.56).
+    """
+    raw = raw.strip()
+    last_comma = raw.rfind(",")
+    last_dot   = raw.rfind(".")
+    if last_comma > last_dot:
+        # Formato argentino: último separador es coma → decimal
+        return raw.replace(".", "").replace(",", ".")
+    elif last_dot > last_comma:
+        # Formato US o sin miles: último separador es punto → decimal
+        return raw.replace(",", "")
+    else:
+        return raw.replace(",", ".")
+
 def fmt_ars(v):
-    """Formatea numero como moneda ARS: $ 1.234,56"""
-    if not v: return ""
+    """Formatea número como moneda ARS: $ 1.234,56"""
+    if not v:
+        return ""
     try:
         s = "{:,.2f}".format(float(v))
-        return "$ " + s.replace(",","X").replace(".","," ).replace("X",".")
-    except:
+        return "$ " + s.replace(",", "X").replace(".", ",").replace("X", ".")
+    except Exception:
         return str(v)
 
-def extract_pdf_fields(file_bytes, filename=""):
-    """Parser para facturas electronicas argentinas (AFIP/CAE/CAEA)."""
+def extract_pdf_fields(file_bytes):
+    """
+    Parser especializado para facturas electrónicas argentinas (AFIP/CAE/CAEA).
+    Extrae: proveedor, número de comprobante, fecha de emisión,
+            fecha de vencimiento de pago, total.
+    Retorna (fields_dict, raw_text).
+    """
     try:
         import pdfplumber
         with pdfplumber.open(BytesIO(file_bytes)) as pdf:
@@ -300,12 +328,15 @@ def extract_pdf_fields(file_bytes, filename=""):
         return {}, ""
     if not text.strip():
         return {}, ""
+
     fields = {"numero": "", "fecha": "", "fecha_iso": "", "fecha_vencimiento": "",
               "fecha_vto_iso": "", "proveedor": "", "total": "", "neto": "", "iva": "", "cuit": ""}
-    # Numero de comprobante — formato AFIP: XXXXX-XXXXXXXX
+
+    # ── NÚMERO DE COMPROBANTE ─────────────────────────────────────────────
+    # Formato AFIP: XXXXX-XXXXXXXX (pto.venta - nro)
     num_pats = [
         r"(?:Nro\.?\s*Comp\.?(?:\s*\(Nro\.?\s*Orig\.?\))?|N[°º]\s*Comp\.?|Comprobante\s*N[°º]?)[:\s]*(\d{4,5}[-\s]\d{6,8})",
-        r"(?:Comp\.?\s*Nro\.?|Nro\.)[:\s]+(\d{4,5}-\d{6,8})",
+        r"(?:Punto\s+de\s+Venta[:\s]+\d+\s+)?(?:Comp\.?\s*Nro\.?|Nro\.)[:\s]+(\d{4,5}-\d{6,8})",
         r"\b(\d{4,5}-\d{6,8})\b",
         r"(?:Factura|Invoice|N[°º.])[:\s#]*([A-Z0-9\-]{5,20})",
     ]
@@ -314,14 +345,8 @@ def extract_pdf_fields(file_bytes, filename=""):
         if m:
             fields["numero"] = m.group(1).strip()
             break
-    # Fallback: extraer numero desde nombre de archivo (ej: FACA0000200013670.pdf)
-    if not fields["numero"] and filename:
-        fn_base = filename.rsplit(".", 1)[0]
-        mf = re.match(r"FAC[A-Z](\d{5})(\d{8})", fn_base, re.IGNORECASE)
-        if mf:
-            fields["numero"] = f"{mf.group(1)}-{mf.group(2)}"
 
-    # Fecha de emision
+    # ── FECHA DE EMISIÓN ──────────────────────────────────────────────────
     emision_pats = [
         r"(?:Fecha\s+de\s+[Ee]misi[oó]n|Fecha\s+[Ee]mis\.?)[:\s]+(\d{1,2}/\d{1,2}/\d{4})",
         r"(?:^|\n|\s)Fecha[:\s]+(\d{1,2}/\d{1,2}/\d{4})",
@@ -337,63 +362,51 @@ def extract_pdf_fields(file_bytes, filename=""):
         if m:
             fields["fecha"] = m.group(1)
             fields["fecha_iso"] = parse_ar_date(fields["fecha"])
-    # Fecha de vencimiento de pago (NO confundir con vencimiento CAE)
-    # Vto. de PAGO — solo etiquetas que mencionen "pago" explícitamente
-    # ("Fecha de Vto." del CAE/CAEA no es fecha de pago)
-    vto_pats = [
-        r"(?:Fecha\s+de\s+Venc(?:imiento)?\s+(?:del?\s+)?[Pp]ago|Fecha\s+Vto\.?\s*[Pp]ago)[:\s]+(\d{1,2}/\d{1,2}/\d{4})",
-        r"Venc(?:imiento)?\s+de\s+[Pp]ago[:\s]+(\d{1,2}/\d{1,2}/\d{4})",
-        r"Vto\.?\s+[Ff]actura[:\s]+(\d{1,2}/\d{1,2}/\d{4})",
-    ]
-    for pat in vto_pats:
-        m = re.search(pat, text, re.IGNORECASE | re.DOTALL)
-        if m:
-            fields["fecha_vencimiento"] = m.group(1).strip()
-            fields["fecha_vto_iso"] = parse_ar_date(fields["fecha_vencimiento"])
-            break
-    # Sin fallback — "Fecha de Vto." del CAE no es vencimiento de pago
-    # Importe total — formato argentino: punto=miles, coma=decimales
+
+    # ── FECHA DE VENCIMIENTO DE PAGO ─────────────────────────────────────
+    # En facturas AFIP/CAE, "Fecha de Vto." es el vencimiento del CAE, NO el vencimiento de pago.
+    # Se deja en blanco para que el usuario complete manualmente según las condiciones de venta.
+
+    # ── IMPORTE TOTAL ─────────────────────────────────────────────────────
     total_pats = [
-        r"(?:PESOS\s+)?TOTAL\s*:\s*([\d.,]+)",
-        r"(?:Importe\s+Total|Total\s+Factura|TOTAL\s+FACTURA)[:\s]*\$?\s*([\d.,]+)",
-        r"Total\s+a\s+pagar[:\s]*\$?\s*([\d.,]+)",
+        r"(?:Importe\s+Total|Total\s+Factura|TOTAL\s+FACTURA)[:\s$]*\$?\s*([\d.,]+)",
+        r"(?:^|\n|\s)TOTAL\s*:[:\s$]*\$?\s*([\d.,]+)",
+        r"(?:^|\n|\s)PESOS\s+TOTAL\s*:[:\s$]*\$?\s*([\d.,]+)",
+        r"Total\s+a\s+pagar[:\s$]*\$?\s*([\d.,]+)",
     ]
     for pat in total_pats:
         m = re.search(pat, text, re.IGNORECASE | re.MULTILINE)
         if m:
-            raw = m.group(1).strip()
-            if "." in raw and "," in raw:
-                if raw.rfind(".") > raw.rfind(","):
-                    raw = raw.replace(",", "")
-                else:
-                    raw = raw.replace(".", "").replace(",", ".")
-            elif "," in raw:
-                raw = raw.replace(",", ".")
-            fields["total"] = raw
-            break
-    # Neto gravado (base imponible antes de IVA)
-    neto_pats = [
-        r"(?:Subtotal\s+Gravado|Neto\s+Gravado|Importe\s+Neto\s+Gravado)[:\s]*\$?\s*([\d.,]+)",
-        r"(?:Base\s+Imponible)[:\s]*\$?\s*([\d.,]+)",
-    ]
-    for pat in neto_pats:
-        m = re.search(pat, text, re.IGNORECASE | re.MULTILINE)
-        if m:
-            raw = m.group(1).strip()
-            if "." in raw and "," in raw:
-                if raw.rfind(".") > raw.rfind(","):
-                    raw = raw.replace(",", "")
-                else:
-                    raw = raw.replace(".", "").replace(",", ".")
-            elif "," in raw:
-                raw = raw.replace(",", ".")
-            fields["neto"] = raw
+            fields["total"] = normalize_amount(m.group(1).strip())
             break
 
-    # Razon social / proveedor
+    # ── NETO GRAVADO ──────────────────────────────────────────────────────
+    neto_pats = [
+        r"(?:Subtotal\s+Gravado|Neto\s+Gravado|Base\s+Imponible)[:\s$]*\$?\s*([\d.,]+)",
+        r"(?:Gravado|Subtotal)[:\s$]*\$?\s*([\d.,]+)",
+    ]
+    for pat in neto_pats:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            fields["neto"] = normalize_amount(m.group(1).strip())
+            break
+
+    # ── IVA ───────────────────────────────────────────────────────────────
+    iva_pats = [
+        r"I\.?V\.?A[^:\n]*(?:21|10\.5|27)[^:\n]*:[:\s$]*\$?\s*([\d.,]+)",
+        r"I\.?V\.?A[:\s$%\d.]*:\s*([\d.,]+)",
+        r"(?:Impuesto\s+)?IVA[:\s$]*\$?\s*([\d.,]+)",
+    ]
+    for pat in iva_pats:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            fields["iva"] = normalize_amount(m.group(1).strip())
+            break
+
+    # ── RAZÓN SOCIAL / PROVEEDOR ──────────────────────────────────────────
     razon_pats = [
         r"(?:Raz[oó]n\s+[Ss]ocial|Denominaci[oó]n)[:\s]+([^\n\d][^\n]{2,79})",
-        r"(?:Apellido\s+y\s+Nombre\s+o\s+Raz[oó]n\s+[Ss]ocial)[:\s]+([^\n]{3,79})",
+        r"(?:Apellido\s+y\s+Nombre\s+o\s+Raz[oó]n\s+[Ss]ocial|Nombre\s+y\s+Apellido)[:\s]+([^\n]{3,79})",
     ]
     for pat in razon_pats:
         m = re.search(pat, text, re.IGNORECASE)
@@ -403,26 +416,25 @@ def extract_pdf_fields(file_bytes, filename=""):
             if len(name) >= 3:
                 fields["proveedor"] = name[:80]
                 break
+
+    # Fallback inteligente: líneas que no son keywords AFIP
     if not fields["proveedor"]:
-        skip = {"FACTURA","NOTA","RECIBO","REMITO","CUIT","AFIP","CAE","PUNTO","FECHA",
-                "IMPORTE","TOTAL","VENCIMIENTO","INGRESOS","IVA","MONOTRIBUTO",
-                "RESPONSABLE","INSCRIPTO","ORIGINAL","DUPLICADO","CODIGO","DOMICILIO",
-                "COD.","COD","COND","CONDICION","PAGO","FORMA","TIPO","NUMERO","NRO"}
+        skip = {"FACTURA", "NOTA", "RECIBO", "REMITO", "CUIT", "AFIP", "CAE",
+                "PUNTO", "FECHA", "IMPORTE", "TOTAL", "VENCIMIENTO", "INGRESOS",
+                "IVA", "MONOTRIBUTO", "RESPONSABLE", "INSCRIPTO", "ORIGINAL",
+                "DUPLICADO", "TRIPLICADO", "CÓDIGO", "DOMICILIO", "PROVINCIA"}
         for line in (l.strip() for l in text.split("\n") if l.strip()):
-            if len(line) < 4 or re.match(r'^[\d$.,/\s\-()]+$', line) or any(line.upper().startswith(k) for k in skip) or re.match(r"^[A-Za-z]\d{4,5}-\d{6,8}", line) or re.search(r"N[\xb0\xba]\s*\d|Cod\.?\s*N[\xb0\xba]", line):
+            if len(line) < 4 or re.match(r'^[\d$.,/\s\-()]+$', line):
                 continue
-            fields["proveedor"] = line[:80]
-            break
-    # CUIT emisor
-    cuit_m = re.search(r'(?:CUIT|C\.U\.I\.T)[:\s.]*?(\d{2}[-\s]?\d{8}[-\s]?\d)', text, re.IGNORECASE)
+            if not any(w in line.upper() for w in skip):
+                fields["proveedor"] = line[:80]
+                break
+
+    # ── CUIT EMISOR ───────────────────────────────────────────────────────
+    cuit_m = re.search(r'(?:CUIT|C\.U\.I\.T)[:\s.]*(\d{2}[-\s]?\d{8}[-\s]?\d)', text, re.IGNORECASE)
     if cuit_m:
         fields["cuit"] = re.sub(r'[\s\-]', '', cuit_m.group(1))
-    # IVA = total - neto
-    try:
-        if fields["total"] and fields["neto"]:
-            fields["iva"] = str(round(float(fields["total"]) - float(fields["neto"]), 2))
-    except Exception:
-        pass
+
     return fields, text
 
 def classify_document(text):
@@ -501,7 +513,7 @@ with st.sidebar:
             st.markdown('<span class="admin-badge">🛳️ Importaciones habilitado</span>',
                         unsafe_allow_html=True)
             st.caption(f"Carpeta: **{st.session_state.carpeta_id or 'sin selección'}**")
-        if st.button("🔓 Cerrar sesión", use_container_width=True, key="logout_1"):
+        if st.button("🔓 Cerrar sesión", use_container_width=True):
             st.session_state.logged_in  = False
             st.session_state.user_email = ""
             st.session_state.history    = []
@@ -612,13 +624,18 @@ with tab_bills:
             extracted, raw_text = {}, ""
             if ext == "pdf":
                 with st.spinner("Leyendo PDF..."):
-                    extracted, raw_text = extract_pdf_fields(file_bytes, uf.name)
+                    extracted, raw_text = extract_pdf_fields(file_bytes)
                 st.caption("🤖 Datos detectados — revisá antes de confirmar." if extracted.get("proveedor")
                            else "ℹ️ PDF sin texto extraíble. Completá los datos a mano.")
             elif ext in ("jpg","jpeg","png"):
                 st.image(file_bytes, caption="Vista previa", width=380)
+
+            # Cargar cuentas contables (cacheado)
+            _bill_accounts = get_all_accounts(models_url, uid, api_key)
+            _acct_labels   = ["— Sin cuenta —"] + [lbl for _, lbl in _bill_accounts]
+
             with st.form(key=f"bill_form_{uf.name}"):
-                c1, c2      = st.columns(2)
+                c1, c2  = st.columns(2)
                 prov_i      = c1.text_input("Proveedor",
                                 value=extracted.get("proveedor","")[:60],
                                 placeholder="Nombre exacto en Odoo")
@@ -628,46 +645,51 @@ with tab_bills:
                                 value=extracted.get("fecha_iso",""),
                                 placeholder="2026-05-12")
                 fecha_vto_i = c2.text_input("Fecha vencimiento (AAAA-MM-DD)",
-                                value=extracted.get("fecha_vto_iso",""),
+                                value="",
                                 placeholder="2026-05-20")
-                _ca, _cb, _cc = st.columns(3)
-                _ca.text_input("Neto gravado (ref.)", value=fmt_ars(extracted.get("neto","")), disabled=True)
-                _cb.text_input("IVA (ref.)", value=fmt_ars(extracted.get("iva","")), disabled=True)
-                _cc.text_input("Total c/imp. (ref.)", value=fmt_ars(extracted.get("total","")), disabled=True)
                 if extracted.get("cuit"):
-                    st.text_input("CUIT emisor", value=extracted.get("cuit",""), disabled=True)
-                with st.expander("📒 Cuentas contables", expanded=True):
-                    _neto_v  = 0.0
-                    _total_v = 0.0
-                    try:
-                        _neto_v  = float(extracted.get("neto","0")  or "0")
-                        _total_v = float(extracted.get("total","0") or "0")
-                    except Exception:
-                        pass
-                    _iva_v = round(_total_v - _neto_v, 2)
-                    cga, cgb = st.columns(2)
-                    cuenta_gasto_i = cga.text_input(
-                        "Cuenta de gasto / activo",
-                        placeholder="Ej: 5.1.01  Gastos operativos",
-                        key=f"cta_g_{uf.name}")
-                    cgb.text_input(
-                        "Cuenta proveedores",
-                        value="Proveedores / Cuentas a pagar",
-                        disabled=True,
-                        key=f"cta_p_{uf.name}")
-                    if _neto_v or _total_v:
-                        _gasto_lbl = cuenta_gasto_i.strip() if cuenta_gasto_i and cuenta_gasto_i.strip() else "⚠ Cuenta de gasto (completar)"
-                        _prov_lbl  = prov_i.strip()         if prov_i  and prov_i.strip()         else "Proveedor"
-                        st.markdown(
-                            "**Asiento estimado:**\n\n"
-                            "| Cuenta | Debe | Haber |\n"
-                            "|---|---:|---:|\n"
-                            f"| {_gasto_lbl} | {fmt_ars(str(_neto_v))} | |\n"
-                            f"| IVA Crédito Fiscal 21% | {fmt_ars(str(_iva_v))} | |\n"
-                            f"| **Proveedores — {_prov_lbl}** | | **{fmt_ars(str(_total_v))}** |"
-                        )
-                st.text_area("Notas internas", height=55)
+                    c1.text_input("CUIT emisor", value=extracted.get("cuit",""), disabled=True)
+
+                # Montos extraídos (sólo referencia)
+                _ca, _cb, _cc = st.columns(3)
+                _ca.text_input("Neto gravado (ref.)",
+                    value=fmt_ars(extracted.get("neto","")), disabled=True,
+                    key=f"neto_ref_{uf.name}")
+                _cb.text_input("IVA (ref.)",
+                    value=fmt_ars(extracted.get("iva","")), disabled=True,
+                    key=f"iva_ref_{uf.name}")
+                _cc.text_input("Total c/imp. (ref.)",
+                    value=fmt_ars(extracted.get("total","")), disabled=True,
+                    key=f"total_ref_{uf.name}")
+
+                st.text_area("Notas internas", height=55, key=f"notas_{uf.name}")
+
+                # Cuentas contables
+                st.markdown("##### 📒 Cuenta contable")
+                cuenta_sel = st.selectbox(
+                    "Cuenta de gasto / activo",
+                    options=_acct_labels,
+                    index=0,
+                    key=f"cta_g_{uf.name}",
+                    help="Buscá por código o nombre. Si no seleccionás ninguna, la factura se crea sin línea contable.",
+                )
+
                 go = st.form_submit_button("⬆️ Cargar en Odoo", use_container_width=True)
+
+            # Asiento estimado (fuera del form, sin interferir)
+            if cuenta_sel and cuenta_sel != "— Sin cuenta —" and extracted.get("neto"):
+                _neto_f = extracted.get("neto","")
+                _iva_f  = extracted.get("iva","")
+                _tot_f  = extracted.get("total","")
+                st.markdown(
+                    f"**Asiento estimado:**\n\n"
+                    f"| Cuenta | Debe | Haber |\n"
+                    f"|---|---|---|\n"
+                    f"| {cuenta_sel} | {fmt_ars(_neto_f)} | |\n"
+                    f"| IVA Crédito Fiscal (si aplica) | {fmt_ars(_iva_f)} | |\n"
+                    f"| Proveedor (por pagar) | | {fmt_ars(_tot_f)} |"
+                )
+
             if go:
                 with st.spinner("Procesando..."):
                     try:
@@ -679,25 +701,20 @@ with tab_bills:
                                 st.caption("Proveedor asignado: " + m2[0][1])
                             else:
                                 st.warning(f"'{prov_i}' no encontrado — se creará sin proveedor.")
-                        _found_acct = None
-                        _neto_float = None
-                        try:
-                            _neto_float = float(extracted.get("neto","0") or "0") or None
-                        except Exception:
-                            pass
-                        if cuenta_gasto_i and cuenta_gasto_i.strip():
-                            _accts = search_accounts(models_url, uid, api_key, cuenta_gasto_i.strip(), limit=3)
-                            if _accts:
-                                _found_acct = _accts[0][0]
-                                st.caption("✓ Cuenta: " + _accts[0][1])
-                            else:
-                                st.warning(f"Cuenta '{cuenta_gasto_i}' no encontrada en Odoo.")
+                        # Resolver cuenta seleccionada
+                        account_id_sel = None
+                        if cuenta_sel and cuenta_sel != "— Sin cuenta —":
+                            for _aid, _albl in _bill_accounts:
+                                if _albl == cuenta_sel:
+                                    account_id_sel = _aid
+                                    break
                         move_id = create_vendor_bill(models, uid, api_key,
                             partner_id=partner_id, ref=ref_i,
                             invoice_date=fecha_i or False,
                             invoice_date_due=fecha_vto_i or None,
                             filename=uf.name, file_bytes=file_bytes, mimetype=mimetype,
-                            account_id=_found_acct, amount_neto=_neto_float)
+                            account_id=account_id_sel,
+                            amount_neto=extracted.get("neto") or None)
                         url = f"{ODOO_URL}/web#id={move_id}&model=account.move&view_type=form"
                         st.success(f"✅ Factura creada — [Abrir en Odoo]({url})")
                         st.session_state.history.append({"tipo":"Factura proveedor",
@@ -772,7 +789,7 @@ with tab_orders:
             extracted, _ = {}, ""
             if ext == "pdf":
                 with st.spinner("Leyendo PDF..."):
-                    extracted, _ = extract_pdf_fields(file_bytes, uf.name)
+                    extracted, _ = extract_pdf_fields(file_bytes)
             elif ext in ("jpg","jpeg","png"):
                 st.image(file_bytes, caption="Vista previa", width=380)
             with st.form(key=f"order_form_{uf.name}"):
@@ -916,7 +933,7 @@ if tab_import is not None:
                     mimetype   = MIMETYPES.get(ext, "application/octet-stream")
                     raw_text   = ""
                     if ext == "pdf":
-                        _, raw_text = extract_pdf_fields(file_bytes, uf.name)
+                        _, raw_text = extract_pdf_fields(file_bytes)
                     auto = classify_document(raw_text)
                     default_label = auto["label"] if auto["label"] in TIPO_OPTIONS else "Otro comprobante"
                     with st.expander(f"📎 {uf.name} — {auto['label']}", expanded=True):
@@ -971,7 +988,6 @@ if tab_import is not None:
                         st.rerun()
 
         st.divider()
-
         # ── Landed Cost ──────────────────────────────────────────
         st.markdown("#### 🔗 Crear Landed Cost — Etapa 4 Bis")
         st.caption("`split_method: by_current_cost_price` — CFO Dios estricto · distribuye por valor CFR proporcional")
@@ -1069,7 +1085,7 @@ with tab_history:
             c2.markdown(f"{r['archivo']} — [Ver en Odoo (ID {r['id']})]({r['url']})")
             c3.markdown(r["estado"])
         st.divider()
-        if st.button("🗑️ Limpiar historial", key="limpiar_hist_1"):
+        if st.button("🗑️ Limpiar historial"):
             st.session_state.history = []
             st.rerun()
     else:
