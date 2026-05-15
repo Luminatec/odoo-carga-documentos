@@ -125,8 +125,8 @@ def get_service_connection():
         raise RuntimeError("Faltan ODOO_API_KEY o ODOO_SERVICE_EMAIL en secrets.")
     common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common", allow_none=True)
     uid    = common.authenticate(ODOO_DB, svc_email, api_key, {})
-        if not uid:
-            return None, None, "", f"authenticate() devolvio uid=0 para {svc_email}. API key incorrecta."
+    if not uid:
+        raise RuntimeError(f"uid=0 para {svc_email}. API key inv\u00e1lida o usuario de servicio incorrecto.")
     models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object", allow_none=True)
     return uid, models, api_key
 
