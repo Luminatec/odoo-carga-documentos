@@ -30,11 +30,13 @@ st.markdown("""
   [data-testid="stSidebar"] .stTextInput input {
     background: #222 !important; color: #eee !important; border-color: #444 !important;
   }
-  [data-testid="stSidebar"] .stButton button {
+  [data-testid="stSidebar"] .stButton button,
+  [data-testid="stSidebar"] .stFormSubmitButton button {
     background: #CC0000 !important; color: white !important;
     border: none !important; font-weight: 700 !important;
   }
-  [data-testid="stSidebar"] .stButton button:hover { background: #AA0000 !important; }
+  [data-testid="stSidebar"] .stButton button:hover,
+  [data-testid="stSidebar"] .stFormSubmitButton button:hover { background: #AA0000 !important; }
   .lumi-sidebar-logo { display:flex; align-items:center; gap:8px; padding:6px 0 12px 0; }
   .lumi-logo-text { font-size:1.6rem; font-weight:900; color:#CC0000 !important; letter-spacing:-1px; }
   .lumi-logo-dot  { color:#F5C200 !important; font-size:1.8rem; }
