@@ -373,6 +373,7 @@ def extract_pdf_fields(file_bytes, filename=""):
                 "IMPORTE","TOTAL","VENCIMIENTO","INGRESOS","IVA","MONOTRIBUTO",
                 "RESPONSABLE","INSCRIPTO","ORIGINAL","DUPLICADO","CODIGO","DOMICILIO",
                 "COD.","COD","COND","CONDICION","PAGO","FORMA","TIPO","NUMERO","NRO"}
+        for line in (l.strip() for l in text.split("\n") if l.strip()):
             if len(line) < 4 or re.match(r'^[\d$.,/\s\-()]+$', line) or any(line.upper().startswith(k) for k in skip) or re.search(r"N[\xb0\xba]\s*\d|Cod\.?\s*N[\xb0\xba]", line):
                 continue
             fields["proveedor"] = line[:80]
