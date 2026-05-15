@@ -1,14 +1,13 @@
 """
 Carga de documentos → Odoo
 Luminatec / GPowerByte
-v2 — Módulo Importaciones (Modo Claude · Etapas 0-6)
+v3 — Auth por email/contraseña + API key de servicio central
 """
 
 import streamlit as st
 import xmlrpc.client
 import base64
 import re
-import hashlib
 from io import BytesIO
 
 import pandas as pd
@@ -47,12 +46,20 @@ st.markdown("""
     font-size:0.7rem; font-weight:800; padding:3px 10px;
     border-radius:10px; text-transform:uppercase; letter-spacing:0.5px;
   }
+  .user-chip {
+    display:inline-block; background:#1a1a1a; color:#eee;
+    font-size:0.78rem; padding:4px 12px; border-radius:20px;
+    border:1px solid #444; margin-bottom:4px;
+  }
 </style>
 """, unsafe_allow_html=True)
 
 ODOO_URL = "https://gpowerbyte-luminatec.odoo.com"
 ODOO_DB  = "gpowerbyte-luminatec"
-DEFAULT_PIN_HASH = "b6a25b50b5c8065a2186e952f4bdcba54857070e446b5528919997c56a2858bc"
+
+# Emails con acceso a Importaciones — también configurable en st.secrets["ADMIN_EMAILS"]
+_raw_admin = st.secrets.get("ADMIN_EMAILS", "ivarela@luminatec.com,dario@luminatec.com")
+ADMIN_EMAILS = {e.strip().lower() for e in _raw_admin.split(",")}
 
 MIMETYPES = {
     "pdf":  "application/pdf",
@@ -105,13 +112,43 @@ DECALOGO = [
 ]
 
 
-def odoo_connect(url, db, email, api_key):
-    common = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common", allow_none=True)
-    uid = common.authenticate(db, email, api_key, {})
-    if not uid:
-        raise ValueError("Credenciales inválidas. Verificá el email y la API key.")
-    models = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object", allow_none=True)
-    return uid, models
+# ───────────────────────────────────────────────────
+# CONEXIÓN DE SERVICIO (API key central, cacheada)
+# ───────────────────────────────────────────────────
+@st.cache_resource(show_spinner=False)
+def get_service_connection():
+    """
+    Establece la conexión de servicio usando la API key central de st.secrets.
+    Retorna (service_uid, models_proxy, api_key) o (None, None, "").
+    Requiere en secrets:
+      ODOO_API_KEY      = "la_api_key_del_usuario_de_servicio"
+      ODOO_SERVICE_EMAIL = "servicio@luminatec.com"  (el dueño de esa API key)
+    """
+    api_key   = st.secrets.get("ODOO_API_KEY", "")
+    svc_email = st.secrets.get("ODOO_SERVICE_EMAIL", "")
+    if not api_key or not svc_email:
+        return None, None, ""
+    try:
+        common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common", allow_none=True)
+        uid    = common.authenticate(ODOO_DB, svc_email, api_key, {})
+        if not uid:
+            return None, None, ""
+        models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object", allow_none=True)
+        return uid, models, api_key
+    except Exception:
+        return None, None, ""
+
+def verify_user(email, password):
+    """
+    Verifica que email + contraseña sean válidos en Odoo.
+    Solo autentica — las operaciones usan la API key de servicio.
+    """
+    try:
+        common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common", allow_none=True)
+        uid    = common.authenticate(ODOO_DB, email.strip(), password, {})
+        return bool(uid)
+    except Exception:
+        return False
 
 def call(models, uid, api_key, model, method, args, kw=None):
     return models.execute_kw(ODOO_DB, uid, api_key, model, method, args, kw or {})
@@ -238,19 +275,21 @@ def classify_document(text):
             return cfg
     return {"tipo":"other","label":"Otro comprobante","partner_id":None,"journal_id":10,"doc_type":None}
 
-def check_pin(pin_input):
-    expected = st.secrets.get("ADMIN_PIN_HASH", DEFAULT_PIN_HASH)
-    return hashlib.sha256(pin_input.encode()).hexdigest() == expected
 
+# ───────────────────────────────────────────────────
+# SESSION STATE
+# ───────────────────────────────────────────────────
 DEFAULTS = {
-    "uid": None, "models": None, "api_key": "", "email": "",
-    "history": [], "admin_unlocked": False,
+    "logged_in": False,
+    "user_email": "",
+    "history": [],
     "carpeta_id": "", "carpeta_po": None, "carpeta_bills": [], "carpeta_lc_id": None,
     "etapas": {k: False for k, *_ in ETAPAS_DEF},
 }
 for k, v in DEFAULTS.items():
     if k not in st.session_state:
         st.session_state[k] = v
+
 
 # ═══════════════════════════════════════════════════
 # SIDEBAR
@@ -265,59 +304,51 @@ with st.sidebar:
   <span class="lumi-logo-text">LUMINATEC</span>
 </div>""", unsafe_allow_html=True)
     st.markdown("---")
-    st.markdown("### ⚙️ Conexión a Odoo")
-    st.caption(f"`{ODOO_URL}`")
-    st.caption(f"Base de datos: `{ODOO_DB}`")
-    st.divider()
-    email   = st.text_input("Email",   value=st.session_state.email,   placeholder="tu@empresa.com")
-    api_key = st.text_input("API Key", value=st.session_state.api_key, type="password", placeholder="Pegá tu clave aquí")
-    if st.button("🔌 Conectar", use_container_width=True):
-        if email and api_key:
-            try:
-                with st.spinner("Conectando..."):
-                    uid, models = odoo_connect(ODOO_URL, ODOO_DB, email, api_key)
-                st.session_state.uid     = uid
-                st.session_state.models  = models
-                st.session_state.email   = email
-                st.session_state.api_key = api_key
-                st.rerun()
-            except Exception as e:
-                st.error(str(e))
-        else:
-            st.warning("Completá email y API key.")
-    if st.session_state.uid:
-        st.success("✅ Sesión activa")
-        if st.button("🔓 Desconectar", use_container_width=True):
-            st.session_state.uid    = None
-            st.session_state.models = None
-            st.session_state.admin_unlocked = False
-            st.rerun()
-    st.divider()
-    if not st.session_state.admin_unlocked:
-        with st.expander("🔐 Acceso Importaciones"):
-            pin_inp = st.text_input("PIN", type="password", placeholder="PIN de acceso", key="pin_input", label_visibility="collapsed")
-            if st.button("Desbloquear", use_container_width=True, key="btn_unlock"):
-                if check_pin(pin_inp):
-                    st.session_state.admin_unlocked = True
+
+    if not st.session_state.logged_in:
+        st.markdown("### 🔐 Iniciar sesión")
+        st.caption(f"`{ODOO_URL}`")
+        with st.form("login_form"):
+            email_in = st.text_input("Email", placeholder="tu@luminatec.com")
+            pass_in  = st.text_input("Contraseña", type="password", placeholder="••••••••")
+            login_btn = st.form_submit_button("Ingresar", use_container_width=True)
+        if login_btn:
+            if email_in and pass_in:
+                with st.spinner("Verificando..."):
+                    ok = verify_user(email_in, pass_in)
+                if ok:
+                    st.session_state.logged_in  = True
+                    st.session_state.user_email = email_in.strip().lower()
                     st.rerun()
                 else:
-                    st.error("PIN incorrecto.")
+                    st.error("Email o contraseña incorrectos.")
+            else:
+                st.warning("Completá email y contraseña.")
     else:
-        st.markdown('<span class="admin-badge">🔓 Importaciones activo</span>', unsafe_allow_html=True)
-        st.caption(f"Carpeta: **{st.session_state.carpeta_id or 'sin selección'}**")
-        if st.button("🔒 Bloquear", use_container_width=True, key="btn_lock"):
-            st.session_state.admin_unlocked = False
+        is_admin = st.session_state.user_email in ADMIN_EMAILS
+        st.success("✅ Sesión activa")
+        st.markdown(
+            '<span class="user-chip">👤 ' + st.session_state.user_email + '</span>',
+            unsafe_allow_html=True
+        )
+        if is_admin:
+            st.markdown('<span class="admin-badge">🛳️ Importaciones habilitado</span>',
+                        unsafe_allow_html=True)
+            st.caption(f"Carpeta: **{st.session_state.carpeta_id or 'sin selección'}**")
+        if st.button("🔓 Cerrar sesión", use_container_width=True):
+            st.session_state.logged_in  = False
+            st.session_state.user_email = ""
+            st.session_state.history    = []
+            st.session_state.carpeta_id = ""
+            st.session_state.carpeta_po = None
+            st.session_state.carpeta_bills = []
+            st.session_state.carpeta_lc_id = None
+            st.session_state.etapas = {k: False for k, *_ in ETAPAS_DEF}
             st.rerun()
-    st.divider()
-    with st.expander("¿Cómo genero la API Key?"):
-        st.markdown("""
-1. Odoo → **avatar** → **Mi perfil**
-2. Pestaña **Seguridad de la cuenta**
-3. **Claves API** → **Nueva clave API**
-4. Copiá la clave y pegala arriba.
 
-⚠️ Se muestra **una sola vez**.
-""")
+    st.divider()
+    st.caption(f"Base de datos: `{ODOO_DB}`")
+
 
 # ═══════════════════════════════════════════════════
 # MAIN
@@ -325,26 +356,37 @@ with st.sidebar:
 st.markdown('<h1 class="main-title">🛒 <span>LUMINA</span>TEC · Carga Odoo</h1>', unsafe_allow_html=True)
 st.caption("Facturas de proveedores, pedidos de clientes e importaciones — todo en un lugar.")
 
-if not st.session_state.uid:
-    st.info("👈 Conectate a Odoo desde el panel lateral para empezar.")
+if not st.session_state.logged_in:
+    st.info("👈 Iniciá sesión desde el panel lateral para empezar.")
     st.stop()
 
-uid        = st.session_state.uid
-models     = st.session_state.models
-api_key    = st.session_state.api_key
+# Conexión de servicio (API key central)
+svc_uid, svc_models, svc_api_key = get_service_connection()
+if not svc_uid:
+    st.error("⚠️ La app no está configurada correctamente. "
+             "Falta `ODOO_API_KEY` o `ODOO_SERVICE_EMAIL` en los secrets de Streamlit. "
+             "Contactá al administrador.")
+    st.stop()
+
+uid        = svc_uid
+models     = svc_models
+api_key    = svc_api_key
 models_url = f"{ODOO_URL}/xmlrpc/2/object"
 
+is_admin = st.session_state.user_email in ADMIN_EMAILS
+
 _tabs = ["🧾 Facturas de proveedores", "📦 Pedidos de clientes"]
-if st.session_state.admin_unlocked:
+if is_admin:
     _tabs.append("🛳️ Importaciones")
 _tabs.append("📋 Historial de sesión")
 _tab_objs = st.tabs(_tabs)
 
-if st.session_state.admin_unlocked:
+if is_admin:
     tab_bills, tab_orders, tab_import, tab_history = _tab_objs
 else:
     tab_bills, tab_orders, tab_history = _tab_objs
     tab_import = None
+
 
 # ═══════════════════════════════════════════════════
 # TAB 1 — FACTURAS DE PROVEEDORES
@@ -439,6 +481,7 @@ with tab_bills:
                             "archivo":uf.name,"id":move_id,"url":url,"estado":"✅"})
                     except Exception as e:
                         st.error(f"❌ {e}")
+
 
 # ═══════════════════════════════════════════════════
 # TAB 2 — PEDIDOS DE CLIENTES
@@ -544,6 +587,7 @@ with tab_orders:
                             "archivo":uf.name,"id":order_id,"url":url,"estado":"✅"})
                     except Exception as e:
                         st.error(f"❌ {e}")
+
 
 # ═══════════════════════════════════════════════════
 # TAB 3 — IMPORTACIONES (ADMIN)
