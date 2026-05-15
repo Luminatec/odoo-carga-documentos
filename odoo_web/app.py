@@ -173,6 +173,14 @@ def search_partners(models_url, uid, api_key, name, limit=8):
         {"fields": ["id", "name"], "limit": limit, "order": "name asc"})
     return [(r["id"], r["name"]) for r in rows]
 
+@st.cache_data(ttl=300, show_spinner=False)
+def search_accounts(models_url, uid, api_key, query, limit=8):
+    m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+    rows = m.execute_kw(ODOO_DB, uid, api_key, "account.account", "search_read",
+        [["|", ("name", "ilike", query), ("code", "ilike", query)]],
+        {"fields": ["id", "code", "name"], "limit": limit, "order": "code asc"})
+    return [(r["id"], f"{r['code']} · {r['name']}") for r in rows]
+
 @st.cache_data(ttl=120, show_spinner=False)
 def search_purchase_orders(models_url, uid, api_key, query):
     m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
@@ -205,7 +213,7 @@ def attach_file(models, uid, api_key, res_model, res_id, filename, file_bytes, m
 
 def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                        filename, file_bytes, mimetype, journal_id=None, doc_type_id=None,
-                       invoice_date_due=None):
+                       invoice_date_due=None, account_id=None, amount_neto=None):
     vals = {"move_type": "in_invoice"}
     if partner_id:       vals["partner_id"]   = partner_id
     if ref:              vals["ref"]          = ref
@@ -213,6 +221,13 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
     if invoice_date_due: vals["invoice_date_due"] = invoice_date_due
     if journal_id:       vals["journal_id"]   = journal_id
     if doc_type_id:      vals["l10n_latam_document_type_id"] = doc_type_id
+    if account_id and amount_neto:
+        vals["invoice_line_ids"] = [(0, 0, {
+            "name": ref or "Factura proveedor",
+            "account_id": account_id,
+            "quantity": 1.0,
+            "price_unit": float(amount_neto),
+        })]
     move_id = call(models, uid, api_key, "account.move", "create", [vals])
     if file_bytes:
         attach_file(models, uid, api_key, "account.move", move_id, filename, file_bytes, mimetype)
@@ -286,7 +301,7 @@ def extract_pdf_fields(file_bytes, filename=""):
     if not text.strip():
         return {}, ""
     fields = {"numero": "", "fecha": "", "fecha_iso": "", "fecha_vencimiento": "",
-              "fecha_vto_iso": "", "proveedor": "", "total": "", "neto": "", "cuit": ""}
+              "fecha_vto_iso": "", "proveedor": "", "total": "", "neto": "", "iva": "", "cuit": ""}
     # Numero de comprobante — formato AFIP: XXXXX-XXXXXXXX
     num_pats = [
         r"(?:Nro\.?\s*Comp\.?(?:\s*\(Nro\.?\s*Orig\.?\))?|N[°º]\s*Comp\.?|Comprobante\s*N[°º]?)[:\s]*(\d{4,5}[-\s]\d{6,8})",
@@ -323,10 +338,12 @@ def extract_pdf_fields(file_bytes, filename=""):
             fields["fecha"] = m.group(1)
             fields["fecha_iso"] = parse_ar_date(fields["fecha"])
     # Fecha de vencimiento de pago (NO confundir con vencimiento CAE)
+    # Vto. de PAGO — solo etiquetas que mencionen "pago" explícitamente
+    # ("Fecha de Vto." del CAE/CAEA no es fecha de pago)
     vto_pats = [
         r"(?:Fecha\s+de\s+Venc(?:imiento)?\s+(?:del?\s+)?[Pp]ago|Fecha\s+Vto\.?\s*[Pp]ago)[:\s]+(\d{1,2}/\d{1,2}/\d{4})",
         r"Venc(?:imiento)?\s+de\s+[Pp]ago[:\s]+(\d{1,2}/\d{1,2}/\d{4})",
-        r"(?:Fecha\s+de\s+)?Venc(?:imiento)?[:\s]+(\d{1,2}/\d{1,2}/\d{4})(?!.{0,40}(?:CAE|C\.A\.E))",
+        r"Vto\.?\s+[Ff]actura[:\s]+(\d{1,2}/\d{1,2}/\d{4})",
     ]
     for pat in vto_pats:
         m = re.search(pat, text, re.IGNORECASE | re.DOTALL)
@@ -334,18 +351,7 @@ def extract_pdf_fields(file_bytes, filename=""):
             fields["fecha_vencimiento"] = m.group(1).strip()
             fields["fecha_vto_iso"] = parse_ar_date(fields["fecha_vencimiento"])
             break
-    if not fields["fecha_vencimiento"] and fields["fecha"]:
-        all_dates = re.findall(r"\b(\d{1,2}/\d{1,2}/\d{4})\b", text)
-        seen = []
-        for d in all_dates:
-            if d not in seen:
-                seen.append(d)
-        cae_block = re.search(r"C\.?A\.?E\.?.*?(\d{1,2}/\d{1,2}/\d{4})", text, re.IGNORECASE | re.DOTALL)
-        cae_date = cae_block.group(1) if cae_block else None
-        candidates = [d for d in seen if d != fields["fecha"] and d != cae_date]
-        if candidates:
-            fields["fecha_vencimiento"] = candidates[0]
-            fields["fecha_vto_iso"] = parse_ar_date(candidates[0])
+    # Sin fallback — "Fecha de Vto." del CAE no es vencimiento de pago
     # Importe total — formato argentino: punto=miles, coma=decimales
     total_pats = [
         r"(?:PESOS\s+)?TOTAL\s*:\s*([\d.,]+)",
@@ -411,6 +417,12 @@ def extract_pdf_fields(file_bytes, filename=""):
     cuit_m = re.search(r'(?:CUIT|C\.U\.I\.T)[:\s.]*?(\d{2}[-\s]?\d{8}[-\s]?\d)', text, re.IGNORECASE)
     if cuit_m:
         fields["cuit"] = re.sub(r'[\s\-]', '', cuit_m.group(1))
+    # IVA = total - neto
+    try:
+        if fields["total"] and fields["neto"]:
+            fields["iva"] = str(round(float(fields["total"]) - float(fields["neto"]), 2))
+    except Exception:
+        pass
     return fields, text
 
 def classify_document(text):
@@ -618,11 +630,42 @@ with tab_bills:
                 fecha_vto_i = c2.text_input("Fecha vencimiento (AAAA-MM-DD)",
                                 value=extracted.get("fecha_vto_iso",""),
                                 placeholder="2026-05-20")
-                c3, c4 = st.columns(2)
-                c3.text_input("Total c/imp. (ref.)", value=fmt_ars(extracted.get("total","")), disabled=True)
-                c4.text_input("Neto gravado (ref.)", value=fmt_ars(extracted.get("neto","")), disabled=True)
+                _ca, _cb, _cc = st.columns(3)
+                _ca.text_input("Neto gravado (ref.)", value=fmt_ars(extracted.get("neto","")), disabled=True)
+                _cb.text_input("IVA (ref.)", value=fmt_ars(extracted.get("iva","")), disabled=True)
+                _cc.text_input("Total c/imp. (ref.)", value=fmt_ars(extracted.get("total","")), disabled=True)
                 if extracted.get("cuit"):
                     st.text_input("CUIT emisor", value=extracted.get("cuit",""), disabled=True)
+                with st.expander("📒 Cuentas contables", expanded=True):
+                    _neto_v  = 0.0
+                    _total_v = 0.0
+                    try:
+                        _neto_v  = float(extracted.get("neto","0")  or "0")
+                        _total_v = float(extracted.get("total","0") or "0")
+                    except Exception:
+                        pass
+                    _iva_v = round(_total_v - _neto_v, 2)
+                    cga, cgb = st.columns(2)
+                    cuenta_gasto_i = cga.text_input(
+                        "Cuenta de gasto / activo",
+                        placeholder="Ej: 5.1.01  Gastos operativos",
+                        key=f"cta_g_{uf.name}")
+                    cgb.text_input(
+                        "Cuenta proveedores",
+                        value="Proveedores / Cuentas a pagar",
+                        disabled=True,
+                        key=f"cta_p_{uf.name}")
+                    if _neto_v or _total_v:
+                        _gasto_lbl = cuenta_gasto_i.strip() if cuenta_gasto_i and cuenta_gasto_i.strip() else "⚠ Cuenta de gasto (completar)"
+                        _prov_lbl  = prov_i.strip()         if prov_i  and prov_i.strip()         else "Proveedor"
+                        st.markdown(
+                            "**Asiento estimado:**\n\n"
+                            "| Cuenta | Debe | Haber |\n"
+                            "|---|---:|---:|\n"
+                            f"| {_gasto_lbl} | {fmt_ars(str(_neto_v))} | |\n"
+                            f"| IVA Crédito Fiscal 21% | {fmt_ars(str(_iva_v))} | |\n"
+                            f"| **Proveedores — {_prov_lbl}** | | **{fmt_ars(str(_total_v))}** |"
+                        )
                 st.text_area("Notas internas", height=55)
                 go = st.form_submit_button("⬆️ Cargar en Odoo", use_container_width=True)
             if go:
@@ -636,11 +679,25 @@ with tab_bills:
                                 st.caption("Proveedor asignado: " + m2[0][1])
                             else:
                                 st.warning(f"'{prov_i}' no encontrado — se creará sin proveedor.")
+                        _found_acct = None
+                        _neto_float = None
+                        try:
+                            _neto_float = float(extracted.get("neto","0") or "0") or None
+                        except Exception:
+                            pass
+                        if cuenta_gasto_i and cuenta_gasto_i.strip():
+                            _accts = search_accounts(models_url, uid, api_key, cuenta_gasto_i.strip(), limit=3)
+                            if _accts:
+                                _found_acct = _accts[0][0]
+                                st.caption("✓ Cuenta: " + _accts[0][1])
+                            else:
+                                st.warning(f"Cuenta '{cuenta_gasto_i}' no encontrada en Odoo.")
                         move_id = create_vendor_bill(models, uid, api_key,
                             partner_id=partner_id, ref=ref_i,
                             invoice_date=fecha_i or False,
                             invoice_date_due=fecha_vto_i or None,
-                            filename=uf.name, file_bytes=file_bytes, mimetype=mimetype)
+                            filename=uf.name, file_bytes=file_bytes, mimetype=mimetype,
+                            account_id=_found_acct, amount_neto=_neto_float)
                         url = f"{ODOO_URL}/web#id={move_id}&model=account.move&view_type=form"
                         st.success(f"✅ Factura creada — [Abrir en Odoo]({url})")
                         st.session_state.history.append({"tipo":"Factura proveedor",
