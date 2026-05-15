@@ -1,33 +1,122 @@
 """
 Carga de documentos → Odoo
 Luminatec / GPowerByte
+v2 — Módulo Importaciones (Modo Claude · Etapas 0-6)
 """
 
 import streamlit as st
 import xmlrpc.client
 import base64
 import re
+import hashlib
 from io import BytesIO
 
 import pandas as pd
 
 # ─── Page config ──────────────────────────────────────────────
 st.set_page_config(
-    page_title="Carga Odoo · Luminatec",
-    page_icon="📄",
+    page_title="Luminatec · Odoo",
+    page_icon="🛒",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
+# ─── CSS / Branding ───────────────────────────────────────────
 st.markdown("""
 <style>
-    [data-testid="stFileUploader"] { border: 2px dashed #ccc; border-radius: 10px; padding: 8px; }
+  /* Sidebar oscuro con branding */
+  [data-testid="stSidebar"] {
+    background: #111111 !important;
+  }
+  [data-testid="stSidebar"] label,
+  [data-testid="stSidebar"] .stMarkdown,
+  [data-testid="stSidebar"] p,
+  [data-testid="stSidebar"] small,
+  [data-testid="stSidebar"] span {
+    color: #eeeeee !important;
+  }
+  [data-testid="stSidebar"] .stTextInput input {
+    background: #222 !important;
+    color: #eee !important;
+    border-color: #444 !important;
+  }
+  [data-testid="stSidebar"] .stButton button {
+    background: #CC0000 !important;
+    color: white !important;
+    border: none !important;
+    font-weight: 700 !important;
+  }
+  [data-testid="stSidebar"] .stButton button:hover {
+    background: #AA0000 !important;
+  }
+
+  /* Logo Luminatec en sidebar */
+  .lumi-sidebar-logo {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 0 12px 0;
+  }
+  .lumi-logo-text {
+    font-size: 1.6rem;
+    font-weight: 900;
+    color: #CC0000 !important;
+    letter-spacing: -1px;
+    line-height: 1;
+  }
+  .lumi-logo-dot {
+    color: #F5C200 !important;
+    font-size: 1.8rem;
+  }
+
+  /* Título principal */
+  .main-title {
+    font-size: 1.9rem;
+    font-weight: 900;
+    color: #CC0000;
+    letter-spacing: -1px;
+  }
+  .main-title span { color: #F5C200; }
+
+  /* File uploader */
+  [data-testid="stFileUploader"] {
+    border: 2px dashed #CC000033;
+    border-radius: 10px;
+    padding: 8px;
+  }
+
+  /* Badge admin */
+  .admin-badge {
+    display: inline-block;
+    background: #F5C200;
+    color: #111;
+    font-size: 0.7rem;
+    font-weight: 800;
+    padding: 3px 10px;
+    border-radius: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  /* Etapas */
+  .etapa-ok   { color: #198754; font-weight: 700; }
+  .etapa-pend { color: #aaa; }
+  .etapa-card {
+    background: #f8f8f8;
+    border-left: 4px solid #CC0000;
+    padding: 8px 14px;
+    border-radius: 6px;
+    margin-bottom: 6px;
+  }
 </style>
 """, unsafe_allow_html=True)
 
 # ─── Configuración fija ───────────────────────────────────────
 ODOO_URL = "https://gpowerbyte-luminatec.odoo.com"
 ODOO_DB  = "gpowerbyte-luminatec"
+
+# PIN: SHA-256 de "IMPORT2026" — sobreescribible via st.secrets["ADMIN_PIN_HASH"]
+DEFAULT_PIN_HASH = "b6a25b50b5c8065a2186e952f4bdcba54857070e446b5528919997c56a2858bc"
 
 MIMETYPES = {
     "pdf":  "application/pdf",
@@ -37,6 +126,58 @@ MIMETYPES = {
     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "xls":  "application/vnd.ms-excel",
 }
+
+# ─── Partners conocidos (Modo Claude) ─────────────────────────
+PARTNERS_IMPORT = {
+    "PETDUR CORPORATION":  {"id": 49328, "journal_id": 71, "tipo": "petdur",  "doc_type": None},
+    "AFIP":                {"id": 9,     "journal_id": 10, "tipo": "di_afip", "doc_type": 66},
+    "TRICE TRANSPORT":     {"id": 48825, "journal_id": 10, "tipo": "nac",     "doc_type": None},
+    "TERMINAL 4 SA":       {"id": 48828, "journal_id": 10, "tipo": "nac",     "doc_type": None},
+    "MUNDO COMEX":         {"id": 48826, "journal_id": 10, "tipo": "nac",     "doc_type": None},
+    "SENASA":              {"id": 48827, "journal_id": 10, "tipo": "nac",     "doc_type": None},
+}
+
+# Productos Landed Cost (expense → Cuenta Puente 3284)
+LC_PRODUCTS = {
+    20241: "CMV - Agente de carga",
+    20242: "CMV - Honorarios despachante",
+    20243: "CMV - Otros",
+    20244: "CMV - Terminal portuaria",
+    20245: "CMV - Tasas y Derechos",
+    20276: "Despacho Cta Transitoria 21%",
+    20277: "Despacho Cta Transitoria 10,5%",
+}
+
+ETAPAS_DEF = [
+    ("0",    "Etapa 0",    "OC PETDUR confirmada y bloqueada"),
+    ("1",    "Etapa 1",    "Bill PETDUR posted (DR 3283 / CR Prov USD)"),
+    ("2",    "Etapa 2",    "DI AFIP posted + OP automática BA#26"),
+    ("2a",   "Etapa 2a",   "Bills de nacionalización (TRICE, T4, MUNDO COMEX...)"),
+    ("2.5",  "Etapa 2.5",  "Reclasificación Tránsito si TC factura ≠ TC despacho"),
+    ("3",    "Etapa 3",    "Picking IN validado → WH/PreIngreso"),
+    ("T3.5", "Etapa T3.5", "Reclasificación Tránsito → Cuenta Puente"),
+    ("4",    "Etapa 4 Bis","Landed Cost validado (by_current_cost_price)"),
+    ("5",    "Etapa 5",    "Internal Transfer → WH/Disponible"),
+    ("6",    "Etapa 6",    "Acta CFO firmada — 15 checks Decálogo"),
+]
+
+DECALOGO = [
+    "Cuenta Puente Recepciones (3284) cohorte = $0",
+    "Mercadería en Tránsito (3283) cohorte = $0",
+    "BAs #8 y #11 sin línea `standard_price` (verificado hoy)",
+    "Productos LC 20241-20245 con expense_id = 3284",
+    "Productos LC 20276-20277 con expense_id = 3284",
+    "Todos los LCs usaron split_method = by_current_cost_price",
+    "❌ NO se usó by_quantity en ningún LC",
+    "❌ NO se crearon asientos correctivos preventivos",
+    "Costo USD/u del lote coincide con modelo CFO (Δ < $0.10 USD/u)",
+    "WAC ponderado verificado en libro mayor estándar Odoo UI",
+    "Suppliers AFIP residual = deuda real del DI (Derechos+Tasas+IVA real)",
+    "BA #23 actualizó x_studio_ppp al validar el Landed Cost",
+    "Picking IN en estado Done / WH/PreIngreso confirmado",
+    "Internal Transfer ejecutado → stock en WH/Disponible",
+    "Referencia LUMI_XXX en todos los asientos de la cohorte",
+]
 
 # ─── Odoo helpers ─────────────────────────────────────────────
 def odoo_connect(url, db, email, api_key):
@@ -63,6 +204,39 @@ def search_partners(models_url, uid, api_key, name, limit=8):
     return [(r["id"], r["name"]) for r in rows]
 
 
+@st.cache_data(ttl=120, show_spinner=False)
+def search_purchase_orders(models_url, uid, api_key, query):
+    m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+    rows = m.execute_kw(
+        ODOO_DB, uid, api_key, "purchase.order", "search_read",
+        [[("name", "ilike", query), ("state", "in", ["purchase", "done"])]],
+        {"fields": ["id", "name", "partner_id", "date_order", "amount_total"], "limit": 10},
+    )
+    return rows
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_pickings_for_po(models_url, uid, api_key, po_id):
+    m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+    rows = m.execute_kw(
+        ODOO_DB, uid, api_key, "stock.picking", "search_read",
+        [[("purchase_id", "=", po_id), ("state", "!=", "cancel")]],
+        {"fields": ["id", "name", "state", "location_dest_id"], "limit": 10},
+    )
+    return rows
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_bills_for_carpeta(models_url, uid, api_key, carpeta_ref):
+    m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+    rows = m.execute_kw(
+        ODOO_DB, uid, api_key, "account.move", "search_read",
+        [[("move_type", "=", "in_invoice"), ("ref", "ilike", carpeta_ref), ("state", "!=", "cancel")]],
+        {"fields": ["id", "name", "partner_id", "invoice_date", "amount_total", "state", "journal_id"], "limit": 50},
+    )
+    return rows
+
+
 def attach_file(models, uid, api_key, res_model, res_id, filename, file_bytes, mimetype):
     call(models, uid, api_key, "ir.attachment", "create", [{
         "name": filename,
@@ -73,17 +247,35 @@ def attach_file(models, uid, api_key, res_model, res_id, filename, file_bytes, m
     }])
 
 
-def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date, filename, file_bytes, mimetype):
+def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
+                       filename, file_bytes, mimetype,
+                       journal_id=None, doc_type_id=None):
     vals = {"move_type": "in_invoice"}
-    if partner_id:
-        vals["partner_id"] = partner_id
-    if ref:
-        vals["ref"] = ref
-    if invoice_date:
-        vals["invoice_date"] = invoice_date
+    if partner_id:  vals["partner_id"]  = partner_id
+    if ref:         vals["ref"]         = ref
+    if invoice_date: vals["invoice_date"] = invoice_date
+    if journal_id:  vals["journal_id"]  = journal_id
+    if doc_type_id: vals["l10n_latam_document_type_id"] = doc_type_id
     move_id = call(models, uid, api_key, "account.move", "create", [vals])
-    attach_file(models, uid, api_key, "account.move", move_id, filename, file_bytes, mimetype)
+    if file_bytes:
+        attach_file(models, uid, api_key, "account.move", move_id, filename, file_bytes, mimetype)
     return move_id
+
+
+def create_landed_cost(models, uid, api_key, picking_ids, cost_lines):
+    """
+    cost_lines: list of {"product_id": int, "price_unit": float}
+    split_method: by_current_cost_price (CFO Dios estricto)
+    """
+    vals = {
+        "picking_ids": [(4, pid) for pid in picking_ids],
+        "cost_lines": [(0, 0, {
+            "product_id": line["product_id"],
+            "price_unit": line["price_unit"],
+            "split_method": "by_current_cost_price",
+        }) for line in cost_lines],
+    }
+    return call(models, uid, api_key, "stock.landed.cost", "create", [vals])
 
 
 def create_sale_order(models, uid, api_key, partner_id, note, lines, filename, file_bytes, mimetype):
@@ -156,8 +348,38 @@ def extract_pdf_fields(file_bytes):
     return fields, text
 
 
+def classify_document(text):
+    """Auto-clasifica el tipo de documento por texto extraído del PDF."""
+    tu = text.upper()
+    rules = [
+        ("PETDUR",                    {"tipo": "petdur",  "label": "Bill PETDUR (Etapa 1)",         "partner_id": 49328, "journal_id": 71, "doc_type": None}),
+        ("DECLARACI",                  {"tipo": "di_afip", "label": "DI AFIP (Etapa 2)",             "partner_id": 9,     "journal_id": 10, "doc_type": 66}),
+        ("33693450239",                {"tipo": "di_afip", "label": "DI AFIP (Etapa 2)",             "partner_id": 9,     "journal_id": 10, "doc_type": 66}),
+        ("TRICE",                      {"tipo": "nac",     "label": "Bill TRICE (Etapa 2a)",         "partner_id": 48825, "journal_id": 10, "doc_type": None}),
+        ("TERMINAL 4",                 {"tipo": "nac",     "label": "Bill Terminal 4 (Etapa 2a)",    "partner_id": 48828, "journal_id": 10, "doc_type": None}),
+        ("MUNDO COMEX",                {"tipo": "nac",     "label": "Bill Mundo Comex (Etapa 2a)",   "partner_id": 48826, "journal_id": 10, "doc_type": None}),
+        ("SENASA",                     {"tipo": "nac",     "label": "Bill SENASA (Etapa 2a)",        "partner_id": 48827, "journal_id": 10, "doc_type": None}),
+    ]
+    for keyword, cfg in rules:
+        if keyword in tu:
+            return cfg
+    return {"tipo": "other", "label": "Otro comprobante", "partner_id": None, "journal_id": 10, "doc_type": None}
+
+
+def check_pin(pin_input):
+    expected = st.secrets.get("ADMIN_PIN_HASH", DEFAULT_PIN_HASH)
+    return hashlib.sha256(pin_input.encode()).hexdigest() == expected
+
+
 # ─── Session state ────────────────────────────────────────────
-for k, v in [("uid", None), ("models", None), ("api_key", ""), ("email", ""), ("history", [])]:
+DEFAULTS = {
+    "uid": None, "models": None, "api_key": "", "email": "",
+    "history": [], "admin_unlocked": False,
+    "carpeta_id": "", "carpeta_po": None,
+    "carpeta_bills": [], "carpeta_lc_id": None,
+    "etapas": {k: False for k, *_ in ETAPAS_DEF},
+}
+for k, v in DEFAULTS.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
@@ -166,12 +388,25 @@ for k, v in [("uid", None), ("models", None), ("api_key", ""), ("email", ""), ("
 # SIDEBAR
 # ═══════════════════════════════════════════════════
 with st.sidebar:
+    # ─── Logo ────────────────────────────────────────────────
+    import os
+    if os.path.exists("logo.png"):
+        st.image("logo.png", width=180)
+    else:
+        st.markdown("""
+<div class="lumi-sidebar-logo">
+  <span class="lumi-logo-dot">🛒</span>
+  <span class="lumi-logo-text">LUMINATEC</span>
+</div>""", unsafe_allow_html=True)
+    st.markdown("---")
+
+    # ─── Conexión ─────────────────────────────────────────────
     st.markdown("### ⚙️ Conexión a Odoo")
     st.caption(f"`{ODOO_URL}`")
     st.caption(f"Base de datos: `{ODOO_DB}`")
     st.divider()
 
-    email   = st.text_input("Email", value=st.session_state.email,   placeholder="tu@empresa.com")
+    email   = st.text_input("Email",   value=st.session_state.email,   placeholder="tu@empresa.com")
     api_key = st.text_input("API Key", value=st.session_state.api_key, type="password", placeholder="Pegá tu clave aquí")
 
     if st.button("🔌 Conectar", use_container_width=True):
@@ -183,7 +418,7 @@ with st.sidebar:
                 st.session_state.models  = models
                 st.session_state.email   = email
                 st.session_state.api_key = api_key
-                st.success(f"✅ Conectado")
+                st.rerun()
             except Exception as e:
                 st.error(str(e))
         else:
@@ -194,48 +429,72 @@ with st.sidebar:
         if st.button("🔓 Desconectar", use_container_width=True):
             st.session_state.uid    = None
             st.session_state.models = None
+            st.session_state.admin_unlocked = False
+            st.rerun()
+
+    st.divider()
+
+    # ─── Acceso Importaciones (PIN) ───────────────────────────
+    if not st.session_state.admin_unlocked:
+        with st.expander("🔐 Acceso Importaciones"):
+            pin_inp = st.text_input("PIN", type="password", placeholder="••••••••", key="pin_input", label_visibility="collapsed")
+            if st.button("Desbloquear", use_container_width=True, key="btn_unlock"):
+                if check_pin(pin_inp):
+                    st.session_state.admin_unlocked = True
+                    st.rerun()
+                else:
+                    st.error("PIN incorrecto.")
+    else:
+        st.markdown('<span class="admin-badge">🔓 Importaciones activo</span>', unsafe_allow_html=True)
+        st.caption(f"Carpeta: **{st.session_state.carpeta_id or 'sin selección'}**")
+        if st.button("🔒 Bloquear", use_container_width=True, key="btn_lock"):
+            st.session_state.admin_unlocked = False
             st.rerun()
 
     st.divider()
     with st.expander("¿Cómo genero la API Key?"):
         st.markdown("""
-1. Abrí Odoo y hacé clic en tu **avatar** (arriba a la derecha)
-2. Seleccioná **Mi perfil**
-3. Pestaña **Seguridad de la cuenta**
-4. Sección **Claves API** → **Nueva clave API**
-5. Poné un nombre (ej. *Cowork*), copiá la clave y pegala arriba
+1. Odoo → **avatar** → **Mi perfil**
+2. Pestaña **Seguridad de la cuenta**
+3. **Claves API** → **Nueva clave API**
+4. Copiá la clave y pegala arriba.
 
-⚠️ La clave se muestra **una sola vez**.
+⚠️ Se muestra **una sola vez**.
 """)
 
 
 # ═══════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════
-st.title("📄 Carga de documentos → Odoo")
-st.caption("Facturas de proveedores y pedidos de clientes desde PDF, imagen o Excel — todo en un lugar.")
+st.markdown('<h1 class="main-title">🛒 <span>LUMINA</span>TEC · Carga Odoo</h1>', unsafe_allow_html=True)
+st.caption("Facturas de proveedores, pedidos de clientes e importaciones — todo en un lugar.")
 
 if not st.session_state.uid:
     st.info("👈 Conectate a Odoo desde el panel lateral para empezar.")
     st.stop()
 
-uid     = st.session_state.uid
-models  = st.session_state.models
-api_key = st.session_state.api_key
+uid        = st.session_state.uid
+models     = st.session_state.models
+api_key    = st.session_state.api_key
 models_url = f"{ODOO_URL}/xmlrpc/2/object"
 
-tab_bills, tab_orders, tab_history = st.tabs([
-    "🧾 Facturas de proveedores",
-    "📦 Pedidos de clientes",
-    "📋 Historial de sesión",
-])
+# Tabs dinámicos (Importaciones solo si admin)
+_tabs = ["🧾 Facturas de proveedores", "📦 Pedidos de clientes"]
+if st.session_state.admin_unlocked:
+    _tabs.append("🛳️ Importaciones")
+_tabs.append("📋 Historial de sesión")
+
+_tab_objs = st.tabs(_tabs)
+
+if st.session_state.admin_unlocked:
+    tab_bills, tab_orders, tab_import, tab_history = _tab_objs
+else:
+    tab_bills, tab_orders, tab_history = _tab_objs
+    tab_import = None
 
 
-# ───────────────────────────────────────────────────
-# Helper: partner selector widget
-# ───────────────────────────────────────────────────
+# ─── Helper: partner selector ─────────────────────────────────
 def partner_selector(label, default_name, key_prefix):
-    """Returns (partner_id or None, partner_name)."""
     name = st.text_input(label, value=default_name[:60] if default_name else "", key=f"{key_prefix}_name")
     partner_id = None
     if name:
@@ -243,14 +502,10 @@ def partner_selector(label, default_name, key_prefix):
             matches = search_partners(models_url, uid, api_key, name)
         if matches:
             options = {m[1]: m[0] for m in matches}
-            chosen = st.selectbox(
-                "Seleccioná el registro encontrado en Odoo",
-                list(options.keys()),
-                key=f"{key_prefix}_sel",
-            )
+            chosen  = st.selectbox("Seleccioná el registro en Odoo", list(options.keys()), key=f"{key_prefix}_sel")
             partner_id = options[chosen]
         else:
-            st.warning(f"'{name}' no encontrado en Odoo. Se creará la factura sin asociar proveedor.")
+            st.warning(f"'{name}' no encontrado en Odoo.")
     return partner_id, name
 
 
@@ -265,7 +520,6 @@ with tab_bills:
         accept_multiple_files=True,
         key="bills_upload",
     )
-
     if not files:
         st.caption("Subí uno o más archivos para empezar.")
 
@@ -276,7 +530,7 @@ with tab_bills:
         mimetype   = MIMETYPES.get(ext, "application/octet-stream")
         st.markdown(f"**📎 {uf.name}**  `{ext.upper()}`  ({len(file_bytes)//1024} KB)")
 
-        # ── Excel: lote de facturas ──────────────────────────────
+        # Excel
         if ext in ("xlsx", "xls"):
             try:
                 df = pd.read_excel(BytesIO(file_bytes), dtype=str).fillna("")
@@ -284,44 +538,35 @@ with tab_bills:
             except Exception as e:
                 st.error(f"No se pudo leer el Excel: {e}")
                 continue
-
             st.caption(f"📊 {len(df)} filas · Columnas: {', '.join(df.columns)}")
             st.dataframe(df.head(10), use_container_width=True, height=180)
-
             cols_opts = ["(ninguna)"] + list(df.columns)
             c1, c2, c3, c4 = st.columns(4)
-            col_prov  = c1.selectbox("Proveedor",   cols_opts, key=f"bp_{uf.name}")
-            col_fecha = c2.selectbox("Fecha",        cols_opts, key=f"bf_{uf.name}")
-            col_ref   = c3.selectbox("N° Factura",  cols_opts, key=f"br_{uf.name}")
-            col_total = c4.selectbox("Total (info)", cols_opts, key=f"bt_{uf.name}")
-
+            col_prov  = c1.selectbox("Proveedor",    cols_opts, key=f"bp_{uf.name}")
+            col_fecha = c2.selectbox("Fecha",         cols_opts, key=f"bf_{uf.name}")
+            col_ref   = c3.selectbox("N° Factura",   cols_opts, key=f"br_{uf.name}")
+            col_total = c4.selectbox("Total (info)",  cols_opts, key=f"bt_{uf.name}")
             if st.button(f"⬆️ Cargar {len(df)} facturas en Odoo", key=f"load_bills_xls_{uf.name}"):
                 bar = st.progress(0)
                 ok, errs = 0, []
                 for i, row in df.iterrows():
                     try:
-                        prov_name = row.get(col_prov, "") if col_prov != "(ninguna)" else ""
-                        fecha     = row.get(col_fecha, "") if col_fecha != "(ninguna)" else ""
-                        ref       = row.get(col_ref, "")   if col_ref   != "(ninguna)" else ""
+                        prov_name  = row.get(col_prov, "")  if col_prov  != "(ninguna)" else ""
+                        fecha      = row.get(col_fecha, "") if col_fecha != "(ninguna)" else ""
+                        ref        = row.get(col_ref, "")   if col_ref   != "(ninguna)" else ""
                         partner_id = False
                         if prov_name:
-                            m = search_partners(models_url, uid, api_key, prov_name, limit=1)
-                            partner_id = m[0][0] if m else False
-                        move_id = create_vendor_bill(
-                            models, uid, api_key,
-                            partner_id=partner_id,
-                            ref=str(ref),
+                            m2 = search_partners(models_url, uid, api_key, prov_name, limit=1)
+                            partner_id = m2[0][0] if m2 else False
+                        move_id = create_vendor_bill(models, uid, api_key,
+                            partner_id=partner_id, ref=str(ref),
                             invoice_date=str(fecha) if fecha else False,
                             filename=f"{uf.name}_fila{i+1}.pdf",
-                            file_bytes=file_bytes,
-                            mimetype=mimetype,
-                        )
+                            file_bytes=file_bytes, mimetype=mimetype)
                         ok += 1
-                        odoo_url = f"{ODOO_URL}/web#id={move_id}&model=account.move&view_type=form"
-                        st.session_state.history.append({
-                            "tipo": "Factura proveedor", "archivo": f"{uf.name} · fila {i+1}",
-                            "id": move_id, "url": odoo_url, "estado": "✅",
-                        })
+                        url = f"{ODOO_URL}/web#id={move_id}&model=account.move&view_type=form"
+                        st.session_state.history.append({"tipo": "Factura proveedor",
+                            "archivo": f"{uf.name}·fila{i+1}", "id": move_id, "url": url, "estado": "✅"})
                     except Exception as e:
                         errs.append(f"Fila {i+1}: {str(e)[:100]}")
                     bar.progress((i + 1) / len(df))
@@ -330,224 +575,32 @@ with tab_bills:
                 for err in errs:
                     st.warning(err)
 
-        # ── PDF / Imagen: una factura ────────────────────────────
+        # PDF / Imagen
         else:
             extracted, raw_text = {}, ""
             if ext == "pdf":
                 with st.spinner("Leyendo PDF..."):
                     extracted, raw_text = extract_pdf_fields(file_bytes)
-                if extracted.get("proveedor"):
-                    st.caption("🤖 Datos detectados automáticamente — revisá antes de confirmar.")
-                else:
-                    st.caption("ℹ️ PDF sin texto extraíble. Completá los datos a mano.")
+                st.caption("🤖 Datos detectados — revisá antes de confirmar." if extracted.get("proveedor")
+                           else "ℹ️ PDF sin texto extraíble. Completá los datos a mano.")
             elif ext in ("jpg", "jpeg", "png"):
                 st.image(file_bytes, caption="Vista previa", width=380)
-                st.caption("Completá los datos del formulario.")
 
             with st.form(key=f"bill_form_{uf.name}"):
-                c1, c2 = st.columns(2)
-                default_prov = extracted.get("proveedor", "")
-                prov_input   = c1.text_input("Proveedor",    value=default_prov[:60], placeholder="Nombre exacto en Odoo")
-                ref_input    = c2.text_input("N° de factura", value=extracted.get("numero", ""))
-                fecha_input  = c1.text_input("Fecha (AAAA-MM-DD)", value="", placeholder="2026-05-12")
-                total_input  = c2.text_input("Total (solo referencia)", value=extracted.get("total", ""), disabled=True)
-                notas_input  = st.text_area("Notas internas", height=55)
+                c1, c2  = st.columns(2)
+                prov_i  = c1.text_input("Proveedor",         value=extracted.get("proveedor", "")[:60], placeholder="Nombre exacto en Odoo")
+                ref_i   = c2.text_input("N° de factura",     value=extracted.get("numero", ""))
+                fecha_i = c1.text_input("Fecha (AAAA-MM-DD)", value="", placeholder="2026-05-12")
+                c2.text_input("Total (referencia)", value=extracted.get("total", ""), disabled=True)
+                st.text_area("Notas internas", height=55)
                 go = st.form_submit_button("⬆️ Cargar en Odoo", use_container_width=True)
 
             if go:
                 with st.spinner("Procesando..."):
                     try:
                         partner_id = False
-                        if prov_input:
-                            matches = search_partners(models_url, uid, api_key, prov_input, limit=3)
-                            if matches:
-                                partner_id = matches[0][0]
-                                st.caption(f"Proveedor asignado: **{matches[0][1]}**")
-                            else:
-                                st.warning(f"'{prov_input}' no encontrado — se creará sin proveedor.")
-                        move_id = create_vendor_bill(
-                            models, uid, api_key,
-                            partner_id=partner_id,
-                            ref=ref_input,
-                            invoice_date=fecha_input or False,
-                            filename=uf.name,
-                            file_bytes=file_bytes,
-                            mimetype=mimetype,
-                        )
-                        odoo_url = f"{ODOO_URL}/web#id={move_id}&model=account.move&view_type=form"
-                        st.success(f"✅ Factura creada — [Abrir en Odoo →]({odoo_url})")
-                        st.session_state.history.append({
-                            "tipo": "Factura proveedor", "archivo": uf.name,
-                            "id": move_id, "url": odoo_url, "estado": "✅",
-                        })
-                    except Exception as e:
-                        st.error(f"❌ {e}")
-
-
-# ═══════════════════════════════════════════════════
-# TAB 2 — PEDIDOS DE CLIENTES
-# ═══════════════════════════════════════════════════
-with tab_orders:
-    st.subheader("Pedidos de clientes")
-    files_o = st.file_uploader(
-        "Arrastrá o elegí archivos (PDF, JPG, PNG, XLSX)",
-        type=["pdf", "jpg", "jpeg", "png", "xlsx", "xls"],
-        accept_multiple_files=True,
-        key="orders_upload",
-    )
-
-    if not files_o:
-        st.caption("Subí uno o más archivos para empezar.")
-
-    for uf in (files_o or []):
-        st.divider()
-        ext        = uf.name.rsplit(".", 1)[-1].lower()
-        file_bytes = uf.read()
-        mimetype   = MIMETYPES.get(ext, "application/octet-stream")
-        st.markdown(f"**📎 {uf.name}**  `{ext.upper()}`  ({len(file_bytes)//1024} KB)")
-
-        # ── Excel: lote de pedidos ───────────────────────────────
-        if ext in ("xlsx", "xls"):
-            try:
-                df = pd.read_excel(BytesIO(file_bytes), dtype=str).fillna("")
-                df.columns = [c.strip() for c in df.columns]
-            except Exception as e:
-                st.error(f"No se pudo leer el Excel: {e}")
-                continue
-
-            st.caption(f"📊 {len(df)} filas · Columnas: {', '.join(df.columns)}")
-            st.dataframe(df.head(10), use_container_width=True, height=180)
-
-            cols_opts = ["(ninguna)"] + list(df.columns)
-            c1, c2, c3, c4 = st.columns(4)
-            col_cli   = c1.selectbox("Cliente",   cols_opts, key=f"oc_{uf.name}")
-            col_prod  = c2.selectbox("Producto",  cols_opts, key=f"op_{uf.name}")
-            col_qty   = c3.selectbox("Cantidad",  cols_opts, key=f"oq_{uf.name}")
-            col_price = c4.selectbox("Precio",    cols_opts, key=f"opr_{uf.name}")
-
-            if col_cli == "(ninguna)":
-                st.warning("Seleccioná al menos la columna de Cliente para poder cargar.")
-            elif st.button(f"⬆️ Cargar pedidos en Odoo", key=f"load_orders_xls_{uf.name}"):
-                clientes = df[col_cli].unique()
-                bar = st.progress(0)
-                ok, errs = 0, []
-                for i, cliente in enumerate(clientes):
-                    try:
-                        rows = df[df[col_cli] == cliente]
-                        matches = search_partners(models_url, uid, api_key, str(cliente), limit=1)
-                        if not matches:
-                            errs.append(f"Cliente '{cliente}' no encontrado en Odoo.")
-                            continue
-                        partner_id = matches[0][0]
-                        lines = []
-                        for _, row in rows.iterrows():
-                            lines.append({
-                                "producto": row.get(col_prod, "") if col_prod != "(ninguna)" else "",
-                                "cantidad": row.get(col_qty, 1)   if col_qty  != "(ninguna)" else 1,
-                                "precio":   row.get(col_price, 0) if col_price != "(ninguna)" else 0,
-                            })
-                        order_id = create_sale_order(
-                            models, uid, api_key,
-                            partner_id=partner_id,
-                            note=f"Importado desde {uf.name}",
-                            lines=lines,
-                            filename=uf.name,
-                            file_bytes=file_bytes,
-                            mimetype=mimetype,
-                        )
-                        ok += 1
-                        odoo_url = f"{ODOO_URL}/web#id={order_id}&model=sale.order&view_type=form"
-                        st.success(f"✅ Pedido de **{cliente}** creado — [Abrir en Odoo →]({odoo_url})")
-                        st.session_state.history.append({
-                            "tipo": "Pedido cliente", "archivo": f"{uf.name} · {cliente}",
-                            "id": order_id, "url": odoo_url, "estado": "✅",
-                        })
-                    except Exception as e:
-                        errs.append(f"Cliente '{cliente}': {str(e)[:100]}")
-                    bar.progress((i + 1) / len(clientes))
-                if ok:
-                    st.success(f"✅ {ok} pedidos creados.")
-                for err in errs:
-                    st.warning(err)
-
-        # ── PDF / Imagen: un pedido ──────────────────────────────
-        else:
-            extracted, _ = {}, ""
-            if ext == "pdf":
-                with st.spinner("Leyendo PDF..."):
-                    extracted, _ = extract_pdf_fields(file_bytes)
-            elif ext in ("jpg", "jpeg", "png"):
-                st.image(file_bytes, caption="Vista previa", width=380)
-
-            with st.form(key=f"order_form_{uf.name}"):
-                c1, c2 = st.columns(2)
-                cli_input = c1.text_input("Cliente", value=extracted.get("proveedor", "")[:60], placeholder="Nombre exacto en Odoo")
-                ref_input = c2.text_input("Referencia / N° pedido", value=extracted.get("numero", ""))
-                notas_input = st.text_area("Notas", height=55)
-
-                st.caption("Líneas del pedido (opcional — podés completarlas directo en Odoo)")
-                lines_text = st.text_area(
-                    "Formato: Producto | Cantidad | Precio unitario",
-                    height=90,
-                    placeholder="Camiseta azul talle M | 10 | 2500\nPantalón negro talle L | 5 | 4000",
-                )
-                go = st.form_submit_button("⬆️ Crear pedido en Odoo", use_container_width=True)
-
-            if go:
-                with st.spinner("Procesando..."):
-                    try:
-                        matches = search_partners(models_url, uid, api_key, cli_input, limit=3)
-                        if not matches:
-                            st.error(f"Cliente '{cli_input}' no encontrado en Odoo. Verificá el nombre.")
-                            st.stop()
-                        partner_id = matches[0][0]
-                        st.caption(f"Cliente asignado: **{matches[0][1]}**")
-
-                        lines = []
-                        for line in (lines_text or "").strip().split("\n"):
-                            if not line.strip():
-                                continue
-                            parts = [p.strip() for p in line.split("|")]
-                            lines.append({
-                                "producto": parts[0] if len(parts) > 0 else "",
-                                "cantidad": parts[1] if len(parts) > 1 else 1,
-                                "precio":   parts[2] if len(parts) > 2 else 0,
-                            })
-
-                        order_id = create_sale_order(
-                            models, uid, api_key,
-                            partner_id=partner_id,
-                            note=notas_input,
-                            lines=lines,
-                            filename=uf.name,
-                            file_bytes=file_bytes,
-                            mimetype=mimetype,
-                        )
-                        odoo_url = f"{ODOO_URL}/web#id={order_id}&model=sale.order&view_type=form"
-                        st.success(f"✅ Pedido creado — [Abrir en Odoo →]({odoo_url})")
-                        st.session_state.history.append({
-                            "tipo": "Pedido cliente", "archivo": uf.name,
-                            "id": order_id, "url": odoo_url, "estado": "✅",
-                        })
-                    except Exception as e:
-                        st.error(f"❌ {e}")
-
-
-# ═══════════════════════════════════════════════════
-# TAB 3 — HISTORIAL
-# ═══════════════════════════════════════════════════
-with tab_history:
-    st.subheader("Historial de esta sesión")
-    history = st.session_state.history
-    if history:
-        for r in reversed(history):
-            c1, c2, c3 = st.columns([2, 3, 1])
-            c1.markdown(f"**{r['tipo']}**")
-            c2.markdown(f"{r['archivo']} — [Ver en Odoo (ID {r['id']})]({r['url']})")
-            c3.markdown(r["estado"])
-        st.divider()
-        if st.button("🗑️ Limpiar historial"):
-            st.session_state.history = []
-            st.rerun()
-    else:
-        st.info("Todavía no se realizaron cargas en esta sesión.")
+                        if prov_i:
+                            m2 = search_partners(models_url, uid, api_key, prov_i, limit=3)
+                            if m2:
+                                partner_id = m2[0][0]
+                                st.caption(f"Proveedor asignado: **{m2[0]
