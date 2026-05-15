@@ -266,6 +266,15 @@ def parse_ar_date(raw):
         return raw[:10]
     return ""
 
+def fmt_ars(v):
+    """Formatea numero como moneda ARS: $ 1.234,56"""
+    if not v: return ""
+    try:
+        s = "{:,.2f}".format(float(v))
+        return "$ " + s.replace(",","X").replace(".","," ).replace("X",".")
+    except:
+        return str(v)
+
 def extract_pdf_fields(file_bytes, filename=""):
     """Parser para facturas electronicas argentinas (AFIP/CAE/CAEA)."""
     try:
@@ -277,7 +286,7 @@ def extract_pdf_fields(file_bytes, filename=""):
     if not text.strip():
         return {}, ""
     fields = {"numero": "", "fecha": "", "fecha_iso": "", "fecha_vencimiento": "",
-              "fecha_vto_iso": "", "proveedor": "", "total": "", "cuit": ""}
+              "fecha_vto_iso": "", "proveedor": "", "total": "", "neto": "", "cuit": ""}
     # Numero de comprobante — formato AFIP: XXXXX-XXXXXXXX
     num_pats = [
         r"(?:Nro\.?\s*Comp\.?(?:\s*\(Nro\.?\s*Orig\.?\))?|N[°º]\s*Comp\.?|Comprobante\s*N[°º]?)[:\s]*(\d{4,5}[-\s]\d{6,8})",
@@ -356,6 +365,25 @@ def extract_pdf_fields(file_bytes, filename=""):
                 raw = raw.replace(",", ".")
             fields["total"] = raw
             break
+    # Neto gravado (base imponible antes de IVA)
+    neto_pats = [
+        r"(?:Subtotal\s+Gravado|Neto\s+Gravado|Importe\s+Neto\s+Gravado)[:\s]*\$?\s*([\d.,]+)",
+        r"(?:Base\s+Imponible)[:\s]*\$?\s*([\d.,]+)",
+    ]
+    for pat in neto_pats:
+        m = re.search(pat, text, re.IGNORECASE | re.MULTILINE)
+        if m:
+            raw = m.group(1).strip()
+            if "." in raw and "," in raw:
+                if raw.rfind(".") > raw.rfind(","):
+                    raw = raw.replace(",", "")
+                else:
+                    raw = raw.replace(".", "").replace(",", ".")
+            elif "," in raw:
+                raw = raw.replace(",", ".")
+            fields["neto"] = raw
+            break
+
     # Razon social / proveedor
     razon_pats = [
         r"(?:Raz[oó]n\s+[Ss]ocial|Denominaci[oó]n)[:\s]+([^\n\d][^\n]{2,79})",
@@ -590,9 +618,11 @@ with tab_bills:
                 fecha_vto_i = c2.text_input("Fecha vencimiento (AAAA-MM-DD)",
                                 value=extracted.get("fecha_vto_iso",""),
                                 placeholder="2026-05-20")
-                c1.text_input("Total (referencia)", value=extracted.get("total",""), disabled=True)
+                c3, c4 = st.columns(2)
+                c3.text_input("Total c/imp. (ref.)", value=fmt_ars(extracted.get("total","")), disabled=True)
+                c4.text_input("Neto gravado (ref.)", value=fmt_ars(extracted.get("neto","")), disabled=True)
                 if extracted.get("cuit"):
-                    c2.text_input("CUIT emisor", value=extracted.get("cuit",""), disabled=True)
+                    st.text_input("CUIT emisor", value=extracted.get("cuit",""), disabled=True)
                 st.text_area("Notas internas", height=55)
                 go = st.form_submit_button("⬆️ Cargar en Odoo", use_container_width=True)
             if go:
