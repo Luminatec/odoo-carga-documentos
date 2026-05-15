@@ -368,7 +368,11 @@ def extract_pdf_fields(file_bytes):
                 continue
             fields["proveedor"] = line[:80]
             break
-    return fields
+    # CUIT emisor
+    cuit_m = re.search(r'(?:CUIT|C\.U\.I\.T)[:\s.]*?(\d{2}[-\s]?\d{8}[-\s]?\d)', text, re.IGNORECASE)
+    if cuit_m:
+        fields["cuit"] = re.sub(r'[\s\-]', '', cuit_m.group(1))
+    return fields, text
 
 def classify_document(text):
     tu = text.upper()
@@ -972,16 +976,6 @@ with tab_history:
             st.rerun()
     else:
         st.info("Todavía no se realizaron cargas en esta sesión.")
-, line):
-                continue
-            if not any(w in line.upper() for w in skip):
-                fields["proveedor"] = line[:80]
-                break
-    # CUIT emisor
-    cuit_m = re.search(r'(?:CUIT|C\.U\.I\.T)[:\s.]*(\d{2}[-\s]?\d{8}[-\s]?\d)', text, re.IGNORECASE)
-    if cuit_m:
-        fields["cuit"] = re.sub(r'[\s\-]', '', cuit_m.group(1))
-    return fields, text
 
 def classify_document(text):
     tu = text.upper()
