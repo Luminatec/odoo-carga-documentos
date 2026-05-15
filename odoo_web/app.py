@@ -57,7 +57,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 ODOO_URL = "https://gpowerbyte-luminatec.odoo.com"
-ODOO_DB  = "gpowerbyte-luminatec"
+ODOO_DB  = "gpowerbyte-luminatec-master-22753148"
 
 # Emails con acceso a Importaciones — también configurable en st.secrets["ADMIN_EMAILS"]
 _raw_admin = st.secrets.get("ADMIN_EMAILS", "ivarela@luminatec.com,dario@luminatec.com")
