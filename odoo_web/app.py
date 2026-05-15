@@ -450,7 +450,7 @@ with st.sidebar:
             st.markdown('<span class="admin-badge">🛳️ Importaciones habilitado</span>',
                         unsafe_allow_html=True)
             st.caption(f"Carpeta: **{st.session_state.carpeta_id or 'sin selección'}**")
-        if st.button("🔓 Cerrar sesión", use_container_width=True):
+        if st.button("🔓 Cerrar sesión", use_container_width=True, key="logout_1"):
             st.session_state.logged_in  = False
             st.session_state.user_email = ""
             st.session_state.history    = []
@@ -971,7 +971,7 @@ with tab_history:
             c2.markdown(f"{r['archivo']} — [Ver en Odoo (ID {r['id']})]({r['url']})")
             c3.markdown(r["estado"])
         st.divider()
-        if st.button("🗑️ Limpiar historial"):
+        if st.button("🗑️ Limpiar historial", key="limpiar_hist_1"):
             st.session_state.history = []
             st.rerun()
     else:
@@ -1053,7 +1053,7 @@ with st.sidebar:
             st.markdown('<span class="admin-badge">🛳️ Importaciones habilitado</span>',
                         unsafe_allow_html=True)
             st.caption(f"Carpeta: **{st.session_state.carpeta_id or 'sin selección'}**")
-        if st.button("🔓 Cerrar sesión", use_container_width=True):
+        if st.button("🔓 Cerrar sesión", use_container_width=True, key="logout_2"):
             st.session_state.logged_in  = False
             st.session_state.user_email = ""
             st.session_state.history    = []
@@ -1426,7 +1426,7 @@ if tab_import is not None:
 
                 if classified_docs:
                     if st.button(f"⬆️ Crear {len(classified_docs)} registro(s) en Odoo",
-                                 type="primary", key="btn_create_all_imp"):
+                                 type="primary", key="btn_create_all_imp_2"):
                         prog = st.progress(0)
                         ok, errs = 0, []
                         carp = st.session_state.carpeta_id
@@ -1543,7 +1543,7 @@ if tab_import is not None:
         st.progress(total_chk / len(DECALOGO), text=f"{total_chk}/{len(DECALOGO)} checks")
         if total_chk == len(DECALOGO):
             if st.button(f"🎉 Firmar Acta CFO — Cerrar carpeta {st.session_state.carpeta_id}",
-                         type="primary", key="btn_acta_firmar"):
+                         type="primary", key="btn_acta_firmar_2"):
                 st.session_state.etapas["6"] = True
                 st.balloons()
                 st.success(f"✅ Carpeta {st.session_state.carpeta_id} CERRADA. Acta CFO firmada.")
@@ -1563,7 +1563,7 @@ with tab_history:
             c2.markdown(f"{r['archivo']} — [Ver en Odoo (ID {r['id']})]({r['url']})")
             c3.markdown(r["estado"])
         st.divider()
-        if st.button("🗑️ Limpiar historial"):
+        if st.button("🗑️ Limpiar historial", key="limpiar_hist_2"):
             st.session_state.history = []
             st.rerun()
     else:
