@@ -142,13 +142,16 @@ def verify_user(email, password):
     """
     Verifica que email + contraseña sean válidos en Odoo.
     Solo autentica — las operaciones usan la API key de servicio.
+    Retorna (True, "") si OK, o (False, mensaje_error) si falla.
     """
     try:
         common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common", allow_none=True)
         uid    = common.authenticate(ODOO_DB, email.strip(), password, {})
-        return bool(uid)
-    except Exception:
-        return False
+        if uid:
+            return True, ""
+        return False, "Credenciales incorrectas (Odoo devolvió UID=0)."
+    except Exception as e:
+        return False, f"Error de conexión: {type(e).__name__}: {str(e)[:200]}"
 
 def call(models, uid, api_key, model, method, args, kw=None):
     return models.execute_kw(ODOO_DB, uid, api_key, model, method, args, kw or {})
@@ -315,13 +318,13 @@ with st.sidebar:
         if login_btn:
             if email_in and pass_in:
                 with st.spinner("Verificando..."):
-                    ok = verify_user(email_in, pass_in)
+                    ok, err_msg = verify_user(email_in, pass_in)
                 if ok:
                     st.session_state.logged_in  = True
                     st.session_state.user_email = email_in.strip().lower()
                     st.rerun()
                 else:
-                    st.error("Email o contraseña incorrectos.")
+                    st.error(err_msg or "Email o contraseña incorrectos.")
             else:
                 st.warning("Completá email y contraseña.")
     else:
