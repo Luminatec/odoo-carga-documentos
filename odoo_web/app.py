@@ -364,7 +364,11 @@ def extract_pdf_fields(file_bytes):
                 "IMPORTE","TOTAL","VENCIMIENTO","INGRESOS","IVA","MONOTRIBUTO",
                 "RESPONSABLE","INSCRIPTO","ORIGINAL","DUPLICADO","CODIGO","DOMICILIO"}
         for line in (l.strip() for l in text.split("\n") if l.strip()):
-            if len(line) < 4 or re.match(r'^[\d$.,/\s\-()]+
+            if len(line) < 4 or re.match(r'^[\d$.,/\s\-()]+$', line) or any(line.upper().startswith(k) for k in skip):
+                continue
+            fields["proveedor"] = line[:80]
+            break
+    return fields
 
 def classify_document(text):
     tu = text.upper()
