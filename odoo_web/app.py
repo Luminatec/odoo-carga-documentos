@@ -140,18 +140,35 @@ def get_service_connection():
 
 def verify_user(email, password):
     """
-    Verifica que email + contraseña sean válidos en Odoo.
-    Solo autentica — las operaciones usan la API key de servicio.
-    Retorna (True, "") si OK, o (False, mensaje_error) si falla.
+    Verifica email + contraseña contra st.secrets.
+    APP_USERS    = "email1:clave1,email2:clave2"  (por usuario)
+    APP_PASSWORD = "clave_compartida"              (todos igual)
     """
-    try:
-        common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common", allow_none=True)
-        uid    = common.authenticate(ODOO_DB, email.strip(), password, {})
-        if uid:
+    import hashlib
+    email = email.strip().lower()
+    pw_hash = hashlib.sha256(password.encode()).hexdigest()
+
+    app_users_raw = st.secrets.get("APP_USERS", "")
+    if app_users_raw:
+        user_map = {}
+        for entry in app_users_raw.split(","):
+            parts = entry.strip().split(":", 1)
+            if len(parts) == 2:
+                user_map[parts[0].strip().lower()] = parts[1].strip()
+        if email not in user_map:
+            return False, "Email no autorizado."
+        expected = user_map[email]
+        if password == expected or pw_hash == expected:
             return True, ""
-        return False, "Credenciales incorrectas (Odoo devolvió UID=0)."
-    except Exception as e:
-        return False, f"Error de conexión: {type(e).__name__}: {str(e)[:200]}"
+        return False, "Contraseña incorrecta."
+
+    app_password = st.secrets.get("APP_PASSWORD", "")
+    if app_password:
+        if password == app_password or pw_hash == app_password:
+            return True, ""
+        return False, "Contraseña incorrecta."
+
+    return False, "Configurá APP_PASSWORD o APP_USERS en los secrets de Streamlit."
 
 def call(models, uid, api_key, model, method, args, kw=None):
     return models.execute_kw(ODOO_DB, uid, api_key, model, method, args, kw or {})
