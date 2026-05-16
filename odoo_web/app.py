@@ -186,6 +186,18 @@ def get_all_accounts(models_url, uid, api_key):
     except Exception:
         return []
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_currency_id(models_url, uid, api_key, name):
+    """Retorna el ID de la moneda por nombre (ej: 'USD', 'ARS')."""
+    try:
+        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        rows = m.execute_kw(ODOO_DB, uid, api_key, "res.currency", "search_read",
+            [[("name", "=", name)]],
+            {"fields": ["id", "name"], "limit": 1})
+        return rows[0]["id"] if rows else None
+    except Exception:
+        return None
+
 @st.cache_data(ttl=120, show_spinner=False)
 def search_purchase_orders(models_url, uid, api_key, query):
     m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
@@ -218,7 +230,8 @@ def attach_file(models, uid, api_key, res_model, res_id, filename, file_bytes, m
 
 def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                        filename, file_bytes, mimetype, journal_id=None, doc_type_id=None,
-                       invoice_date_due=None, account_id=None, amount_neto=None):
+                       invoice_date_due=None, account_id=None, amount_neto=None,
+                       currency_id=None):
     vals = {"move_type": "in_invoice"}
     if partner_id:       vals["partner_id"]   = partner_id
     if ref:              vals["ref"]          = ref
@@ -226,6 +239,7 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
     if invoice_date_due: vals["invoice_date_due"] = invoice_date_due
     if journal_id:       vals["journal_id"]   = journal_id
     if doc_type_id:      vals["l10n_latam_document_type_id"] = doc_type_id
+    if currency_id:      vals["currency_id"]  = currency_id
     if account_id and amount_neto:
         vals["invoice_line_ids"] = [(0, 0, {
             "account_id": account_id,
@@ -313,6 +327,101 @@ def fmt_ars(v):
     except Exception:
         return str(v)
 
+def parse_payment_terms(text):
+    """
+    Extrae días de pago de condiciones de venta.
+    Retorna int con cantidad de días, o None si no se detecta.
+    Ej: "CUENTA CORRIENTE A 10 DIAS" → 10
+        "30 DIAS FECHA FACTURA"       → 30
+        "A 15 DIAS FF"                → 15
+        "CUENTA CORRIENTE"            → None
+    """
+    pats = [
+        r"CUENTA\s+CORRIENTE\s+A\s+(\d+)\s+D[IÍ]AS?",
+        r"\bA\s+(\d+)\s+D[IÍ]AS?\b",
+        r"(\d+)\s+D[IÍ]AS?\s+(?:FECHA\s+FACTURA|FF|FV)",
+        r"(?:Cond\.?\s*Vta\.?|Condici[oó]n(?:es)?\s+de\s+Venta)[:\s]+[^\n]*?(\d+)\s+D[IÍ]AS?",
+        r"\b(\d{1,3})\s+D[IÍ]AS?\b",
+    ]
+    for pat in pats:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            days = int(m.group(1))
+            if 1 <= days <= 365:   # sanidad: descartar años o CAE que puedan colar
+                return days
+    return None
+
+def compute_vencimiento(fecha_iso, days):
+    """
+    Calcula vencimiento = fecha_iso + days días.
+    fecha_iso: 'YYYY-MM-DD'. Retorna 'YYYY-MM-DD' o ''.
+    """
+    if not fecha_iso or days is None:
+        return ""
+    try:
+        from datetime import date, timedelta
+        y, mo, d = int(fecha_iso[:4]), int(fecha_iso[5:7]), int(fecha_iso[8:10])
+        vto = date(y, mo, d) + timedelta(days=days)
+        return vto.strftime("%Y-%m-%d")
+    except Exception:
+        return ""
+
+@st.cache_data(ttl=120, show_spinner=False)
+def search_partner_by_cuit(models_url, uid, api_key, cuit):
+    """
+    Busca un partner en Odoo por CUIT (campo vat).
+    Retorna (partner_id, nombre) o None si no existe.
+    """
+    if not cuit:
+        return None
+    cuit_norm = re.sub(r"[^\d]", "", str(cuit))
+    if len(cuit_norm) < 10:
+        return None
+    try:
+        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        # Intentar con formato estándar XX-XXXXXXXX-X y sin guiones
+        variants = [cuit_norm]
+        if len(cuit_norm) == 11:
+            variants.append(f"{cuit_norm[:2]}-{cuit_norm[2:10]}-{cuit_norm[10:]}")
+        for vat_val in variants:
+            rows = m.execute_kw(ODOO_DB, uid, api_key, "res.partner", "search_read",
+                [[("vat", "=", vat_val), ("active", "=", True)]],
+                {"fields": ["id", "name", "vat"], "limit": 1})
+            if rows:
+                return (rows[0]["id"], rows[0]["name"])
+        # Fallback: buscar por los últimos 8 dígitos del CUIT
+        rows = m.execute_kw(ODOO_DB, uid, api_key, "res.partner", "search_read",
+            [[("vat", "ilike", cuit_norm[2:10]), ("active", "=", True)]],
+            {"fields": ["id", "name", "vat"], "limit": 3})
+        if rows:
+            return (rows[0]["id"], rows[0]["name"])
+    except Exception:
+        pass
+    return None
+
+@st.cache_data(ttl=30, show_spinner=False)
+def check_invoice_exists(models_url, uid, api_key, ref):
+    """
+    Verifica si ya existe una factura de proveedor con esa referencia en Odoo.
+    Retorna (True, move_id, name) si existe, (False, None, None) si no.
+    """
+    if not ref or not ref.strip():
+        return False, None, None
+    try:
+        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        rows = m.execute_kw(ODOO_DB, uid, api_key, "account.move", "search_read",
+            [[("ref", "=", ref.strip()),
+              ("move_type", "=", "in_invoice"),
+              ("state", "!=", "cancel")]],
+            {"fields": ["id", "name", "partner_id", "invoice_date", "amount_total"], "limit": 1})
+        if rows:
+            r = rows[0]
+            label = r.get("name") or f"ID {r['id']}"
+            return True, r["id"], label
+        return False, None, None
+    except Exception:
+        return False, None, None
+
 def extract_pdf_fields(file_bytes):
     """
     Parser especializado para facturas electrónicas argentinas (AFIP/CAE/CAEA).
@@ -330,13 +439,18 @@ def extract_pdf_fields(file_bytes):
         return {}, ""
 
     fields = {"numero": "", "fecha": "", "fecha_iso": "", "fecha_vencimiento": "",
-              "fecha_vto_iso": "", "proveedor": "", "total": "", "neto": "", "iva": "", "cuit": ""}
+              "fecha_vto_iso": "", "proveedor": "", "total": "", "neto": "", "iva": "",
+              "cuit": "", "condiciones_venta": "", "dias_pago": None}
 
     # ── NÚMERO DE COMPROBANTE ─────────────────────────────────────────────
-    # Formato AFIP: XXXXX-XXXXXXXX (pto.venta - nro)
+    # Soporta:
+    #   Formato AFIP estándar:     "Nro. Comp.: 00002-00013670"
+    #   Formato con letra prefijo: "FACTURA A00005-00029174"
     num_pats = [
         r"(?:Nro\.?\s*Comp\.?(?:\s*\(Nro\.?\s*Orig\.?\))?|N[°º]\s*Comp\.?|Comprobante\s*N[°º]?)[:\s]*(\d{4,5}[-\s]\d{6,8})",
         r"(?:Punto\s+de\s+Venta[:\s]+\d+\s+)?(?:Comp\.?\s*Nro\.?|Nro\.)[:\s]+(\d{4,5}-\d{6,8})",
+        r"(?:FACTURA|NOTA\s+DE\s+CR[EÉ]DITO|NOTA\s+DE\s+D[EÉ]BITO|RECIBO)\s+([A-Z]\d{4,5}-\d{6,8})",
+        r"\b([A-Z]\d{4,5}-\d{6,8})\b",
         r"\b(\d{4,5}-\d{6,8})\b",
         r"(?:Factura|Invoice|N[°º.])[:\s#]*([A-Z0-9\-]{5,20})",
     ]
@@ -349,7 +463,7 @@ def extract_pdf_fields(file_bytes):
     # ── FECHA DE EMISIÓN ──────────────────────────────────────────────────
     emision_pats = [
         r"(?:Fecha\s+de\s+[Ee]misi[oó]n|Fecha\s+[Ee]mis\.?)[:\s]+(\d{1,2}/\d{1,2}/\d{4})",
-        r"(?:^|\n|\s)Fecha[:\s]+(\d{1,2}/\d{1,2}/\d{4})",
+        r"(?:^|\n|\s)(?:FECHA|Fecha)[:\s]+(\d{1,2}/\d{1,2}/\d{4})",
     ]
     for pat in emision_pats:
         m = re.search(pat, text, re.IGNORECASE | re.MULTILINE)
@@ -363,15 +477,32 @@ def extract_pdf_fields(file_bytes):
             fields["fecha"] = m.group(1)
             fields["fecha_iso"] = parse_ar_date(fields["fecha"])
 
+    # ── CONDICIONES DE VENTA ──────────────────────────────────────────────
+    cond_pats = [
+        r"(?:Condici[oó]n(?:es)?\s+de\s+Venta|Cond\.?\s*Vta\.?)[:\s]+([^\n]{3,80})",
+    ]
+    for pat in cond_pats:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            fields["condiciones_venta"] = m.group(1).strip()
+            break
+
     # ── FECHA DE VENCIMIENTO DE PAGO ─────────────────────────────────────
-    # En facturas AFIP/CAE, "Fecha de Vto." es el vencimiento del CAE, NO el vencimiento de pago.
-    # Se deja en blanco para que el usuario complete manualmente según las condiciones de venta.
+    # Se calcula desde condiciones de venta (ej: "CUENTA CORRIENTE A 10 DIAS").
+    # "Fecha de Vto." en facturas AFIP/CAE es el vencimiento del CAE, NO el de pago.
+    cond_text = fields["condiciones_venta"] or text
+    fields["dias_pago"] = parse_payment_terms(cond_text)
+    if fields["dias_pago"] and fields["fecha_iso"]:
+        fields["fecha_vencimiento"] = compute_vencimiento(fields["fecha_iso"], fields["dias_pago"])
+        fields["fecha_vto_iso"]     = fields["fecha_vencimiento"]
 
     # ── IMPORTE TOTAL ─────────────────────────────────────────────────────
     total_pats = [
         r"(?:Importe\s+Total|Total\s+Factura|TOTAL\s+FACTURA)[:\s$]*\$?\s*([\d.,]+)",
-        r"(?:^|\n|\s)TOTAL\s*:[:\s$]*\$?\s*([\d.,]+)",
-        r"(?:^|\n|\s)PESOS\s+TOTAL\s*:[:\s$]*\$?\s*([\d.,]+)",
+        r"(?:^|\n|\s)TOTAL\s*:\s*\$?\s*([\d.,]+)",        # TOTAL: $amount
+        r"(?:^|\n|\s)TOTAL\s+\$\s*([\d.,]+)",             # TOTAL $ amount
+        r"(?:^|\n|\s)TOTAL\s+([\d.,]+)(?:\s|$)",          # TOTAL amount
+        r"(?:^|\n|\s)PESOS\s+TOTAL[:\s$]*\$?\s*([\d.,]+)",
         r"Total\s+a\s+pagar[:\s$]*\$?\s*([\d.,]+)",
     ]
     for pat in total_pats:
@@ -383,16 +514,19 @@ def extract_pdf_fields(file_bytes):
     # ── NETO GRAVADO ──────────────────────────────────────────────────────
     neto_pats = [
         r"(?:Subtotal\s+Gravado|Neto\s+Gravado|Base\s+Imponible)[:\s$]*\$?\s*([\d.,]+)",
+        r"SUBTOTAL\s+\$\s*([\d.,]+)",                      # SUBTOTAL $ amount
+        r"SUBTOTAL\s+([\d.,]+)(?:\s|$)",                   # SUBTOTAL amount
         r"(?:Gravado|Subtotal)[:\s$]*\$?\s*([\d.,]+)",
     ]
     for pat in neto_pats:
-        m = re.search(pat, text, re.IGNORECASE)
+        m = re.search(pat, text, re.IGNORECASE | re.MULTILINE)
         if m:
             fields["neto"] = normalize_amount(m.group(1).strip())
             break
 
     # ── IVA ───────────────────────────────────────────────────────────────
     iva_pats = [
+        r"IVA\s+(?:21|10[.,]5|27)\s*%\s*\$?\s*([\d.,]+)",  # IVA 21 % $ amount
         r"I\.?V\.?A[^:\n]*(?:21|10\.5|27)[^:\n]*:[:\s$]*\$?\s*([\d.,]+)",
         r"I\.?V\.?A[:\s$%\d.]*:\s*([\d.,]+)",
         r"(?:Impuesto\s+)?IVA[:\s$]*\$?\s*([\d.,]+)",
@@ -403,7 +537,7 @@ def extract_pdf_fields(file_bytes):
             fields["iva"] = normalize_amount(m.group(1).strip())
             break
 
-    # ── RAZÓN SOCIAL / PROVEEDOR ──────────────────────────────────────────
+    # ── RAZÓN SOCIAL / PROVEEDOR EMISOR ──────────────────────────────────
     razon_pats = [
         r"(?:Raz[oó]n\s+[Ss]ocial|Denominaci[oó]n)[:\s]+([^\n\d][^\n]{2,79})",
         r"(?:Apellido\s+y\s+Nombre\s+o\s+Raz[oó]n\s+[Ss]ocial|Nombre\s+y\s+Apellido)[:\s]+([^\n]{3,79})",
@@ -417,20 +551,28 @@ def extract_pdf_fields(file_bytes):
                 fields["proveedor"] = name[:80]
                 break
 
-    # Fallback inteligente: líneas que no son keywords AFIP
+    # Fallback: primera línea significativa que no sea keyword AFIP
     if not fields["proveedor"]:
         skip = {"FACTURA", "NOTA", "RECIBO", "REMITO", "CUIT", "AFIP", "CAE",
                 "PUNTO", "FECHA", "IMPORTE", "TOTAL", "VENCIMIENTO", "INGRESOS",
                 "IVA", "MONOTRIBUTO", "RESPONSABLE", "INSCRIPTO", "ORIGINAL",
-                "DUPLICADO", "TRIPLICADO", "CÓDIGO", "DOMICILIO", "PROVINCIA"}
+                "DUPLICADO", "TRIPLICADO", "CÓDIGO", "DOMICILIO", "PROVINCIA",
+                "CODIGO", "SUBTOTAL", "DESCRIPCION", "CANTIDAD", "PRECIO",
+                "CONDICION", "COMPROBANTE", "PESOS", "SON"}
         for line in (l.strip() for l in text.split("\n") if l.strip()):
             if len(line) < 4 or re.match(r'^[\d$.,/\s\-()]+$', line):
                 continue
-            if not any(w in line.upper() for w in skip):
-                fields["proveedor"] = line[:80]
-                break
+            upper = line.upper()
+            if any(w in upper for w in skip):
+                continue
+            # Descartar líneas que son claramente el número de comprobante
+            if re.match(r'^[A-Z]\d{4,5}-\d{6,8}$', line):
+                continue
+            fields["proveedor"] = line[:80]
+            break
 
     # ── CUIT EMISOR ───────────────────────────────────────────────────────
+    # Toma el primer CUIT encontrado en el documento (suele ser el emisor)
     cuit_m = re.search(r'(?:CUIT|C\.U\.I\.T)[:\s.]*(\d{2}[-\s]?\d{8}[-\s]?\d)', text, re.IGNORECASE)
     if cuit_m:
         fields["cuit"] = re.sub(r'[\s\-]', '', cuit_m.group(1))
@@ -634,21 +776,64 @@ with tab_bills:
             _bill_accounts = get_all_accounts(models_url, uid, api_key)
             _acct_labels   = ["— Sin cuenta —"] + [lbl for _, lbl in _bill_accounts]
 
+            # ── Pre-lookup de proveedor por CUIT (fuera del form, en tiempo real) ─
+            _cuit_raw    = extracted.get("cuit", "")
+            _cond_venta  = extracted.get("condiciones_venta", "")
+            _dias_pago   = extracted.get("dias_pago")
+            _vto_auto    = extracted.get("fecha_vencimiento", "")
+
+            _partner_preloaded = None
+            if _cuit_raw:
+                _partner_preloaded = search_partner_by_cuit(models_url, uid, api_key, _cuit_raw)
+
+            if _partner_preloaded:
+                st.info(f"🏢 Proveedor detectado por CUIT: **{_partner_preloaded[1]}**")
+            elif _cuit_raw:
+                odoo_new_url = f"{ODOO_URL}/web#action=base.action_res_partner_form&view_type=form"
+                st.warning(
+                    f"⚠️ CUIT **{_cuit_raw}** no encontrado en Odoo. "
+                    f"[Crear proveedor manualmente]({odoo_new_url}) antes de cargar."
+                )
+
+            if _cond_venta:
+                if _dias_pago:
+                    st.caption(f"📅 Condición de venta: **{_cond_venta}** → vencimiento calculado: `{_vto_auto}`")
+                else:
+                    st.caption(f"📅 Condición de venta: **{_cond_venta}** (sin días detectados — completá el vencimiento a mano)")
+
+            # ── Chequeo de duplicado en tiempo real ───────────────────────────────
+            _num_raw = extracted.get("numero","")
+            _dup_exists, _dup_id, _dup_name = False, None, None
+            if _num_raw:
+                _dup_exists, _dup_id, _dup_name = check_invoice_exists(models_url, uid, api_key, _num_raw)
+            if _dup_exists:
+                _dup_url = f"{ODOO_URL}/web#id={_dup_id}&model=account.move&view_type=form"
+                st.error(
+                    f"🚫 Esta factura **ya fue cargada** en Odoo ({_dup_name}). "
+                    f"[Ver factura existente]({_dup_url})"
+                )
+
             with st.form(key=f"bill_form_{uf.name}"):
-                c1, c2  = st.columns(2)
-                prov_i      = c1.text_input("Proveedor",
-                                value=extracted.get("proveedor","")[:60],
-                                placeholder="Nombre exacto en Odoo")
-                ref_i       = c2.text_input("N° de factura",
-                                value=extracted.get("numero",""))
-                fecha_i     = c1.text_input("Fecha emisión (AAAA-MM-DD)",
-                                value=extracted.get("fecha_iso",""),
-                                placeholder="2026-05-12")
+                c1, c2 = st.columns(2)
+                cuit_i  = c1.text_input("CUIT del proveedor",
+                            value=_cuit_raw,
+                            placeholder="30-12345678-9",
+                            help="El sistema buscará al proveedor por CUIT en Odoo")
+                ref_i   = c2.text_input("N° de factura",
+                            value=extracted.get("numero",""))
+                fecha_i = c1.text_input("Fecha emisión (AAAA-MM-DD)",
+                            value=extracted.get("fecha_iso",""),
+                            placeholder="2026-05-12")
                 fecha_vto_i = c2.text_input("Fecha vencimiento (AAAA-MM-DD)",
-                                value="",
-                                placeholder="2026-05-20")
-                if extracted.get("cuit"):
-                    c1.text_input("CUIT emisor", value=extracted.get("cuit",""), disabled=True)
+                            value=_vto_auto,
+                            placeholder="2026-05-20",
+                            help="Se calcula automáticamente si se detectan días en las condiciones de venta")
+
+                # Proveedor por nombre como fallback si no hay CUIT
+                prov_i = st.text_input("Nombre del proveedor (fallback si no hay CUIT)",
+                            value="" if _partner_preloaded else extracted.get("proveedor","")[:60],
+                            placeholder="Nombre exacto en Odoo",
+                            help="Se usa solo si el CUIT no resuelve a ningún proveedor")
 
                 # Montos extraídos (sólo referencia)
                 _ca, _cb, _cc = st.columns(3)
@@ -674,7 +859,10 @@ with tab_bills:
                     help="Buscá por código o nombre. Si no seleccionás ninguna, la factura se crea sin línea contable.",
                 )
 
-                go = st.form_submit_button("⬆️ Cargar en Odoo", use_container_width=True)
+                _btn_label = "⬆️ Cargar en Odoo"
+                if _dup_exists:
+                    _btn_label = "⚠️ Ya existe — Cargar igual"
+                go = st.form_submit_button(_btn_label, use_container_width=True)
 
             # Asiento estimado (fuera del form, sin interferir)
             if cuenta_sel and cuenta_sel != "— Sin cuenta —" and extracted.get("neto"):
@@ -694,14 +882,34 @@ with tab_bills:
                 with st.spinner("Procesando..."):
                     try:
                         partner_id = False
-                        if prov_i:
-                            m2 = search_partners(models_url, uid, api_key, prov_i, limit=3)
+                        # 1. Buscar por CUIT ingresado en el form
+                        if cuit_i and cuit_i.strip():
+                            _found = search_partner_by_cuit(models_url, uid, api_key, cuit_i.strip())
+                            if _found:
+                                partner_id = _found[0]
+                                st.caption(f"Proveedor por CUIT: {_found[1]}")
+                        # 2. Fallback: buscar por nombre
+                        if not partner_id and prov_i and prov_i.strip():
+                            m2 = search_partners(models_url, uid, api_key, prov_i.strip(), limit=3)
                             if m2:
                                 partner_id = m2[0][0]
-                                st.caption("Proveedor asignado: " + m2[0][1])
+                                st.caption(f"Proveedor por nombre: {m2[0][1]}")
                             else:
-                                st.warning(f"'{prov_i}' no encontrado — se creará sin proveedor.")
-                        # Resolver cuenta seleccionada
+                                st.warning(f"'{prov_i}' no encontrado — se creará sin proveedor asignado.")
+
+                        # 3. Chequeo de duplicado en el submit (segunda línea de defensa)
+                        if ref_i and ref_i.strip():
+                            _dup2, _dup2_id, _dup2_name = check_invoice_exists(
+                                models_url, uid, api_key, ref_i.strip())
+                            if _dup2:
+                                _dup2_url = f"{ODOO_URL}/web#id={_dup2_id}&model=account.move&view_type=form"
+                                st.error(
+                                    f"🚫 La factura **{ref_i}** ya existe en Odoo ({_dup2_name}). "
+                                    f"[Ver factura existente]({_dup2_url})"
+                                )
+                                st.stop()
+
+                        # 4. Resolver cuenta seleccionada
                         account_id_sel = None
                         if cuenta_sel and cuenta_sel != "— Sin cuenta —":
                             for _aid, _albl in _bill_accounts:
@@ -937,14 +1145,16 @@ if tab_import is not None:
                     auto = classify_document(raw_text)
                     default_label = auto["label"] if auto["label"] in TIPO_OPTIONS else "Otro comprobante"
                     with st.expander(f"📎 {uf.name} — {auto['label']}", expanded=True):
-                        ct1, ct2, ct3 = st.columns([3, 2, 2])
-                        tipo_sel = ct1.selectbox("Tipo", list(TIPO_OPTIONS.keys()),
+                        ct1, ct2, ct3, ct4 = st.columns([3, 2, 2, 1])
+                        tipo_sel  = ct1.selectbox("Tipo", list(TIPO_OPTIONS.keys()),
                             index=list(TIPO_OPTIONS.keys()).index(default_label), key=f"tipo_{uf.name}")
                         ref_doc   = ct2.text_input("N° comprobante", key=f"ref_d_{uf.name}")
                         fecha_doc = ct3.text_input("Fecha (AAAA-MM-DD)", key=f"fec_d_{uf.name}", placeholder="2026-05-12")
+                        moneda    = ct4.selectbox("Moneda", ["ARS","USD"], key=f"cur_{uf.name}")
                         classified_docs.append({
                             "filename":uf.name, "file_bytes":file_bytes, "mimetype":mimetype,
                             "tipo_cfg":TIPO_OPTIONS[tipo_sel], "ref":ref_doc, "fecha":fecha_doc,
+                            "moneda": moneda,
                         })
 
                 if classified_docs:
@@ -956,6 +1166,9 @@ if tab_import is not None:
                         for i, doc in enumerate(classified_docs):
                             try:
                                 full_ref = f"{carp} / {doc['ref']}" if doc["ref"] else carp
+                                _cur_id = None
+                                if doc.get("moneda","ARS") == "USD":
+                                    _cur_id = get_currency_id(models_url, uid, api_key, "USD")
                                 move_id = create_vendor_bill(models, uid, api_key,
                                     partner_id  = doc["tipo_cfg"]["partner_id"],
                                     ref         = full_ref,
@@ -965,6 +1178,7 @@ if tab_import is not None:
                                     mimetype    = doc["mimetype"],
                                     journal_id  = doc["tipo_cfg"]["journal_id"],
                                     doc_type_id = doc["tipo_cfg"]["doc_type"],
+                                    currency_id = _cur_id,
                                 )
                                 url = f"{ODOO_URL}/web#id={move_id}&model=account.move&view_type=form"
                                 st.success(f"✅ {doc['filename']} → Factura ID {move_id} — [Ver en Odoo]({url})")
@@ -988,6 +1202,7 @@ if tab_import is not None:
                         st.rerun()
 
         st.divider()
+
         # ── Landed Cost ──────────────────────────────────────────
         st.markdown("#### 🔗 Crear Landed Cost — Etapa 4 Bis")
         st.caption("`split_method: by_current_cost_price` — CFO Dios estricto · distribuye por valor CFR proporcional")
