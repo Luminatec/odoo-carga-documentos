@@ -706,15 +706,18 @@ def extract_oc_fields(file_bytes):
         fields["cuit"] = re.sub(r'[-\s]', '', cuits_found[0])
 
     # ── Número de OC ─────────────────────────────────────────────────────
+    # El número puede tener coma como separador de miles: 0001-0118,667 → 0001-0118667
     oc_pats = [
-        r"(?:Orden\s+de\s+[Cc]ompra|O\.?C\.?|ORDEN\s+DE\s+COMPRA)\s*[N°#:Nro.]*\s*([0-9]{4}[-/][0-9]{4,})",
-        r"(?:N[°º]\s*(?:de\s+)?[Oo]rden|Pedido\s+N[°º])[:\s]*([0-9]{4}[-/][0-9]{4,})",
-        r"\b(0{4}[-/]\d{4,})\b",
+        r"(?:Orden\s+de\s+[Cc]ompra|O\.?C\.?\s*N[°o]?|ORDEN\s+DE\s+COMPRA\s*N?\s*)[:\s]*([0-9]{4}[-/][0-9,]{4,})",
+        r"(?:N[°º]\s*(?:de\s+)?[Oo]rden|Pedido\s+N[°º])[:\s]*([0-9]{4}[-/][0-9,]{4,})",
+        r"\b(0{4}[-/][0-9,]{4,})\b",
     ]
     for pat in oc_pats:
         mo = re.search(pat, text, re.IGNORECASE)
         if mo:
-            fields["numero_oc"] = mo.group(1).strip()
+            raw_num = mo.group(1).strip()
+            # Normalizar: quitar comas internas del número (0001-0118,667 → 0001-0118667)
+            fields["numero_oc"] = raw_num.replace(",", "")
             break
 
     # ── Fecha ─────────────────────────────────────────────────────────────
@@ -822,6 +825,98 @@ def extract_oc_fields(file_bytes):
                 "subtotal":    sub   if sub   is not None else (
                                    (qty * price) if (qty and price) else 0),
             })
+
+    # ── Fallback: parser de texto cuando no hay tablas ───────────────────
+    # Detecta líneas de producto del tipo:
+    #   CODIGO  QTY  DESCRIPCION  NETO  IVA%  IT  CFINAL  SUBTOTAL
+    # Maneja números fusionados (artefacto de pdfplumber): "297,004.1329,700,413.00"
+    if not fields["lineas"] and text:
+        _lines = text.split("\n")
+        _hdr_idx = None
+        for _i, _ln in enumerate(_lines):
+            if re.search(r'\bC[oó]digo\b.{0,30}\bCant\b', _ln, re.IGNORECASE):
+                _hdr_idx = _i
+                break
+
+        if _hdr_idx is not None:
+            _stop = re.compile(
+                r'^(?:Sub[-\s]?[Tt]otal|Totales|TOTALES|Sub-Totales|Observaciones|IMPORTANTE)',
+                re.IGNORECASE)
+            _num_re = r'\d{1,3}(?:[.,]\d{3})*[.,]\d{2}|\d+[.,]\d{2}'
+
+            def _parse_num(s):
+                s = str(s).strip()
+                lc, ld = s.rfind(","), s.rfind(".")
+                if lc > ld:
+                    return float(s.replace(".", "").replace(",", "."))
+                return float(s.replace(",", ""))
+
+            _j = _hdr_idx + 1
+            while _j < len(_lines):
+                _raw = _lines[_j].strip()
+                if _stop.match(_raw):
+                    break
+                _cm = re.match(r'^(\d{6,12})\s+(\d+)\s+(.+)$', _raw)
+                if _cm:
+                    _cod   = _cm.group(1)
+                    _qty_s = _cm.group(2)
+                    _rest  = _cm.group(3).strip()
+
+                    # Absorber línea siguiente si es continuación de la descripción
+                    if _j + 1 < len(_lines):
+                        _nl = _lines[_j + 1].strip()
+                        if (_nl and not re.match(r'^\d{6,12}\s', _nl)
+                                and not _stop.match(_nl)
+                                and re.search(r'[A-Za-z]', _nl)):
+                            _rest += " " + _nl
+                            _j += 1
+
+                    # Separar números fusionados: ".13" seguido de dígito → ".13 "
+                    _rest_fixed = re.sub(r'(\.\d{2})(\d)', r'\1 \2', _rest)
+
+                    _raw_nums = re.findall(_num_re, _rest_fixed)
+                    _nums = []
+                    for _rn in _raw_nums:
+                        try:
+                            _nums.append(_parse_num(_rn))
+                        except Exception:
+                            pass
+
+                    if len(_nums) >= 3:
+                        _qty    = float(_qty_s)
+                        # Estructura esperada (de izquierda a derecha):
+                        #   Neto  [%Desc]  IVA%  IT  C.Final  Sub-Total
+                        # El último siempre es Sub-Total, el primero es Neto
+                        _sub    = _nums[-1]
+                        _neto   = _nums[0]
+                        # IVA%: buscar el valor típico 21.0 o 10.5 en las posiciones centrales
+                        _iva    = 21.0
+                        for _n in _nums[1:-1]:
+                            if abs(_n - 21.0) < 0.6:
+                                _iva = 21.0; break
+                            if abs(_n - 10.5) < 0.6:
+                                _iva = 10.5; break
+
+                        # Descripción: texto antes del primer número + texto después del último
+                        # Esto captura el modelo que queda al final de la línea (ej: G2110, G3110)
+                        _fst_m  = re.search(_num_re, _rest_fixed)
+                        _all_ms = list(re.finditer(_num_re, _rest_fixed))
+                        _pre  = (_rest_fixed[:_fst_m.start()].strip()
+                                 if _fst_m else _rest_fixed.strip())
+                        _post = (_rest_fixed[_all_ms[-1].end():].strip()
+                                 if _all_ms else "")
+                        _desc = ((_pre + " " + _post).strip() if _post else _pre)
+                        _desc = re.sub(r'\s+', ' ', _desc).strip()
+
+                        fields["lineas"].append({
+                            "codigo":      _cod,
+                            "descripcion": _desc,
+                            "cantidad":    _qty,
+                            "precio_unit": round(_neto, 2),
+                            "iva_pct":     _iva,
+                            "subtotal":    round(_sub, 2),
+                        })
+                _j += 1
 
     return fields, all_tables, text
 
