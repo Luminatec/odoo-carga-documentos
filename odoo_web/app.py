@@ -296,14 +296,19 @@ def _to_float(v):
         return 0.0
 
 def parse_ar_date(raw):
-    """Convierte DD/MM/YYYY → YYYY-MM-DD. Retorna '' si no puede parsear."""
+    """
+    Convierte fechas a ISO YYYY-MM-DD.
+    Soporta: DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY, YYYY-MM-DD, YYYY/MM/DD.
+    """
     if not raw:
         return ""
     raw = raw.strip()
-    m = re.match(r"(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})", raw)
+    # DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY
+    m = re.match(r"(\d{1,2})[/\-\.](\d{1,2})[/\-\.](\d{4})", raw)
     if m:
         d, mo, y = m.group(1).zfill(2), m.group(2).zfill(2), m.group(3)
         return f"{y}-{mo}-{d}"
+    # YYYY-MM-DD, YYYY/MM/DD
     m2 = re.match(r"(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})", raw)
     if m2:
         return raw[:10]
@@ -706,24 +711,25 @@ def extract_oc_fields(file_bytes):
         fields["cuit"] = re.sub(r'[-\s]', '', cuits_found[0])
 
     # ── Número de OC ─────────────────────────────────────────────────────
-    # El número puede tener coma como separador de miles: 0001-0118,667 → 0001-0118667
     oc_pats = [
+        # CASTILLO: "Orden de Compra N 0001-0118,667"
         r"(?:Orden\s+de\s+[Cc]ompra|O\.?C\.?\s*N[°o]?|ORDEN\s+DE\s+COMPRA\s*N?\s*)[:\s]*([0-9]{4}[-/][0-9,]{4,})",
-        r"(?:N[°º]\s*(?:de\s+)?[Oo]rden|Pedido\s+N[°º])[:\s]*([0-9]{4}[-/][0-9,]{4,})",
+        # Carsa/MUSIMUNDO: "Orden Definitiva de Provisión Número: 4501653808"
+        r"(?:Orden\s+Definitiva|Orden\s+de\s+Provisi[oó]n)\b.{0,40}N[úu]mero[:\s]+(\d{6,})",
+        r"(?:N[°º]\s*(?:de\s+)?[Oo]rden|Pedido\s+N[°º]|N[°º]\s*[Pp]edido)[:\s]*([0-9]{4}[-/][0-9,]{4,}|\d{6,})",
         r"\b(0{4}[-/][0-9,]{4,})\b",
     ]
     for pat in oc_pats:
         mo = re.search(pat, text, re.IGNORECASE)
         if mo:
-            raw_num = mo.group(1).strip()
-            # Normalizar: quitar comas internas del número (0001-0118,667 → 0001-0118667)
-            fields["numero_oc"] = raw_num.replace(",", "")
+            fields["numero_oc"] = mo.group(1).strip().replace(",", "")
             break
 
     # ── Fecha ─────────────────────────────────────────────────────────────
+    # Soporta DD/MM/YYYY, DD.MM.YYYY, DD-MM-YYYY
     date_pats = [
-        r"(?:Fecha|FECHA|Date)[:\s]+(\d{1,2}/\d{1,2}/\d{4})",
-        r"(?:^|\s)(\d{1,2}/\d{1,2}/\d{4})(?:\s|$)",
+        r"(?:Fecha\s+[Ee]misi[oó]n|Fecha\s+OC|Fecha)[:\s]+(\d{1,2}[/.\-]\d{1,2}[/.\-]\d{4})",
+        r"(?:^|\s)(\d{1,2}[/.\-]\d{1,2}[/.\-]\d{4})(?:\s|$)",
     ]
     for pat in date_pats:
         mo = re.search(pat, text, re.IGNORECASE | re.MULTILINE)
@@ -735,15 +741,17 @@ def extract_oc_fields(file_bytes):
     # ── Condiciones de pago ───────────────────────────────────────────────
     cond_pats = [
         r"(?:Condici[oó]n(?:es)?\s+de\s+[Pp]ago|Forma\s+de\s+[Pp]ago)[:\s]+([^\n]{3,80})",
+        # Carsa: "Condición: 0016 - 60 Dias"
+        r"(?:^|\n)\s*Condici[oó]n[:\s]+([^\n]{3,60})",
         r"(CUENTA\s+CORRIENTE[^\n]{0,60})",
     ]
     for pat in cond_pats:
-        mo = re.search(pat, text, re.IGNORECASE)
+        mo = re.search(pat, text, re.IGNORECASE | re.MULTILINE)
         if mo:
             fields["condiciones_pago"] = mo.group(1).strip()
             break
 
-    # Días: buscar "Intervalo: 30" primero, luego parse genérico
+    # Días: buscar "Intervalo: 30", "60 Dias", "LOS XX DIAS"
     intervalo_mo = re.search(r"[Ii]ntervalo[:\s]+(\d+)", text)
     if intervalo_mo:
         fields["dias_pago"] = int(intervalo_mo.group(1))
@@ -760,11 +768,17 @@ def extract_oc_fields(file_bytes):
     mo = re.search(r"IVA\s+10[.,]5\s*%[:\s$]*\$?\s*([\d.,]+)", text, re.IGNORECASE)
     if mo:
         fields["iva_105"] = normalize_amount(mo.group(1))
-    mo = re.search(r"(?:Total\s+OC|TOTAL\s+OC|Total\s+[Oo]rden)[:\s$]*\$?\s*([\d.,]+)", text, re.IGNORECASE)
-    if not mo:
-        mo = re.search(r"(?:^|\n)\s*TOTAL[:\s$]*\$?\s*([\d.,]+)\s*(?:$|\n)", text, re.IGNORECASE | re.MULTILINE)
-    if mo:
-        fields["total"] = normalize_amount(mo.group(1))
+    # Carsa: "TOTAL PEDIDO DE COMPRAS ARS 35.923.359,50"
+    total_pats = [
+        r"(?:Total\s+OC|TOTAL\s+OC|Total\s+[Oo]rden)[:\s$]*\$?\s*([\d.,]+)",
+        r"TOTAL\s+PEDIDO[^\d]+([\d.,]+)",
+        r"(?:^|\n)\s*TOTAL[:\s$]*\$?\s*([\d.,]+)\s*(?:$|\n)",
+    ]
+    for _tp in total_pats:
+        mo = re.search(_tp, text, re.IGNORECASE | re.MULTILINE)
+        if mo:
+            fields["total"] = normalize_amount(mo.group(1))
+            break
 
     # ── Líneas de productos (desde tablas pdfplumber) ─────────────────────
     def _try_num(s):
@@ -824,6 +838,77 @@ def extract_oc_fields(file_bytes):
                 "iva_pct":     iva   if iva   is not None else 21.0,
                 "subtotal":    sub   if sub   is not None else (
                                    (qty * price) if (qty and price) else 0),
+            })
+
+    # ── Fallback EAN13: formato Carsa/MUSIMUNDO ──────────────────────────
+    # Líneas: {EAN13} {INTCODE-DESCRIPCION} {M3} {QTY} UN {PRECIO} {SUBTOTAL}
+    # IVA en línea posterior ("IVA 21%" / "IVA 10,5%")
+    if not fields["lineas"] and text:
+        _ean_lines = text.split("\n")
+        for _ei, _eln in enumerate(_ean_lines):
+            _strip = _eln.strip()
+            # Línea con EAN13 + contenido + "UN" + dos números al final
+            _em = re.match(
+                r'^(\d{13})\s+(.+?)\s+UN\s+([\d.]+,\d{2})\s+([\d.]+,\d{2})\s*$',
+                _strip)
+            if not _em:
+                continue
+            _ean       = _em.group(1)
+            _rest_ean  = _em.group(2).strip()
+            _price_raw = _em.group(3)
+            _sub_raw   = _em.group(4)
+
+            # Extraer qty (último entero antes de UN — ya consumido por regex previo)
+            # qty está al final de _rest_ean: "... 3,540 60"
+            _qty_m = re.search(r'\s+(\d+)\s*$', _rest_ean)
+            _qty   = int(_qty_m.group(1)) if _qty_m else 0
+            _rest_ean = (_rest_ean[:_qty_m.start()].strip() if _qty_m else _rest_ean)
+
+            # Remover M3 (decimal con coma como separador decimal: "3,540")
+            _m3_m = re.search(r'\s+([\d]+,\d{3})\s*$', _rest_ean)
+            if _m3_m:
+                _rest_ean = _rest_ean[:_m3_m.start()].strip()
+
+            # Extraer código interno: "176270-DESCRIPCION"
+            _ic_m = re.match(r'^(\d{4,8})-(.+)$', _rest_ean)
+            _int_code = _ic_m.group(1) if _ic_m else _ean
+            _desc_ean = (_ic_m.group(2).strip() if _ic_m else _rest_ean.strip())
+
+            # Líneas de continuación: absorber hasta encontrar "Entregar:" o otro EAN13
+            _ei2 = _ei + 1
+            while _ei2 < len(_ean_lines):
+                _nl2 = _ean_lines[_ei2].strip()
+                if (re.match(r'^\d{13}\s', _nl2)
+                        or re.match(r'^Entregar:', _nl2, re.IGNORECASE)
+                        or re.match(r'^TOTAL|^Vencimiento|^P[aá]gina', _nl2, re.IGNORECASE)):
+                    break
+                if _nl2 and re.search(r'[A-Za-z0-9]', _nl2) and not re.match(r'^IVA', _nl2, re.IGNORECASE):
+                    _desc_ean += " " + _nl2
+                _ei2 += 1
+
+            # Buscar IVA en las líneas siguientes (después de Entregar:)
+            _iva_ean = 21.0
+            for _fwd in range(_ei + 1, min(_ei + 6, len(_ean_lines))):
+                _fwd_ln = _ean_lines[_fwd].strip()
+                _iva_m2 = re.match(r'IVA\s+([\d,.]+)\s*%', _fwd_ln, re.IGNORECASE)
+                if _iva_m2:
+                    try:
+                        _iva_ean = float(normalize_amount(_iva_m2.group(1)))
+                    except Exception:
+                        pass
+                    break
+
+            _price_f = float(normalize_amount(_price_raw))
+            _sub_f   = float(normalize_amount(_sub_raw))
+            _desc_ean = re.sub(r'\s+', ' ', _desc_ean).strip()
+
+            fields["lineas"].append({
+                "codigo":      _int_code,
+                "descripcion": _desc_ean,
+                "cantidad":    float(_qty),
+                "precio_unit": _price_f,
+                "iva_pct":     _iva_ean,
+                "subtotal":    _sub_f,
             })
 
     # ── Fallback: parser de texto cuando no hay tablas ───────────────────
