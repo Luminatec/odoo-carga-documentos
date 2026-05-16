@@ -133,14 +133,27 @@ def get_service_connection():
 
 def verify_user(email, password):
     """
-    Verifica email + contraseña contra st.secrets.
-    APP_USERS    = "email1:clave1,email2:clave2"  (por usuario)
-    APP_PASSWORD = "clave_compartida"              (todos igual)
+    Verifica email + contraseña.
+    Prioridad:
+      1. Credenciales de Odoo (cualquier usuario activo del sistema)
+      2. APP_USERS  = "email1:clave1,email2:clave2"  (fallback manual)
+      3. APP_PASSWORD = "clave_compartida"            (fallback global)
     """
     import hashlib
     email = email.strip().lower()
-    pw_hash = hashlib.sha256(password.encode()).hexdigest()
 
+    # ── 1. Autenticación via Odoo ────────────────────────────────────────────
+    # Permite que cualquier usuario de Odoo entre con su email + contraseña Odoo.
+    try:
+        _common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common", allow_none=True)
+        _uid = _common.authenticate(ODOO_DB, email, password, {})
+        if _uid:
+            return True, ""
+    except Exception:
+        pass  # si Odoo no responde, cae al fallback
+
+    # ── 2. APP_USERS en secrets (fallback) ───────────────────────────────────
+    pw_hash = hashlib.sha256(password.encode()).hexdigest()
     app_users_raw = st.secrets.get("APP_USERS", "")
     if app_users_raw:
         user_map = {}
@@ -148,20 +161,22 @@ def verify_user(email, password):
             parts = entry.strip().split(":", 1)
             if len(parts) == 2:
                 user_map[parts[0].strip().lower()] = parts[1].strip()
-        if email not in user_map:
-            return False, "Email no autorizado."
-        expected = user_map[email]
-        if password == expected or pw_hash == expected:
-            return True, ""
-        return False, "Contraseña incorrecta."
+        if email in user_map:
+            expected = user_map[email]
+            if password == expected or pw_hash == expected:
+                return True, ""
+            return False, "Contraseña incorrecta."
+        # Email no está en APP_USERS ni autenticó en Odoo
+        return False, "Email no autorizado o contraseña incorrecta."
 
+    # ── 3. APP_PASSWORD (clave global compartida) ────────────────────────────
     app_password = st.secrets.get("APP_PASSWORD", "")
     if app_password:
         if password == app_password or pw_hash == app_password:
             return True, ""
         return False, "Contraseña incorrecta."
 
-    return False, "Configurá APP_PASSWORD o APP_USERS en los secrets de Streamlit."
+    return False, "Contraseña incorrecta."
 
 def call(models, uid, api_key, model, method, args, kw=None):
     return models.execute_kw(ODOO_DB, uid, api_key, model, method, args, kw or {})
