@@ -764,12 +764,19 @@ def extract_oc_fields(file_bytes):
     mo = re.search(r"(?:Sub[-\s]?[Tt]otal\s+[Nn]eto|SUBTOTAL\s+NETO|Neto\s+Gravado)[:\s$]*\$?\s*([\d.,]+)", text, re.IGNORECASE)
     if mo:
         fields["subtotal_neto"] = normalize_amount(mo.group(1))
-    mo = re.search(r"IVA\s+21\s*%[:\s$]*\$?\s*([\d.,]+)", text, re.IGNORECASE)
+    # Solo capturar IVA si hay un monto en la MISMA línea (no cruzar newline)
+    # Esto evita capturar EAN13 del producto siguiente como monto de IVA
+    mo = re.search(r"IVA\s+21\s*%[ \t:$]*\$?[ \t]*([\d.,]+)", text, re.IGNORECASE)
     if mo:
-        fields["iva_21"] = normalize_amount(mo.group(1))
-    mo = re.search(r"IVA\s+10[.,]5\s*%[:\s$]*\$?\s*([\d.,]+)", text, re.IGNORECASE)
+        _iva21_raw = mo.group(1)
+        # Descartar si parece un EAN13 u otro código de barras (≥12 dígitos sin coma/punto)
+        if not re.match(r'^\d{12,}$', _iva21_raw.replace(',','').replace('.','')):
+            fields["iva_21"] = normalize_amount(_iva21_raw)
+    mo = re.search(r"IVA\s+10[.,]5\s*%[ \t:$]*\$?[ \t]*([\d.,]+)", text, re.IGNORECASE)
     if mo:
-        fields["iva_105"] = normalize_amount(mo.group(1))
+        _iva105_raw = mo.group(1)
+        if not re.match(r'^\d{12,}$', _iva105_raw.replace(',','').replace('.','')):
+            fields["iva_105"] = normalize_amount(_iva105_raw)
     # Carsa: "TOTAL PEDIDO DE COMPRAS ARS 35.923.359,50"
     total_pats = [
         r"(?:Total\s+OC|TOTAL\s+OC|Total\s+[Oo]rden)[:\s$]*\$?\s*([\d.,]+)",
@@ -844,15 +851,30 @@ def extract_oc_fields(file_bytes):
 
     # ── Fallback EAN13: formato Carsa/MUSIMUNDO ──────────────────────────
     # Líneas: {EAN13} {INTCODE-DESCRIPCION} {M3} {QTY} UN {PRECIO} {SUBTOTAL}
+    # pdfplumber puede wrappear la línea; combinamos hasta 3 líneas siguientes
+    # para armar el registro completo antes de aplicar el regex.
     # IVA en línea posterior ("IVA 21%" / "IVA 10,5%")
     if not fields["lineas"] and text:
         _ean_lines = text.split("\n")
+        _ean_pat   = re.compile(
+            r'^(\d{13})\s+(.+?)\s+UN\s+([\d.]+,\d{2})\s+([\d.]+,\d{2})\s*$')
+        _ean_stop  = re.compile(
+            r'^(?:\d{13}\s|Entregar:|TOTAL|Vencimiento|P[aá]gina)',
+            re.IGNORECASE)
         for _ei, _eln in enumerate(_ean_lines):
             _strip = _eln.strip()
-            # Línea con EAN13 + contenido + "UN" + dos números al final
-            _em = re.match(
-                r'^(\d{13})\s+(.+?)\s+UN\s+([\d.]+,\d{2})\s+([\d.]+,\d{2})\s*$',
-                _strip)
+            if not re.match(r'^\d{13}\b', _strip):
+                continue
+            # Combinar con las siguientes líneas hasta completar el patrón
+            _combined = _strip
+            for _fwd_idx in range(_ei + 1, min(_ei + 4, len(_ean_lines))):
+                _nxt = _ean_lines[_fwd_idx].strip()
+                if _ean_stop.match(_nxt):
+                    break
+                _combined += ' ' + _nxt
+                if _ean_pat.match(_combined.strip()):
+                    break
+            _em = _ean_pat.match(_combined.strip())
             if not _em:
                 continue
             _ean       = _em.group(1)
@@ -1842,12 +1864,20 @@ with tab_orders:
             _margin_total = ((_calc_neto - _calc_costo) / _calc_neto * 100
                              if _calc_neto > 0 else 0.0)
 
-            # Usar valores detectados en el PDF cuando estén disponibles
-            _show_neto  = float(oc_fields.get("subtotal_neto") or _calc_neto or 0)
-            _show_iva   = float(oc_fields.get("iva_21")        or _calc_iva  or 0)
-            _show_total = float(oc_fields.get("total")         or _calc_total or 0)
-            if not _show_total and _show_neto:
-                _show_total = _show_neto + _show_iva
+            # Cuando hay líneas enriquecidas, usar valores calculados (más exactos).
+            # Solo caer en los valores del PDF si no hay líneas detectadas.
+            if _enriched:
+                _show_neto   = _calc_neto
+                _show_iva21  = _calc_iva21
+                _show_iva105 = _calc_iva105
+                _show_iva    = _calc_iva
+                _show_total  = _calc_neto + _calc_iva
+            else:
+                _show_neto   = float(oc_fields.get("subtotal_neto") or 0)
+                _show_iva21  = float(oc_fields.get("iva_21")  or 0)
+                _show_iva105 = float(oc_fields.get("iva_105") or 0)
+                _show_iva    = _show_iva21 + _show_iva105
+                _show_total  = float(oc_fields.get("total") or 0) or (_show_neto + _show_iva)
 
             # ── SECCIÓN 4: RESUMEN FINANCIERO ────────────────────────────
             st.markdown("##### 💰 Resumen financiero")
@@ -1902,12 +1932,19 @@ with tab_orders:
 
             # ── SECCIÓN 6: ASIENTO ESTIMADO ───────────────────────────────
             st.markdown("##### 📒 Asiento estimado en Odoo")
+            _iva_rows_md = ""
+            if _show_iva105 > 0:
+                _iva_rows_md += f"| IVA Débito Fiscal 10,5% | | {fmt_ars(_show_iva105)} |\n"
+            if _show_iva21 > 0:
+                _iva_rows_md += f"| IVA Débito Fiscal 21% | | {fmt_ars(_show_iva21)} |"
+            elif _show_iva > 0 and not _iva_rows_md:
+                _iva_rows_md += f"| IVA Débito Fiscal | | {fmt_ars(_show_iva)} |"
             st.markdown(
                 f"| Cuenta | Debe | Haber |\n"
                 f"|---|---|---|\n"
                 f"| Cuentas por Cobrar (Clientes) | {fmt_ars(_show_total)} | |\n"
                 f"| Ventas / Ingresos | | {fmt_ars(_show_neto)} |\n"
-                f"| IVA Débito Fiscal 21% | | {fmt_ars(_show_iva)} |"
+                + _iva_rows_md
             )
 
             # ── SECCIÓN 7: CREAR PEDIDO ───────────────────────────────────
@@ -2180,38 +2217,4 @@ if tab_import is not None:
 
         st.divider()
 
-        # ── Acta CFO ─────────────────────────────────────────────
-        st.markdown("#### ✅ Acta CFO — Etapa 6")
-        st.caption("15 checks del Decálogo CFO Dios — completar antes de declarar carpeta cerrada.")
-        checks = []
-        c_left, c_right = st.columns(2)
-        for j, item in enumerate(DECALOGO):
-            col = c_left if j % 2 == 0 else c_right
-            checks.append(col.checkbox(item, key=f"acta_{j}"))
-        total_chk = sum(checks)
-        st.progress(total_chk / len(DECALOGO), text=f"{total_chk}/{len(DECALOGO)} checks")
-        if total_chk == len(DECALOGO):
-            if st.button(f"🎉 Firmar Acta CFO — Cerrar carpeta {st.session_state.carpeta_id}",
-                         type="primary", key="btn_acta_firmar"):
-                st.session_state.etapas["6"] = True
-                st.balloons()
-                st.success(f"✅ Carpeta {st.session_state.carpeta_id} CERRADA. Acta CFO firmada.")
-        else:
-            st.warning(f"⚠️ Quedan {len(DECALOGO) - total_chk} checks pendientes del Decálogo.")
-
-# ═══════════════════════════════════════════════════
-# TAB 4 — HISTORIAL
-# ═══════════════════════════════════════════════════
-with tab_history:
-    st.subheader("Historial de esta sesión")
-    history = st.session_state.history
-    if history:
-        for r in reversed(history):
-            c1, c2, c3 = st.columns([2, 4, 1])
-            c1.markdown(f"**{r['tipo']}**")
-            c2.markdown(f"{r['archivo']} — [Ver en Odoo (ID {r['id']})]({r['url']})")
-            c3.markdown(r["estado"])
-        st.divider()
-        if st.button("🗑️ Limpiar historial"):
-            st.session_state.history = []
-            st.rerun()
+        # ── Acta CFO ───
