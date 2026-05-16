@@ -135,18 +135,28 @@ def verify_user(email, password):
     """
     Verifica email + contraseña.
     Prioridad:
-      1. Credenciales de Odoo (cualquier usuario activo del sistema)
-      2. APP_USERS  = "email1:clave1,email2:clave2"  (fallback manual)
+      1. Odoo JSON-RPC /web/session/authenticate (contraseña web normal, sin API key)
+      2. APP_USERS  = "email1:clave1,email2:clave2"  (fallback manual en secrets)
       3. APP_PASSWORD = "clave_compartida"            (fallback global)
     """
-    import hashlib
+    import hashlib, urllib.request, json as _json
     email = email.strip().lower()
 
-    # ── 1. Autenticación via Odoo ────────────────────────────────────────────
-    # Permite que cualquier usuario de Odoo entre con su email + contraseña Odoo.
+    # ── 1. Autenticación via Odoo JSON-RPC (misma clave que el navegador) ────
     try:
-        _common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common", allow_none=True)
-        _uid = _common.authenticate(ODOO_DB, email, password, {})
+        _payload = _json.dumps({
+            "jsonrpc": "2.0", "method": "call", "id": 1,
+            "params": {"db": ODOO_DB, "login": email, "password": password}
+        }).encode()
+        _req = urllib.request.Request(
+            f"{ODOO_URL}/web/session/authenticate",
+            data=_payload,
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        with urllib.request.urlopen(_req, timeout=8) as _resp:
+            _data = _json.loads(_resp.read())
+        _uid = (_data.get("result") or {}).get("uid")
         if _uid:
             return True, ""
     except Exception:
@@ -166,7 +176,6 @@ def verify_user(email, password):
             if password == expected or pw_hash == expected:
                 return True, ""
             return False, "Contraseña incorrecta."
-        # Email no está en APP_USERS ni autenticó en Odoo
         return False, "Email no autorizado o contraseña incorrecta."
 
     # ── 3. APP_PASSWORD (clave global compartida) ────────────────────────────
