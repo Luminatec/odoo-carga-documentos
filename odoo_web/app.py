@@ -643,10 +643,23 @@ def search_product_by_code_or_name(models_url, uid, api_key, code="", name_keywo
                 {"fields": fields, "limit": limit})
             if rows:
                 return rows
-        # 2. Name keywords (primeras 3 palabras significativas)
+        # 2. Name keywords — limpia puntuación y prioriza número de modelo
         if name_keywords and name_keywords.strip():
-            keywords = [w for w in name_keywords.strip().split() if len(w) >= 3][:3]
+            _clean = re.sub(r'[^\w\s]', ' ', name_keywords.strip())
+            all_words = [w for w in _clean.split() if len(w) >= 3]
+            model_kws   = [w for w in all_words
+                           if re.search(r'[A-Za-z]', w) and re.search(r'\d', w) and len(w) >= 4]
+            generic_kws = [w for w in all_words if w not in model_kws]
+            keywords = (model_kws + generic_kws)[:3]
             if keywords:
+                # Intento 1: solo nº de modelo (G3110, G2110, etc.) — muy específico
+                if model_kws:
+                    rows = m.execute_kw(ODOO_DB, uid, api_key, "product.product", "search_read",
+                        [[("active", "=", True), ("name", "ilike", model_kws[0])]],
+                        {"fields": fields, "limit": limit})
+                    if rows:
+                        return rows
+                # Intento 2: AND con las 3 keywords limpias
                 domain = [("active", "=", True)]
                 for kw in keywords:
                     domain.append(("name", "ilike", kw))
@@ -654,9 +667,10 @@ def search_product_by_code_or_name(models_url, uid, api_key, code="", name_keywo
                     [domain], {"fields": fields, "limit": limit})
                 if rows:
                     return rows
-                # fallback: solo primera keyword
+                # Intento 3: primera keyword genérica sola
+                fallback_kw = generic_kws[0] if generic_kws else keywords[0]
                 rows = m.execute_kw(ODOO_DB, uid, api_key, "product.product", "search_read",
-                    [[("active", "=", True), ("name", "ilike", keywords[0])]],
+                    [[("active", "=", True), ("name", "ilike", fallback_kw)]],
                     {"fields": fields, "limit": limit})
                 if rows:
                     return rows
