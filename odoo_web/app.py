@@ -263,21 +263,30 @@ def create_landed_cost(models, uid, api_key, picking_ids, cost_lines):
     }
     return call(models, uid, api_key, "stock.landed.cost", "create", [vals])
 
-def create_sale_order(models, uid, api_key, partner_id, note, lines, filename, file_bytes, mimetype):
-    order_id = call(models, uid, api_key, "sale.order", "create", [{"partner_id": partner_id, "note": note or ""}])
+def create_sale_order(models, uid, api_key, partner_id, note, lines, filename, file_bytes, mimetype,
+                      client_order_ref=None, payment_term_id=None, date_order=None):
+    vals = {"partner_id": partner_id, "note": note or ""}
+    if client_order_ref: vals["client_order_ref"] = client_order_ref
+    if payment_term_id:  vals["payment_term_id"]  = payment_term_id
+    if date_order:       vals["date_order"]        = date_order
+    order_id = call(models, uid, api_key, "sale.order", "create", [vals])
     for ln in lines:
-        prod_ids = call(models, uid, api_key, "product.product", "search",
-                        [[("name", "ilike", ln.get("producto", ""))]], {"limit": 1})
         line_vals = {
-            "order_id": order_id,
-            "name": ln.get("producto") or "Sin descripción",
+            "order_id":       order_id,
+            "name":           ln.get("descripcion") or ln.get("producto") or "Sin descripción",
             "product_uom_qty": _to_float(ln.get("cantidad", 1)),
-            "price_unit": _to_float(ln.get("precio", 0)),
+            "price_unit":     _to_float(ln.get("precio_unit") or ln.get("precio", 0)),
         }
-        if prod_ids:
-            line_vals["product_id"] = prod_ids[0]
+        if ln.get("product_id"):
+            line_vals["product_id"] = ln["product_id"]
+        elif ln.get("producto"):
+            prod_ids = call(models, uid, api_key, "product.product", "search",
+                            [[("name", "ilike", ln["producto"])]], {"limit": 1})
+            if prod_ids:
+                line_vals["product_id"] = prod_ids[0]
         call(models, uid, api_key, "sale.order.line", "create", [line_vals])
-    attach_file(models, uid, api_key, "sale.order", order_id, filename, file_bytes, mimetype)
+    if file_bytes:
+        attach_file(models, uid, api_key, "sale.order", order_id, filename, file_bytes, mimetype)
     return order_id
 
 def _to_float(v):
@@ -579,6 +588,244 @@ def extract_pdf_fields(file_bytes):
 
     return fields, text
 
+@st.cache_data(ttl=600, show_spinner=False)
+def get_all_payment_terms(models_url, uid, api_key):
+    """Retorna lista de (id, name) de plazos de pago activos en Odoo."""
+    try:
+        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        rows = m.execute_kw(ODOO_DB, uid, api_key, "account.payment.term", "search_read",
+            [[("active", "=", True)]],
+            {"fields": ["id", "name"], "order": "name asc"})
+        return [(r["id"], r["name"]) for r in rows]
+    except Exception:
+        return []
+
+@st.cache_data(ttl=120, show_spinner=False)
+def get_customer_payment_terms(models_url, uid, api_key, partner_id):
+    """Retorna (payment_term_id, payment_term_name) del cliente, o (None, None)."""
+    try:
+        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        rows = m.execute_kw(ODOO_DB, uid, api_key, "res.partner", "read",
+            [[partner_id]],
+            {"fields": ["property_payment_term_id"]})
+        if rows:
+            pt = rows[0].get("property_payment_term_id")
+            if pt and isinstance(pt, (list, tuple)) and len(pt) == 2:
+                return pt[0], pt[1]
+    except Exception:
+        pass
+    return None, None
+
+@st.cache_data(ttl=300, show_spinner=False)
+def search_product_by_code_or_name(models_url, uid, api_key, code="", name_keywords="", limit=3):
+    """
+    Busca producto en Odoo por código (default_code) y/o palabras clave del nombre.
+    Retorna lista de dicts con id, name, default_code, standard_price, list_price.
+    """
+    try:
+        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        fields = ["id", "name", "default_code", "standard_price", "list_price"]
+        # 1. Exact code match
+        if code and code.strip():
+            rows = m.execute_kw(ODOO_DB, uid, api_key, "product.product", "search_read",
+                [[("default_code", "=", code.strip()), ("active", "=", True)]],
+                {"fields": fields, "limit": 1})
+            if rows:
+                return rows
+            # ilike fallback
+            rows = m.execute_kw(ODOO_DB, uid, api_key, "product.product", "search_read",
+                [[("default_code", "ilike", code.strip()), ("active", "=", True)]],
+                {"fields": fields, "limit": limit})
+            if rows:
+                return rows
+        # 2. Name keywords (primeras 3 palabras significativas)
+        if name_keywords and name_keywords.strip():
+            keywords = [w for w in name_keywords.strip().split() if len(w) >= 3][:3]
+            if keywords:
+                domain = [("active", "=", True)]
+                for kw in keywords:
+                    domain.append(("name", "ilike", kw))
+                rows = m.execute_kw(ODOO_DB, uid, api_key, "product.product", "search_read",
+                    [domain], {"fields": fields, "limit": limit})
+                if rows:
+                    return rows
+                # fallback: solo primera keyword
+                rows = m.execute_kw(ODOO_DB, uid, api_key, "product.product", "search_read",
+                    [[("active", "=", True), ("name", "ilike", keywords[0])]],
+                    {"fields": fields, "limit": limit})
+                if rows:
+                    return rows
+    except Exception:
+        pass
+    return []
+
+def create_partner(models, uid, api_key, name, vat, street="", phone="", email_addr=""):
+    """Crea un nuevo cliente en Odoo y retorna su ID."""
+    vals = {"name": name, "customer_rank": 1, "is_company": True}
+    if vat:        vals["vat"]    = vat
+    if street:     vals["street"] = street
+    if phone:      vals["phone"]  = phone
+    if email_addr: vals["email"]  = email_addr
+    return call(models, uid, api_key, "res.partner", "create", [vals])
+
+def extract_oc_fields(file_bytes):
+    """
+    Parser para Órdenes de Compra de clientes (formato heterogéneo).
+    Extrae: CUIT del emisor (cliente/comprador), número OC, fecha, condiciones
+    de pago, líneas de productos (código, descripción, qty, precio_unit, iva%,
+    subtotal), y totales (neto, IVA 21%, IVA 10.5%, total OC).
+    Retorna (fields_dict, all_tables, raw_text).
+    """
+    try:
+        import pdfplumber
+        with pdfplumber.open(BytesIO(file_bytes)) as pdf:
+            pages_text = [page.extract_text() or "" for page in pdf.pages]
+            text = "\n".join(pages_text)
+            all_tables = []
+            for page in pdf.pages:
+                tbls = page.extract_tables()
+                if tbls:
+                    all_tables.extend(tbls)
+    except Exception:
+        return {}, [], ""
+    if not text.strip():
+        return {}, [], ""
+
+    fields = {
+        "cuit": "", "numero_oc": "", "fecha": "", "fecha_iso": "",
+        "condiciones_pago": "", "dias_pago": None,
+        "lineas": [],
+        "subtotal_neto": "", "iva_21": "", "iva_105": "", "total": "",
+    }
+
+    # ── CUIT emisor ──────────────────────────────────────────────────────
+    cuits_found = re.findall(r'\b(\d{2}-\d{8}-\d)\b', text)
+    if not cuits_found:
+        cuits_found = re.findall(r'\bCUIT[:\s.]*(\d{11})\b', text, re.IGNORECASE)
+    if cuits_found:
+        fields["cuit"] = re.sub(r'[-\s]', '', cuits_found[0])
+
+    # ── Número de OC ─────────────────────────────────────────────────────
+    oc_pats = [
+        r"(?:Orden\s+de\s+[Cc]ompra|O\.?C\.?|ORDEN\s+DE\s+COMPRA)\s*[N°#:Nro.]*\s*([0-9]{4}[-/][0-9]{4,})",
+        r"(?:N[°º]\s*(?:de\s+)?[Oo]rden|Pedido\s+N[°º])[:\s]*([0-9]{4}[-/][0-9]{4,})",
+        r"\b(0{4}[-/]\d{4,})\b",
+    ]
+    for pat in oc_pats:
+        mo = re.search(pat, text, re.IGNORECASE)
+        if mo:
+            fields["numero_oc"] = mo.group(1).strip()
+            break
+
+    # ── Fecha ─────────────────────────────────────────────────────────────
+    date_pats = [
+        r"(?:Fecha|FECHA|Date)[:\s]+(\d{1,2}/\d{1,2}/\d{4})",
+        r"(?:^|\s)(\d{1,2}/\d{1,2}/\d{4})(?:\s|$)",
+    ]
+    for pat in date_pats:
+        mo = re.search(pat, text, re.IGNORECASE | re.MULTILINE)
+        if mo:
+            fields["fecha"] = mo.group(1).strip()
+            fields["fecha_iso"] = parse_ar_date(fields["fecha"])
+            break
+
+    # ── Condiciones de pago ───────────────────────────────────────────────
+    cond_pats = [
+        r"(?:Condici[oó]n(?:es)?\s+de\s+[Pp]ago|Forma\s+de\s+[Pp]ago)[:\s]+([^\n]{3,80})",
+        r"(CUENTA\s+CORRIENTE[^\n]{0,60})",
+    ]
+    for pat in cond_pats:
+        mo = re.search(pat, text, re.IGNORECASE)
+        if mo:
+            fields["condiciones_pago"] = mo.group(1).strip()
+            break
+
+    # Días: buscar "Intervalo: 30" primero, luego parse genérico
+    intervalo_mo = re.search(r"[Ii]ntervalo[:\s]+(\d+)", text)
+    if intervalo_mo:
+        fields["dias_pago"] = int(intervalo_mo.group(1))
+    else:
+        fields["dias_pago"] = parse_payment_terms(fields["condiciones_pago"] or text)
+
+    # ── Totales ───────────────────────────────────────────────────────────
+    mo = re.search(r"(?:Sub[-\s]?[Tt]otal\s+[Nn]eto|SUBTOTAL\s+NETO)[:\s$]*\$?\s*([\d.,]+)", text, re.IGNORECASE)
+    if mo:
+        fields["subtotal_neto"] = normalize_amount(mo.group(1))
+    mo = re.search(r"IVA\s+21\s*%[:\s$]*\$?\s*([\d.,]+)", text, re.IGNORECASE)
+    if mo:
+        fields["iva_21"] = normalize_amount(mo.group(1))
+    mo = re.search(r"IVA\s+10[.,]5\s*%[:\s$]*\$?\s*([\d.,]+)", text, re.IGNORECASE)
+    if mo:
+        fields["iva_105"] = normalize_amount(mo.group(1))
+    mo = re.search(r"(?:Total\s+OC|TOTAL\s+OC|Total\s+[Oo]rden)[:\s$]*\$?\s*([\d.,]+)", text, re.IGNORECASE)
+    if not mo:
+        mo = re.search(r"(?:^|\n)\s*TOTAL[:\s$]*\$?\s*([\d.,]+)\s*(?:$|\n)", text, re.IGNORECASE | re.MULTILINE)
+    if mo:
+        fields["total"] = normalize_amount(mo.group(1))
+
+    # ── Líneas de productos (desde tablas pdfplumber) ─────────────────────
+    def _try_num(s):
+        s = str(s or "").strip()
+        if not s or not re.search(r'\d', s):
+            return None
+        try:
+            return float(normalize_amount(s))
+        except Exception:
+            return None
+
+    for table in all_tables:
+        if not table or len(table) < 2:
+            continue
+        header = [str(c or "").strip().lower() for c in table[0]]
+        col_map = {}
+        for i, h in enumerate(header):
+            if re.search(r"c[oó]d|sku|art[ií]culo|codigo", h) and "codigo" not in col_map:
+                col_map["codigo"] = i
+            elif re.search(r"cant|qty|cantidad", h) and "cantidad" not in col_map:
+                col_map["cantidad"] = i
+            elif re.search(r"detal|descri|product|nombre|item", h) and "descripcion" not in col_map:
+                col_map["descripcion"] = i
+            elif re.search(r"\bneto\b|p\.?\s*unit|precio\s*unit|unitario|unit\s*price", h) and "precio_unit" not in col_map:
+                col_map["precio_unit"] = i
+            elif re.search(r"\biva\b|tax|%\s*iva|alicuota", h) and "iva_pct" not in col_map:
+                col_map["iva_pct"] = i
+            elif re.search(r"sub.?total|importe|c\.?final|precio\s*final", h) and "subtotal" not in col_map:
+                col_map["subtotal"] = i
+        if not col_map or ("descripcion" not in col_map and "codigo" not in col_map):
+            continue
+        for row in table[1:]:
+            if not row or all(not c for c in row):
+                continue
+            def _gcol(key, default=""):
+                idx = col_map.get(key)
+                if idx is None or idx >= len(row):
+                    return default
+                return str(row[idx] or "").strip()
+            desc = _gcol("descripcion")
+            cod  = _gcol("codigo")
+            if not desc and not cod:
+                continue
+            if re.match(r'^(detalle|descripci[oó]n|producto|item|total|subtotal)$', desc, re.IGNORECASE):
+                continue
+            qty   = _try_num(_gcol("cantidad"))
+            price = _try_num(_gcol("precio_unit"))
+            sub   = _try_num(_gcol("subtotal"))
+            iva   = _try_num(_gcol("iva_pct"))
+            if qty is None and price is None and sub is None:
+                continue
+            fields["lineas"].append({
+                "codigo":      cod,
+                "descripcion": desc,
+                "cantidad":    qty   if qty   is not None else 0,
+                "precio_unit": price if price is not None else 0,
+                "iva_pct":     iva   if iva   is not None else 21.0,
+                "subtotal":    sub   if sub   is not None else (
+                                   (qty * price) if (qty and price) else 0),
+            })
+
+    return fields, all_tables, text
+
+
 def classify_document(text):
     tu = text.upper()
     rules = [
@@ -856,7 +1103,7 @@ with tab_bills:
                     options=_acct_labels,
                     index=0,
                     key=f"cta_g_{uf.name}",
-                    help="Buscá por código o nombre. Si no seleccionás ninguna, la factura se crea sin línea contable.",
+                    help="La cuenta se pre-selecciona según el proveedor. Cambiala solo si esta operación usa una cuenta distinta a la habitual.",
                 )
 
                 _btn_label = "⬆️ Cargar en Odoo"
@@ -864,16 +1111,18 @@ with tab_bills:
                     _btn_label = "⚠️ Ya existe — Cargar igual"
                 go = st.form_submit_button(_btn_label, use_container_width=True)
 
-            # Asiento estimado (fuera del form, sin interferir)
-            if cuenta_sel and cuenta_sel != "— Sin cuenta —" and extracted.get("neto"):
-                _neto_f = extracted.get("neto","")
-                _iva_f  = extracted.get("iva","")
-                _tot_f  = extracted.get("total","")
+            # Asiento estimado — visible siempre que haya montos
+            _neto_f = extracted.get("neto","")
+            _iva_f  = extracted.get("iva","")
+            _tot_f  = extracted.get("total","")
+            if _neto_f or _tot_f:
+                _cuenta_disp = (cuenta_sel if (cuenta_sel and cuenta_sel != "— Sin cuenta —")
+                                else "*(cuenta de gasto — seleccioná arriba)*")
+                st.markdown("**📒 Asiento estimado en Odoo:**")
                 st.markdown(
-                    f"**Asiento estimado:**\n\n"
                     f"| Cuenta | Debe | Haber |\n"
                     f"|---|---|---|\n"
-                    f"| {cuenta_sel} | {fmt_ars(_neto_f)} | |\n"
+                    f"| {_cuenta_disp} | {fmt_ars(_neto_f)} | |\n"
                     f"| IVA Crédito Fiscal (si aplica) | {fmt_ars(_iva_f)} | |\n"
                     f"| Proveedor (por pagar) | | {fmt_ars(_tot_f)} |"
                 )
@@ -994,47 +1243,251 @@ with tab_orders:
                 if ok: st.success(f"✅ {ok} pedidos creados.")
                 for err in errs: st.warning(err)
         else:
-            extracted, _ = {}, ""
+            # ── Parseo del PDF de OC ──────────────────────────────────────
+            oc_fields, _oc_tables, _oc_raw = {}, [], ""
             if ext == "pdf":
-                with st.spinner("Leyendo PDF..."):
-                    extracted, _ = extract_pdf_fields(file_bytes)
+                with st.spinner("Leyendo OC..."):
+                    oc_fields, _oc_tables, _oc_raw = extract_oc_fields(file_bytes)
             elif ext in ("jpg","jpeg","png"):
                 st.image(file_bytes, caption="Vista previa", width=380)
-            with st.form(key=f"order_form_{uf.name}"):
-                c1, c2  = st.columns(2)
-                cli_i   = c1.text_input("Cliente", value=extracted.get("proveedor","")[:60], placeholder="Nombre exacto en Odoo")
-                ref_i   = c2.text_input("Referencia / N° pedido", value=extracted.get("numero",""))
-                notas_i = st.text_area("Notas", height=55)
-                st.caption("Líneas del pedido (opcional)")
-                lines_txt = st.text_area("Formato: Producto | Cantidad | Precio", height=90,
-                    placeholder="Camiseta azul M | 10 | 2500\nPantalon negro L | 5 | 4000")
-                go = st.form_submit_button("⬆️ Crear pedido en Odoo", use_container_width=True)
-            if go:
-                with st.spinner("Procesando..."):
+
+            # ── Session state para partner de esta OC ─────────────────────
+            _ss_pid   = f"oc_pid_{uf.name}"
+            _ss_pname = f"oc_pname_{uf.name}"
+            if _ss_pid not in st.session_state:
+                st.session_state[_ss_pid] = None
+            if _ss_pname not in st.session_state:
+                st.session_state[_ss_pname] = ""
+
+            # ── SECCIÓN 1: CLIENTE ────────────────────────────────────────
+            st.markdown("##### 🏢 Cliente")
+            _oc_cuit = oc_fields.get("cuit","")
+
+            # Lookup por CUIT si todavía no tenemos partner resuelto
+            if _oc_cuit and not st.session_state[_ss_pid]:
+                _partner_oc = search_partner_by_cuit(models_url, uid, api_key, _oc_cuit)
+                if _partner_oc:
+                    st.session_state[_ss_pid]   = _partner_oc[0]
+                    st.session_state[_ss_pname] = _partner_oc[1]
+
+            _partner_id_oc   = st.session_state[_ss_pid]
+            _partner_name_oc = st.session_state[_ss_pname]
+
+            if _partner_id_oc:
+                st.success(f"✅ Cliente identificado por CUIT **{_oc_cuit}**: **{_partner_name_oc}**")
+                _pt_id, _pt_name = get_customer_payment_terms(models_url, uid, api_key, _partner_id_oc)
+            else:
+                if _oc_cuit:
+                    st.warning(f"⚠️ CUIT **{_oc_cuit}** no encontrado en Odoo.")
+                else:
+                    st.warning("⚠️ No se detectó CUIT en el documento. Completá los datos del cliente.")
+                _pt_id, _pt_name = None, None
+
+                with st.expander("➕ Crear nuevo cliente en Odoo", expanded=True):
+                    _nc1, _nc2 = st.columns(2)
+                    nc_name   = _nc1.text_input("Razón social *", key=f"nc_name_{uf.name}")
+                    nc_cuit   = _nc2.text_input("CUIT *", value=_oc_cuit,
+                                    key=f"nc_cuit_{uf.name}", placeholder="30-12345678-9")
+                    nc_street = _nc1.text_input("Dirección", key=f"nc_street_{uf.name}")
+                    nc_phone  = _nc2.text_input("Teléfono", key=f"nc_phone_{uf.name}")
+                    nc_email  = st.text_input("Email", key=f"nc_email_{uf.name}")
+                    if st.button("Crear cliente en Odoo", key=f"btn_nc_{uf.name}"):
+                        if nc_name and nc_cuit:
+                            try:
+                                _new_pid = create_partner(models, uid, api_key,
+                                    nc_name, nc_cuit, nc_street, nc_phone, nc_email)
+                                st.session_state[_ss_pid]   = _new_pid
+                                st.session_state[_ss_pname] = nc_name
+                                st.success(f"✅ Cliente **{nc_name}** creado en Odoo (ID {_new_pid})")
+                                st.rerun()
+                            except Exception as _e:
+                                st.error(f"❌ {_e}")
+                        else:
+                            st.warning("Razón social y CUIT son obligatorios.")
+
+            # ── SECCIÓN 2: DATOS DE LA OC ─────────────────────────────────
+            st.markdown("##### 📋 Datos de la Orden de Compra")
+            _oc1, _oc2, _oc3 = st.columns(3)
+            _oc_num_i  = _oc1.text_input("N° OC",   value=oc_fields.get("numero_oc",""),
+                                          key=f"ocnum_{uf.name}")
+            _oc_fec_i  = _oc2.text_input("Fecha",   value=oc_fields.get("fecha_iso",""),
+                                          key=f"ocfec_{uf.name}", placeholder="AAAA-MM-DD")
+            _oc_cond_i = _oc3.text_input("Condición de pago",
+                                          value=oc_fields.get("condiciones_pago",""),
+                                          key=f"occond_{uf.name}")
+
+            # ── SECCIÓN 3: PRODUCTOS ──────────────────────────────────────
+            st.markdown("##### 📦 Productos")
+            _lineas_oc = oc_fields.get("lineas", [])
+            _enriched  = []
+
+            if _lineas_oc:
+                for _ln in _lineas_oc:
+                    _prods = search_product_by_code_or_name(
+                        models_url, uid, api_key,
+                        code=_ln.get("codigo",""),
+                        name_keywords=_ln.get("descripcion",""),
+                        limit=1,
+                    )
+                    _op    = _prods[0] if _prods else None
+                    _cost  = float(_op["standard_price"]) if _op else 0.0
+                    _price = float(_ln.get("precio_unit") or 0)
+                    _margin = ((_price - _cost) / _price * 100) if _price > 0 else 0.0
+                    _enriched.append({**_ln,
+                        "odoo_product": _op,
+                        "cost": _cost,
+                        "margin_pct": _margin,
+                    })
+
+                _df_rows = []
+                for _el in _enriched:
+                    _df_rows.append({
+                        "Código":        _el.get("codigo",""),
+                        "Descripción":   _el.get("descripcion",""),
+                        "Cant.":         _el.get("cantidad",0),
+                        "Precio unit.":  fmt_ars(_el.get("precio_unit",0)),
+                        "IVA %":         _el.get("iva_pct","21"),
+                        "Subtotal":      fmt_ars(_el.get("subtotal",0)),
+                        "Costo Odoo":    fmt_ars(_el.get("cost",0)),
+                        "Margen %":      f"{_el.get('margin_pct',0):.1f}%",
+                        "Match Odoo":    (_el["odoo_product"]["name"]
+                                          if _el.get("odoo_product") else "⚠️ Sin match"),
+                    })
+                st.dataframe(pd.DataFrame(_df_rows), use_container_width=True, hide_index=True)
+            else:
+                st.info("No se detectaron líneas de productos automáticamente.")
+
+            # Cálculo de totales desde líneas enriquecidas
+            _calc_neto = sum(float(_el.get("subtotal",0)) for _el in _enriched)
+            _calc_iva21 = sum(
+                float(_el.get("subtotal",0)) * 0.21
+                for _el in _enriched if abs(float(_el.get("iva_pct",21)) - 21) < 1)
+            _calc_iva105 = sum(
+                float(_el.get("subtotal",0)) * 0.105
+                for _el in _enriched if abs(float(_el.get("iva_pct",21)) - 10.5) < 1)
+            _calc_iva   = _calc_iva21 + _calc_iva105
+            _calc_total = _calc_neto + _calc_iva
+            _calc_costo = sum(float(_el.get("cost",0)) * float(_el.get("cantidad",1))
+                              for _el in _enriched)
+            _margin_total = ((_calc_neto - _calc_costo) / _calc_neto * 100
+                             if _calc_neto > 0 else 0.0)
+
+            # Usar valores detectados en el PDF cuando estén disponibles
+            _show_neto  = float(oc_fields.get("subtotal_neto") or _calc_neto or 0)
+            _show_iva   = float(oc_fields.get("iva_21")        or _calc_iva  or 0)
+            _show_total = float(oc_fields.get("total")         or _calc_total or 0)
+            if not _show_total and _show_neto:
+                _show_total = _show_neto + _show_iva
+
+            # ── SECCIÓN 4: RESUMEN FINANCIERO ────────────────────────────
+            st.markdown("##### 💰 Resumen financiero")
+            _rf1, _rf2, _rf3, _rf4 = st.columns(4)
+            _rf1.metric("Total Neto",   fmt_ars(_show_neto))
+            _rf2.metric("IVA",          fmt_ars(_show_iva))
+            _rf3.metric("Total c/IVA",  fmt_ars(_show_total))
+            _rf4.metric("Margen total", f"{_margin_total:.1f}%")
+
+            # ── SECCIÓN 5: PLAZO DE PAGO ──────────────────────────────────
+            st.markdown("##### 📅 Plazo de pago")
+            _oc_dias     = oc_fields.get("dias_pago")
+            _oc_cond_str = oc_fields.get("condiciones_pago","")
+            _pt_choice_id = _pt_id  # default: plazo del cliente en Odoo
+
+            if _pt_id and _pt_name:
+                _odoo_dias_est = parse_payment_terms(_pt_name)
+                _hay_disc = (
+                    _oc_dias is not None
+                    and _odoo_dias_est is not None
+                    and abs(_odoo_dias_est - _oc_dias) > 3
+                )
+                if _hay_disc:
+                    st.warning(
+                        f"⚠️ Discrepancia en plazo: la OC indica **{_oc_dias} días** "
+                        f"({_oc_cond_str}), pero el cliente tiene configurado **{_pt_name}** en Odoo."
+                    )
+                    _all_pts = get_all_payment_terms(models_url, uid, api_key)
+                    _pt_opts_map = {name: pid for pid, name in _all_pts}
+                    _radio_opts  = [
+                        f"Odoo: {_pt_name}",
+                        f"OC: {_oc_cond_str or f'{_oc_dias} días'}",
+                        "Elegir otro plazo",
+                    ]
+                    _radio_sel = st.radio(
+                        "¿Qué plazo usar en el pedido?",
+                        _radio_opts, key=f"pt_radio_{uf.name}"
+                    )
+                    if _radio_sel == _radio_opts[0]:
+                        _pt_choice_id = _pt_id
+                    elif _radio_sel == _radio_opts[1]:
+                        # Buscar el plazo de la OC en Odoo por días
+                        _pt_choice_id = None
+                        for _pid2, _pname2 in _all_pts:
+                            _d2 = parse_payment_terms(_pname2)
+                            if _d2 is not None and abs(_d2 - _oc_dias) <= 3:
+                                _pt_choice_id = _pid2
+                                break
+                    else:
+                        _pt_other_sel = st.selectbox(
+                            "Plazo de pago", [n for _, n in _all_pts],
+                            key=f"pt_other_{uf.name}"
+                        )
+                        _pt_choice_id = _pt_opts_map.get(_pt_other_sel)
+                else:
+                    _oc_info = f" — OC: {_oc_cond_str}" if _oc_cond_str else ""
+                    st.info(f"✅ Plazo del cliente en Odoo: **{_pt_name}**{_oc_info}")
+            elif _oc_dias:
+                st.info(f"📅 OC indica **{_oc_dias} días** ({_oc_cond_str}) "
+                        f"— cliente sin plazo configurado en Odoo.")
+            elif _pt_id:
+                st.info(f"📅 Plazo del cliente en Odoo: **{_pt_name}**")
+
+            # ── SECCIÓN 6: ASIENTO ESTIMADO ───────────────────────────────
+            st.markdown("##### 📒 Asiento estimado en Odoo")
+            st.markdown(
+                f"| Cuenta | Debe | Haber |\n"
+                f"|---|---|---|\n"
+                f"| Cuentas por Cobrar (Clientes) | {fmt_ars(_show_total)} | |\n"
+                f"| Ventas / Ingresos | | {fmt_ars(_show_neto)} |\n"
+                f"| IVA Débito Fiscal 21% | | {fmt_ars(_show_iva)} |"
+            )
+
+            # ── SECCIÓN 7: CREAR PEDIDO ───────────────────────────────────
+            st.markdown("---")
+            _btn_disabled = not bool(_partner_id_oc)
+            if _btn_disabled:
+                st.caption("🔒 Identificá o creá el cliente para habilitar la creación del pedido.")
+            if st.button("⬆️ Crear pedido en Odoo", key=f"btn_order_{uf.name}",
+                         type="primary", disabled=_btn_disabled):
+                with st.spinner("Creando pedido en Odoo..."):
                     try:
-                        matches = search_partners(models_url, uid, api_key, cli_i, limit=3)
-                        if not matches:
-                            st.error(f"Cliente '{cli_i}' no encontrado en Odoo."); st.stop()
-                        partner_id = matches[0][0]
-                        st.caption("Cliente asignado: " + matches[0][1])
-                        lines = []
-                        for line in (lines_txt or "").strip().split("\n"):
-                            if not line.strip(): continue
-                            parts = [p.strip() for p in line.split("|")]
-                            lines.append({
-                                "producto": parts[0] if len(parts)>0 else "",
-                                "cantidad": parts[1] if len(parts)>1 else 1,
-                                "precio":   parts[2] if len(parts)>2 else 0,
+                        _order_lines = []
+                        for _el in _enriched:
+                            _order_lines.append({
+                                "product_id":  _el["odoo_product"]["id"] if _el.get("odoo_product") else None,
+                                "descripcion": _el.get("descripcion",""),
+                                "cantidad":    _el.get("cantidad", 1),
+                                "precio_unit": _el.get("precio_unit", 0),
                             })
-                        order_id = create_sale_order(models, uid, api_key,
-                            partner_id=partner_id, note=notas_i, lines=lines,
-                            filename=uf.name, file_bytes=file_bytes, mimetype=mimetype)
+                        _ref_oc = _oc_num_i or oc_fields.get("numero_oc","")
+                        _fec_oc = _oc_fec_i or oc_fields.get("fecha_iso","") or None
+                        order_id = create_sale_order(
+                            models, uid, api_key,
+                            partner_id       = _partner_id_oc,
+                            note             = f"OC {_ref_oc}" if _ref_oc else "",
+                            lines            = _order_lines,
+                            filename         = uf.name,
+                            file_bytes       = file_bytes,
+                            mimetype         = mimetype,
+                            client_order_ref = _ref_oc or None,
+                            payment_term_id  = _pt_choice_id or None,
+                            date_order       = _fec_oc,
+                        )
                         url = f"{ODOO_URL}/web#id={order_id}&model=sale.order&view_type=form"
                         st.success(f"✅ Pedido creado — [Abrir en Odoo]({url})")
                         st.session_state.history.append({"tipo":"Pedido cliente",
                             "archivo":uf.name,"id":order_id,"url":url,"estado":"✅"})
-                    except Exception as e:
-                        st.error(f"❌ {e}")
+                    except Exception as _e:
+                        st.error(f"❌ {_e}")
 
 
 # ═══════════════════════════════════════════════════
