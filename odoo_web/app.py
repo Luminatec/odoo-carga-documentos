@@ -865,15 +865,17 @@ def extract_oc_fields(file_bytes):
             _strip = _eln.strip()
             if not re.match(r'^\d{13}\b', _strip):
                 continue
-            # Combinar con las siguientes líneas hasta completar el patrón
+            # Combinar con las siguientes líneas SOLO si la línea actual no matchea completa
+            # (evita agregar el modelo del producto siguiente que rompe el regex)
             _combined = _strip
-            for _fwd_idx in range(_ei + 1, min(_ei + 4, len(_ean_lines))):
-                _nxt = _ean_lines[_fwd_idx].strip()
-                if _ean_stop.match(_nxt):
-                    break
-                _combined += ' ' + _nxt
-                if _ean_pat.match(_combined.strip()):
-                    break
+            if not _ean_pat.match(_combined.strip()):
+                for _fwd_idx in range(_ei + 1, min(_ei + 4, len(_ean_lines))):
+                    _nxt = _ean_lines[_fwd_idx].strip()
+                    if _ean_stop.match(_nxt):
+                        break
+                    _combined += ' ' + _nxt
+                    if _ean_pat.match(_combined.strip()):
+                        break
             _em = _ean_pat.match(_combined.strip())
             if not _em:
                 continue
