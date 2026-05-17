@@ -1772,16 +1772,72 @@ models_url = f"{ODOO_URL}/xmlrpc/2/object"
 
 is_admin = st.session_state.user_email in ADMIN_EMAILS
 
-_tabs = ["🧾 Facturas de proveedores", "📦 Pedidos de clientes"]
+
+# ───────────────────────────────────────────────────────────────────────────
+# ORDENES DE PAGO — helpers
+# ───────────────────────────────────────────────────────────────────────────
+@st.cache_data(ttl=60, show_spinner=False)
+def get_pending_bills(models_url, uid, api_key):
+    """Todas las FAs de proveedor confirmadas y con saldo pendiente."""
+    try:
+        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        rows = m.execute_kw(ODOO_DB, uid, api_key, "account.move", "search_read",
+            [[("move_type",     "=",  "in_invoice"),
+              ("state",         "=",  "posted"),
+              ("payment_state", "in", ["not_paid", "partial"])]],
+            {"fields": ["id", "name", "ref", "partner_id", "invoice_date",
+                        "invoice_date_due", "amount_total", "amount_residual",
+                        "currency_id", "payment_state", "journal_id"],
+             "order":  "invoice_date asc",
+             "limit":  300})
+        return rows
+    except Exception as e:
+        return []
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_payment_journals(models_url, uid, api_key):
+    """Diarios bancarios / de caja disponibles para pagos."""
+    try:
+        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        rows = m.execute_kw(ODOO_DB, uid, api_key, "account.journal", "search_read",
+            [[("type", "in", ["bank", "cash"])]],
+            {"fields": ["id", "name", "currency_id"], "order": "name asc"})
+        return [(r["id"], r["name"]) for r in rows]
+    except Exception:
+        return []
+
+def register_payment_wizard(models, uid, api_key, move_ids, payment_date, journal_id):
+    """
+    Genera un pago via el wizard account.payment.register.
+    Funciona para uno o varios bills del mismo proveedor/moneda.
+    """
+    ctx = {
+        "active_model": "account.move",
+        "active_ids":   move_ids,
+        "active_id":    move_ids[0] if move_ids else None,
+    }
+    try:
+        wiz_id = models.execute_kw(ODOO_DB, uid, api_key,
+            "account.payment.register", "create",
+            [{"payment_date": payment_date, "journal_id": journal_id}],
+            {"context": ctx})
+        result = models.execute_kw(ODOO_DB, uid, api_key,
+            "account.payment.register", "action_create_payments",
+            [[wiz_id]], {"context": ctx})
+        return True, result
+    except Exception as e:
+        return False, str(e)
+
+_tabs = ["🧾 Facturas de proveedores", "📦 Pedidos de clientes", "🏦 Órdenes de Pago"]
 if is_admin:
     _tabs.append("🛳️ Importaciones")
 _tabs.append("📋 Historial de sesión")
 _tab_objs = st.tabs(_tabs)
-
 if is_admin:
-    tab_bills, tab_orders, tab_import, tab_history = _tab_objs
+    tab_bills, tab_orders, tab_op, tab_import, tab_history = _tab_objs
 else:
-    tab_bills, tab_orders, tab_history = _tab_objs
+    tab_bills, tab_orders, tab_op, tab_history = _tab_objs
+    tab_import = None
     tab_import = None
 
 
@@ -2773,52 +2829,67 @@ if tab_import is not None:
 
         st.divider()
 
-        # ── Comprobantes cargados en Odoo ─────────────────────────
+        # ── Comprobantes cargados en Odoo ─────────────────────────────────
         if carp_data and carp_data.get("bills"):
-            st.markdown("#### 📄 Comprobantes en Odoo")
+            st.markdown("#### \U0001f4c4 Comprobantes en Odoo")
             bill_rows = []
             for b in carp_data["bills"]:
                 pid      = b["partner_id"][0] if b.get("partner_id") else 0
                 tipo_inf = PARTNER_TO_TIPO.get(pid,
-                    {"etapa": "—", "label": b["partner_id"][1] if b.get("partner_id") else "Otro"})
+                    {"etapa": "\u2014", "label": b["partner_id"][1]
+                     if b.get("partner_id") else "Otro"})
                 cur_name = b["currency_id"][1] if b.get("currency_id") else "ARS"
 
-                tc_disp = "—"
+                tc_val = None
                 if cur_name == "USD":
                     icr = b.get("invoice_currency_rate")
                     if icr and icr is not False:
                         tc_val = _parse_odoo_rate({"rate": icr, "inverse_company_rate": None})
-                        if tc_val:
-                            tc_disp = f"$ {tc_val:,.0f}"
-                    if tc_disp == "—" and carp_data.get("tc_oc"):
-                        tc_disp = f"$ {carp_data['tc_oc']:,.0f} (OC)"
+                    if not tc_val and carp_data.get("tc_oc"):
+                        tc_val = carp_data["tc_oc"]
 
-                amt_orig = (f"USD {b.get('amount_total', 0):,.2f}"
-                            if cur_name == "USD" else fmt_ars(b.get("amount_total", 0)))
-                amt_ars = abs(float(b.get("amount_total_signed") or b.get("amount_total") or 0))
-                bill_url = odoo_url("account.move", b['id'])
-                estado_map = {"draft": "Borrador", "posted": "Sin pagar", "cancel": "Cancelado"}
+                amt_orig = float(b.get("amount_total") or 0)
+                amt_ars  = abs(float(b.get("amount_total_signed") or amt_orig or 0))
+                bill_url = odoo_url("account.move", b["id"])
+                estado_map = {"draft": "Borrador", "posted": "Confirmado", "cancel": "Cancelado"}
+                pay_map    = {"not_paid": "Sin pagar", "partial": "Pago parcial",
+                              "in_payment": "En pago", "paid": "Pagado", "reversed": "Revertido"}
 
                 bill_rows.append({
                     "Etapa":       tipo_inf["etapa"],
                     "Proveedor":   tipo_inf["label"],
                     "Comprobante": b.get("name") or f"ID {b['id']}",
-                    "Fecha":       b.get("invoice_date") or "—",
+                    "Fecha":       b.get("invoice_date") or None,
                     "Moneda":      cur_name,
-                    "TC ARS/USD":  tc_disp,
+                    "TC ($/u$s)":  tc_val,
                     "Monto orig.": amt_orig,
-                    "ARS equiv.":  fmt_ars(amt_ars) if cur_name == "USD" else "—",
-                    "Estado":      estado_map.get(b.get("state", ""), b.get("state", "")),
-                    "_url":        bill_url,
+                    "ARS equiv.":  amt_ars if cur_name == "USD" else None,
+                    "Estado":      estado_map.get(b.get("state",""), b.get("state","")),
+                    "\U0001f517 Ver": bill_url,
                 })
 
-            df_bills = pd.DataFrame([{k: v for k, v in r.items() if k != "_url"}
-                                     for r in bill_rows])
-            st.dataframe(df_bills, use_container_width=True, hide_index=True)
-            links = "  ·  ".join(f"[{r['Proveedor']}]({r['_url']})" for r in bill_rows[:8])
-            st.caption(f"Ver en Odoo: {links}")
+            col_cfg = {
+                "Fecha":        st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
+                "TC ($/u$s)":   st.column_config.NumberColumn("TC $/u$s", format="$ {:,.0f}"),
+                "Monto orig.":  st.column_config.NumberColumn("Monto orig.", format="{:,.2f}"),
+                "ARS equiv.":   st.column_config.NumberColumn("ARS equiv.", format="$ {:,.0f}"),
+                "\U0001f517 Ver": st.column_config.LinkColumn("Ver en Odoo",
+                                    display_text="Abrir \U0001f517"),
+            }
+            st.dataframe(pd.DataFrame(bill_rows), column_config=col_cfg,
+                         use_container_width=True, hide_index=True)
 
-            st.divider()
+            # Totales rápidos
+            _total_ars_bills = sum(
+                abs(float(b.get("amount_total_signed") or b.get("amount_total") or 0))
+                for b in carp_data["bills"]
+            )
+            st.caption(
+                f"Total {len(carp_data['bills'])} comprobante(s) \u00b7 "
+                f"Equivalente ARS total: **{fmt_ars(_total_ars_bills)}**"
+            )
+
+        st.divider()
 
         # ── Desglose de costos por producto ───────────────────────
         _po_cost    = st.session_state.get("carpeta_po") or (carp_data.get("po") if carp_data else None)
@@ -2904,4 +2975,309 @@ if tab_import is not None:
                             _qty       = float(_ln.get("product_qty") or 1)
                             _fob_line  = float(_ln.get("price_subtotal") or 0)
                             _prop      = _fob_line / _summary["total_fob_usd"] if _summary["total_fob_usd"] > 0 else 0
-                 
+
+                            _nac_usd_ln   = _nac_usd * _prop
+                            _lc_unit_usd  = (_nac_usd_ln / _qty) if _qty > 0 else 0
+                            _lc_total_ars = _nac_usd_ln * _tc_ae
+                            _ae2.append({
+                                "Producto":       _prod_name[:40],
+                                "Cant.":          int(_qty),
+                                "LC dist. (u$s)": fmt_usd(_nac_usd_ln),
+                                "LC dist. (ARS)": fmt_ars(_lc_total_ars),
+                                "costo/u (u$s)":  fmt_usd(_lc_unit_usd),
+                            })
+                        if _ae2:
+                            st.dataframe(pd.DataFrame(_ae2),
+                                         use_container_width=True, hide_index=True)
+                            st.caption(
+                                "Total CR 3284: "
+                                + fmt_ars(_nac_ars)
+                                + "  ·  Total LC en u$s: "
+                                + fmt_usd(_nac_usd))
+                        else:
+                            st.caption("Sin datos de OC para calcular el Landed Cost.")
+
+        st.divider()
+
+        # ── Crear Landed Cost ──────────────────────────────────────────────
+        st.markdown("#### ⚓ Crear Landed Cost")
+        _done_picks = [p for p in (carp_data.get("pickings", []) if carp_data else [])
+                       if p.get("state") == "done"]
+        _lc_ids     = carp_data.get("lc_ids", []) if carp_data else []
+
+        if not _done_picks:
+            st.info("Sin pickings recibidos (estado 'done') para esta carpeta.")
+        elif _lc_ids:
+            st.success(f"✅ Ya existe {len(_lc_ids)} Landed Cost(s) para esta carpeta.")
+            for _lc_id in _lc_ids:
+                st.markdown(f"[\U0001f517 Ver LC en Odoo]({odoo_url('stock.landed.cost', _lc_id)})")
+        else:
+            with st.form("form_lc"):
+                st.caption("Picking(s): " + ", ".join(p["name"] for p in _done_picks))
+                _lc_lines = []
+                for _lc_pid, _lc_pname in LC_PRODUCTS.items():
+                    _lc_c1, _lc_c2 = st.columns([3, 1])
+                    _lc_c1.caption(_lc_pname)
+                    _lc_amt = _lc_c2.number_input(
+                        "Monto ARS", min_value=0.0, value=0.0,
+                        key=f"lc_amt_{_lc_pid}", label_visibility="collapsed")
+                    if _lc_amt > 0:
+                        _lc_lines.append({"product_id": _lc_pid, "price_unit": _lc_amt})
+                _lc_submit = st.form_submit_button("⚓ Crear Landed Cost", type="primary")
+                if _lc_submit:
+                    if not _lc_lines:
+                        st.warning("Completá al menos un monto antes de crear el LC.")
+                    else:
+                        try:
+                            _new_lc  = create_landed_cost(models, uid, api_key,
+                                           [p["id"] for p in _done_picks], _lc_lines)
+                            _lc_url2 = odoo_url("stock.landed.cost", _new_lc)
+                            st.success(f"✅ Landed Cost ID {_new_lc}")
+                            st.markdown(f"[\U0001f517 Ver en Odoo]({_lc_url2})")
+                            st.session_state.etapas["4"] = True
+                            load_carpeta_full.clear()
+                        except Exception as _lce:
+                            st.error(f"Error al crear LC: {_lce}")
+
+        st.divider()
+
+        # ── Decálogo CFO ──────────────────────────────────────────────────
+        if st.session_state.etapas.get("4"):
+            with st.expander("✅ Checklist Decálogo CFO (Etapa 6)", expanded=False):
+                for _di, _ditem in enumerate(DECALOGO):
+                    st.checkbox(_ditem, key=f"dec_{_di}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB — ÓRDENES DE PAGO
+# ─────────────────────────────────────────────────────────────────────────────
+with tab_op:
+    st.subheader("\U0001f3e6 Órdenes de Pago — Facturas pendientes")
+
+    # ── Filtros y refresco ──────────────────────────────────────────────────
+    _op_c1, _op_c2, _op_c3, _op_c4 = st.columns([2, 2, 1, 1])
+    _op_partner_filter = _op_c1.text_input(
+        "Filtrar proveedor", key="op_filt_partner", placeholder="Nombre del proveedor")
+    _op_cur_filter     = _op_c2.selectbox(
+        "Moneda", ["Todas", "ARS", "USD"], key="op_filt_cur")
+    _op_only_vencidas  = _op_c3.checkbox("Solo vencidas", key="op_vencidas")
+    _op_refresh        = _op_c4.button("\U0001f504 Actualizar", key="op_refresh_btn")
+
+    if _op_refresh:
+        get_pending_bills.clear()
+
+    with st.spinner("Cargando facturas pendientes..."):
+        _all_pending = get_pending_bills(models_url, uid, api_key)
+
+    if not _all_pending:
+        st.info("No hay facturas de proveedor pendientes de pago.")
+        st.stop()
+
+    # ── Aplicar filtros ─────────────────────────────────────────────────────
+    from datetime import date as _date_cls
+    _today = _date_cls.today().isoformat()
+
+    _filtered = _all_pending
+    if _op_partner_filter:
+        _pf = _op_partner_filter.lower()
+        _filtered = [b for b in _filtered
+                     if _pf in (b.get("partner_id") or [0, ""])[1].lower()]
+    if _op_cur_filter != "Todas":
+        _filtered = [b for b in _filtered
+                     if (b.get("currency_id") or [0, "ARS"])[1] == _op_cur_filter]
+    if _op_only_vencidas:
+        _filtered = [b for b in _filtered
+                     if b.get("invoice_date_due") and b["invoice_date_due"] < _today]
+
+    st.caption(
+        f"{len(_filtered)} factura(s) pendiente(s)"
+        + (f" (de {len(_all_pending)} totales)" if len(_filtered) != len(_all_pending) else "")
+    )
+
+    if not _filtered:
+        st.warning("Ninguna factura cumple los filtros aplicados.")
+        st.stop()
+
+    # ── Construir dataframe con columna de selección ─────────────────────────
+    _op_rows = []
+    for _b in _filtered:
+        _cur   = (_b.get("currency_id") or [0, "ARS"])[1]
+        _resid = float(_b.get("amount_residual") or 0)
+        _total = float(_b.get("amount_total") or 0)
+        _due   = _b.get("invoice_date_due") or ""
+        _venc_flag = "⚠️" if (_due and _due < _today) else ""
+        _pstate_map = {"not_paid": "Sin pagar", "partial": "Parcial"}
+
+        _op_rows.append({
+            "Sel":          False,
+            "Venc.":        _venc_flag,
+            "Proveedor":    (_b.get("partner_id") or [0, "—"])[1],
+            "Comprobante":  _b.get("name") or f"ID {_b['id']}",
+            "Ref.":         (_b.get("ref") or "")[:30],
+            "Fecha FA":     _b.get("invoice_date") or None,
+            "Vto. pago":    _due or None,
+            "Moneda":       _cur,
+            "Total":        _total,
+            "Pendiente":    _resid,
+            "Estado pago":  _pstate_map.get(_b.get("payment_state",""), _b.get("payment_state","")),
+            "_id":          _b["id"],
+            "_partner_id":  (_b.get("partner_id") or [0])[0],
+            "_currency_id": (_b.get("currency_id") or [0])[0],
+        })
+
+    _df_op = pd.DataFrame(_op_rows)
+
+    _col_cfg_op = {
+        "Sel":          st.column_config.CheckboxColumn("✓", width="small"),
+        "Venc.":        st.column_config.TextColumn("", width="small"),
+        "Fecha FA":     st.column_config.DateColumn("Fecha FA", format="DD/MM/YYYY"),
+        "Vto. pago":    st.column_config.DateColumn("Vto. pago", format="DD/MM/YYYY"),
+        "Total":        st.column_config.NumberColumn("Total", format="{:,.2f}"),
+        "Pendiente":    st.column_config.NumberColumn("Pendiente", format="{:,.2f}"),
+        "_id":          None,
+        "_partner_id":  None,
+        "_currency_id": None,
+    }
+
+    _display_cols = ["Sel", "Venc.", "Proveedor", "Comprobante", "Ref.",
+                     "Fecha FA", "Vto. pago", "Moneda", "Total", "Pendiente", "Estado pago"]
+
+    st.markdown("**Seleccioná las facturas a pagar y completá los datos de la orden:**")
+    _edited_op = st.data_editor(
+        _df_op[_display_cols + ["_id", "_partner_id", "_currency_id"]],
+        column_config=_col_cfg_op,
+        column_order=_display_cols,
+        use_container_width=True,
+        hide_index=True,
+        key="op_data_editor",
+        disabled=[c for c in _display_cols if c != "Sel"],
+    )
+
+    # ── Resumen de seleccionadas ─────────────────────────────────────────────
+    _selected_op = _edited_op[_edited_op["Sel"] == True]
+    n_sel = len(_selected_op)
+
+    if n_sel > 0:
+        st.divider()
+        _total_ars_sel = _selected_op[_selected_op["Moneda"] == "ARS"]["Pendiente"].sum()
+        _total_usd_sel = _selected_op[_selected_op["Moneda"] == "USD"]["Pendiente"].sum()
+
+        _rs1, _rs2, _rs3 = st.columns(3)
+        _rs1.metric(f"{n_sel} factura(s) seleccionada(s)", "")
+        if _total_ars_sel > 0:
+            _rs2.metric("Total ARS", fmt_ars(_total_ars_sel))
+        if _total_usd_sel > 0:
+            _rs3.metric("Total USD", fmt_usd(_total_usd_sel))
+
+        # Lista de seleccionadas
+        with st.expander("Ver detalle de seleccionadas", expanded=False):
+            for _, _sr in _selected_op.iterrows():
+                st.caption(
+                    f"• **{_sr['Proveedor']}** — {_sr['Comprobante']}"
+                    f" — {_sr['Moneda']} {_sr['Pendiente']:,.2f}"
+                    + (f" (venc. {_sr['Vto. pago']})" if _sr.get('Vto. pago') else "")
+                )
+
+        # ── Formulario de pago ────────────────────────────────────────────────
+        st.markdown("#### Datos de la Orden de Pago")
+
+        # Advertencia si hay mezcla de monedas
+        _monedas_sel = _selected_op["Moneda"].unique().tolist()
+        if len(_monedas_sel) > 1:
+            st.warning(
+                "⚠️ Tenés facturas en distintas monedas seleccionadas "
+                f"({', '.join(_monedas_sel)}). "
+                "Odoo requiere que cada pago sea en una sola moneda. "
+                "Se generará una OP separada por moneda."
+            )
+
+        _jours = get_payment_journals(models_url, uid, api_key)
+        if not _jours:
+            st.error("No se encontraron diarios de pago en Odoo.")
+        else:
+            _jour_opts = {name: jid for jid, name in _jours}
+            _fp_c1, _fp_c2 = st.columns(2)
+            _pay_journal   = _fp_c1.selectbox(
+                "Diario de pago", list(_jour_opts.keys()), key="op_journal")
+            _pay_date      = _fp_c2.date_input(
+                "Fecha de pago", value=_date_cls.today(), key="op_pay_date")
+            _pay_journal_id = _jour_opts[_pay_journal]
+
+            _op_btn = st.button(
+                f"\U0001f4b8 Generar {n_sel} Orden(es) de Pago en Odoo",
+                type="primary", key="btn_gen_op")
+
+            if _op_btn:
+                # Agrupar por moneda para crear OPs separadas si hay mezcla
+                _groups = {}
+                for _, _sr in _selected_op.iterrows():
+                    _cur_key = _sr["Moneda"]
+                    if _cur_key not in _groups:
+                        _groups[_cur_key] = []
+                    _groups[_cur_key].append(int(_sr["_id"]))
+
+                _op_ok, _op_errs = 0, []
+                _pay_date_str = _pay_date.strftime("%Y-%m-%d")
+
+                for _cur_key, _move_ids_grp in _groups.items():
+                    try:
+                        _ok, _res = register_payment_wizard(
+                            models, uid, api_key,
+                            _move_ids_grp, _pay_date_str, _pay_journal_id)
+                        if _ok:
+                            st.success(
+                                f"✅ OP generada para {len(_move_ids_grp)} "
+                                f"factura(s) en {_cur_key} — diario: {_pay_journal}"
+                            )
+                            _op_ok += len(_move_ids_grp)
+                        else:
+                            _op_errs.append(f"Error {_cur_key}: {_res}")
+                    except Exception as _ope:
+                        _op_errs.append(f"Error {_cur_key}: {str(_ope)[:150]}")
+
+                for _oe in _op_errs:
+                    st.error(_oe)
+
+                if _op_ok:
+                    get_pending_bills.clear()
+                    st.info("Actualizando lista... presioná \U0001f504 Actualizar para ver el nuevo estado.")
+    else:
+        st.info("Marcá el ✓ en la columna de la izquierda para seleccionar facturas a pagar.")
+
+    # ── Totales globales al pie ─────────────────────────────────────────────
+    st.divider()
+    _tot_ars_all = sum(float(b.get("amount_residual") or 0)
+                       for b in _filtered if (b.get("currency_id") or [0,"ARS"])[1] == "ARS")
+    _tot_usd_all = sum(float(b.get("amount_residual") or 0)
+                       for b in _filtered if (b.get("currency_id") or [0,"ARS"])[1] == "USD")
+    _tg1, _tg2 = st.columns(2)
+    if _tot_ars_all > 0:
+        _tg1.metric("Total pendiente ARS", fmt_ars(_tot_ars_all))
+    if _tot_usd_all > 0:
+        _tg2.metric("Total pendiente USD", fmt_usd(_tot_usd_all))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB — HISTORIAL DE SESIÓN
+# ─────────────────────────────────────────────────────────────────────────────
+with tab_history:
+    st.subheader("\U0001f4cb Historial de sesión")
+    if not st.session_state.history:
+        st.info("Todavía no se creó ningún registro en esta sesión.")
+    else:
+        for _h in reversed(st.session_state.history):
+            _h_icon = _h.get("estado", "✅")
+            _h_tipo = _h.get("tipo", "")
+            _h_arch = _h.get("archivo", "")
+            _h_id   = _h.get("id", "")
+            _h_url  = _h.get("url", "")
+            if _h_url:
+                st.markdown(
+                    f"{_h_icon} **{_h_tipo}** — {_h_arch} "
+                    f"— ID {_h_id} — [\U0001f517 Ver en Odoo]({_h_url})"
+                )
+            else:
+                st.markdown(f"{_h_icon} **{_h_tipo}** — {_h_arch} — ID {_h_id}")
+        if st.button("\U0001f5d1️ Limpiar historial", key="btn_clear_hist"):
+            st.session_state.history = []
+            st.rerun()
