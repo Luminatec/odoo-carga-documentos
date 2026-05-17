@@ -2513,12 +2513,14 @@ if tab_import is not None:
         st.subheader("🛳️ Importaciones — Modo Claude")
 
         # ── Input carpeta ─────────────────────────────────────────
-        col_ci, col_cb, col_cr, col_cc = st.columns([4, 1, 1, 1])
-        carp_in    = col_ci.text_input("Carpeta", value=st.session_state.carpeta_id,
+        col_ci, col_btns = st.columns([3, 2])
+        carp_in = col_ci.text_input("Carpeta", value=st.session_state.carpeta_id,
             placeholder="LUMI_293", key="input_carpeta", label_visibility="collapsed")
-        load_btn   = col_cb.button("🔍 Cargar",   key="btn_load_carp",   use_container_width=True)
-        reset_btn  = col_cr.button("🔄 Nueva",    key="btn_reset_carp",  use_container_width=True)
-        cancel_btn = col_cc.button("❌ Cancelar", key="btn_cancel_carp", use_container_width=True)
+        with col_btns:
+            _b1, _b2, _b3 = st.columns(3)
+            load_btn   = _b1.button("🔍 Cargar",   key="btn_load_carp",   use_container_width=True)
+            reset_btn  = _b2.button("🔄 Nueva",    key="btn_reset_carp",  use_container_width=True)
+            cancel_btn = _b3.button("❌ Cancelar", key="btn_cancel_carp", use_container_width=True)
 
         if reset_btn or cancel_btn:
             for k in ["carpeta_id", "carpeta_po", "carpeta_bills", "carpeta_lc_id"]:
