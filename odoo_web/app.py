@@ -252,6 +252,198 @@ def attach_file(models, uid, api_key, res_model, res_id, filename, file_bytes, m
         "datas": base64.b64encode(file_bytes).decode(), "mimetype": mimetype,
     }])
 
+
+# ── Mapeo partner_id → tipo para facturas de importación ────────────────────
+PARTNER_TO_TIPO = {
+    49328: {"tipo": "petdur", "etapa": "1",  "label": "PETDUR"},
+    9:     {"tipo": "di_afip","etapa": "2",  "label": "AFIP"},
+    48825: {"tipo": "nac",    "etapa": "2a", "label": "TRICE"},
+    48828: {"tipo": "nac",    "etapa": "2a", "label": "Terminal 4"},
+    48826: {"tipo": "nac",    "etapa": "2a", "label": "Mundo Comex"},
+    48827: {"tipo": "nac",    "etapa": "2a", "label": "SENASA"},
+}
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_usd_rate_odoo(models_url, uid, api_key, date_str):
+    """TC ARS/USD del día o el más reciente anterior en Odoo."""
+    try:
+        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        rows = m.execute_kw(ODOO_DB, uid, api_key, "res.currency.rate", "search_read",
+            [[("currency_id.name", "=", "USD"), ("name", "<=", date_str)]],
+            {"fields": ["name", "rate", "inverse_company_rate"], "limit": 1, "order": "name desc"})
+        if rows:
+            r = rows[0]
+            icr = r.get("inverse_company_rate")
+            if icr and float(icr) > 100:
+                return float(icr), r["name"]
+            rate = r.get("rate")
+            if rate and 0 < float(rate) < 1:
+                return 1.0 / float(rate), r["name"]
+    except Exception:
+        pass
+    return None, None
+
+@st.cache_data(ttl=120, show_spinner=False)
+def get_po_lines(models_url, uid, api_key, po_id):
+    """Líneas de una OC con productos, cantidades y precios."""
+    try:
+        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        return m.execute_kw(ODOO_DB, uid, api_key, "purchase.order.line", "search_read",
+            [[("order_id", "=", po_id), ("state", "!=", "cancel")]],
+            {"fields": ["product_id", "product_qty", "price_unit", "price_subtotal", "name"]})
+    except Exception:
+        return []
+
+@st.cache_data(ttl=30, show_spinner=False)
+def load_carpeta_full(models_url, uid, api_key, carpeta_id):
+    """
+    Carga bills, OC, pickings y detecta etapas de una carpeta desde Odoo.
+    Busca la OC por el campo partner_ref (Referencia de proveedor).
+    """
+    result = {"bills": [], "po": None, "pickings": [], "lc_ids": [],
+              "stages": {}, "tc_oc": None, "error": None}
+    try:
+        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+
+        # 1. OC por partner_ref (campo "Referencia de proveedor")
+        po_fields_ext = ["id", "name", "partner_id", "amount_total", "currency_id",
+                         "state", "partner_ref", "x_studio_cotizacion_dolar"]
+        po_fields_safe = ["id", "name", "partner_id", "amount_total", "currency_id",
+                          "state", "partner_ref"]
+        try:
+            pos = m.execute_kw(ODOO_DB, uid, api_key, "purchase.order", "search_read",
+                [[("partner_ref", "ilike", carpeta_id), ("state", "in", ["purchase", "done"])]],
+                {"fields": po_fields_ext, "limit": 5})
+        except Exception:
+            pos = m.execute_kw(ODOO_DB, uid, api_key, "purchase.order", "search_read",
+                [[("partner_ref", "ilike", carpeta_id), ("state", "in", ["purchase", "done"])]],
+                {"fields": po_fields_safe, "limit": 5})
+        po = pos[0] if pos else None
+        result["po"] = po
+
+        # TC desde campo custom de la OC ("Cotización dólar")
+        if po:
+            tc_raw = po.get("x_studio_cotizacion_dolar")
+            if tc_raw and float(tc_raw or 0) > 100:
+                result["tc_oc"] = float(tc_raw)
+
+        # 2. Bills por ref (carpeta_id como substring — incluye LUMI_291A etc.)
+        bill_fields = ["id", "name", "ref", "partner_id", "invoice_date", "amount_total",
+                       "amount_total_signed", "currency_id", "state", "invoice_currency_rate"]
+        bills = m.execute_kw(ODOO_DB, uid, api_key, "account.move", "search_read",
+            [[("move_type", "=", "in_invoice"), ("ref", "ilike", carpeta_id),
+              ("state", "!=", "cancel")]],
+            {"fields": bill_fields, "limit": 50})
+        result["bills"] = bills
+
+        # 3. Pickings vinculados a la OC
+        pickings = []
+        if po:
+            pickings = m.execute_kw(ODOO_DB, uid, api_key, "stock.picking", "search_read",
+                [[("purchase_id", "=", po["id"]), ("picking_type_code", "=", "incoming")]],
+                {"fields": ["id", "name", "state", "date_done", "location_dest_id"]})
+        result["pickings"] = pickings
+
+        # 4. Landed Costs
+        lc_ids = []
+        if pickings:
+            lcs = m.execute_kw(ODOO_DB, uid, api_key, "stock.landed.cost", "search_read",
+                [[("picking_ids", "in", [p["id"] for p in pickings])]],
+                {"fields": ["id", "name", "state"], "limit": 5})
+            lc_ids = [lc["id"] for lc in lcs]
+        result["lc_ids"] = lc_ids
+
+        # 5. Detectar etapas automáticamente
+        partner_ids = {b["partner_id"][0] for b in bills if b.get("partner_id")}
+        stages = {k: False for k, *_ in ETAPAS_DEF}
+        stages["0"]  = bool(po)
+        stages["1"]  = 49328 in partner_ids
+        stages["2"]  = 9 in partner_ids
+        stages["2a"] = bool({48825, 48826, 48827, 48828} & partner_ids)
+        stages["3"]  = any(p.get("state") == "done" for p in pickings)
+        stages["4"]  = bool(lc_ids)
+        result["stages"] = stages
+
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+
+def _calc_cost_breakdown(po_lines, bills, tc_usd):
+    """
+    Calcula costo estimado por producto.
+    Usa amount_total_signed (siempre en ARS) para los gastos de nacionalización.
+    Distribuye los costos proporcionalmente al valor FOB de cada línea.
+    """
+    if not po_lines or not tc_usd:
+        return [], {}
+
+    petdur   = next((b for b in bills if b.get("partner_id") and b["partner_id"][0] == 49328), None)
+    nac_bils = [b for b in bills if b.get("partner_id") and b["partner_id"][0] in {48825,48826,48827,48828}]
+    afip     = next((b for b in bills if b.get("partner_id") and b["partner_id"][0] == 9), None)
+
+    # Intentar refinar TC desde el bill PETDUR
+    if petdur:
+        icr = petdur.get("invoice_currency_rate")
+        if icr:
+            v = float(icr)
+            if v > 100:
+                tc_usd = v
+            elif 0 < v < 1:
+                tc_usd = 1.0 / v
+
+    # amount_total_signed ya viene en ARS (moneda de la empresa)
+    total_nac_ars  = sum(abs(float(b.get("amount_total_signed") or b.get("amount_total") or 0)) for b in nac_bils)
+    total_afip_ars = abs(float(afip.get("amount_total_signed") or afip.get("amount_total") or 0)) if afip else 0
+    total_extra    = total_nac_ars + total_afip_ars
+
+    total_fob_usd = sum(float(l.get("price_subtotal") or 0) for l in po_lines)
+    if total_fob_usd == 0:
+        return [], {}
+
+    rows = []
+    for ln in po_lines:
+        prod   = ln["product_id"][1] if ln.get("product_id") else ln.get("name", "?")
+        qty    = float(ln.get("product_qty") or 1)
+        fob_u  = float(ln.get("price_subtotal") or 0)
+        fob_pu = fob_u / qty if qty > 0 else 0
+        fob_a  = fob_u * tc_usd
+        prop   = fob_u / total_fob_usd
+        nac_a  = total_extra * prop
+        total  = fob_a + nac_a
+        unit   = total / qty if qty > 0 else 0
+        pct    = nac_a / fob_a * 100 if fob_a > 0 else 0
+        rows.append({
+            "Producto":         prod,
+            "Cant.":            int(qty) if qty == int(qty) else qty,
+            "FOB unit (USD)":   f"USD {fob_pu:,.2f}",
+            "FOB total (ARS)":  fmt_ars(fob_a),
+            "Nac. asignada":    fmt_ars(nac_a),
+            "Costo total (ARS)":fmt_ars(total),
+            "Costo unit. (ARS)":fmt_ars(unit),
+            "% nac/FOB":        f"+{pct:.1f}%",
+        })
+
+    # Desglose de gastos de nac para el expander
+    nac_detail = {}
+    for b in nac_bils:
+        pid   = b["partner_id"][0] if b.get("partner_id") else 0
+        lbl   = PARTNER_TO_TIPO.get(pid, {}).get("label", "Otro")
+        amt   = abs(float(b.get("amount_total_signed") or b.get("amount_total") or 0))
+        nac_detail[lbl] = nac_detail.get(lbl, 0) + amt
+    if afip:
+        nac_detail["AFIP"] = total_afip_ars
+
+    summary = {
+        "tc_usd":         tc_usd,
+        "total_fob_usd":  total_fob_usd,
+        "total_fob_ars":  total_fob_usd * tc_usd,
+        "total_nac_ars":  total_extra,
+        "grand_total_ars":total_fob_usd * tc_usd + total_extra,
+        "nac_detail":     nac_detail,
+    }
+    return rows, summary
+
 def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                        filename, file_bytes, mimetype, journal_id=None, doc_type_id=None,
                        invoice_date_due=None, account_id=None, amount_neto=None,
@@ -2139,229 +2331,386 @@ with tab_orders:
 if tab_import is not None:
     with tab_import:
         st.subheader("🛳️ Importaciones — Modo Claude")
-        st.caption("Flujo Etapas 0→6 · BAs fixeadas · split = by_current_cost_price · Cuenta Puente 3284")
 
-        # ── Carpeta ──────────────────────────────────────────────
-        st.markdown("#### 📂 Carpeta de importación")
-        col_carp, col_reset = st.columns([5, 1])
-        carp_in = col_carp.text_input("Carpeta", value=st.session_state.carpeta_id,
+        # ── Input carpeta ─────────────────────────────────────────
+        col_ci, col_cb, col_cr = st.columns([5, 1, 1])
+        carp_in  = col_ci.text_input("Carpeta", value=st.session_state.carpeta_id,
             placeholder="LUMI_293", key="input_carpeta", label_visibility="collapsed")
-        col_carp.caption("Ingresá el número de carpeta, ej: `LUMI_293`")
+        load_btn  = col_cb.button("🔍 Cargar",  key="btn_load_carp",  use_container_width=True)
+        reset_btn = col_cr.button("🔄 Nueva",   key="btn_reset_carp", use_container_width=True)
 
-        if carp_in and carp_in != st.session_state.carpeta_id:
-            st.session_state.carpeta_id    = carp_in
-            st.session_state.carpeta_po    = None
-            st.session_state.carpeta_bills = []
-            st.session_state.etapas        = {k: False for k, *_ in ETAPAS_DEF}
-
-        if col_reset.button("🔄", help="Nueva carpeta", key="btn_reset_carp"):
-            for k in ["carpeta_id","carpeta_po","carpeta_bills","carpeta_lc_id"]:
-                st.session_state[k] = DEFAULTS[k]
+        if reset_btn:
+            for k in ["carpeta_id", "carpeta_po", "carpeta_bills", "carpeta_lc_id"]:
+                st.session_state[k] = DEFAULTS.get(k, "")
             st.session_state.etapas = {k: False for k, *_ in ETAPAS_DEF}
+            if "carp_data" in st.session_state:
+                del st.session_state["carp_data"]
             st.rerun()
 
-        # ── OC vinculada ─────────────────────────────────────────
-        if st.session_state.carpeta_id:
-            with st.expander("🔗 Vincular OC en Odoo (Etapa 0)", expanded=not st.session_state.etapas.get("0")):
-                oc_q = st.text_input("Buscar OC", placeholder="P00025", key="oc_search_q")
-                if oc_q:
-                    with st.spinner("Buscando OC..."):
-                        pos = search_purchase_orders(models_url, uid, api_key, oc_q)
-                    if pos:
-                        po_opts = {}
-                        for p in pos:
-                            pname    = p["name"]
-                            ppartner = p["partner_id"][1] if p.get("partner_id") else "?"
-                            ptotal   = p.get("amount_total", 0)
-                            label    = f"{pname}  ·  {ppartner}  ·  ${ptotal:,.0f}"
-                            po_opts[label] = p
-                        sel_po = st.selectbox("Seleccioná la OC", list(po_opts.keys()), key="sel_po_imp")
-                        if st.button("✅ Vincular OC", key="btn_link_po"):
-                            st.session_state.carpeta_po  = po_opts[sel_po]
-                            st.session_state.etapas["0"] = True
-                            st.rerun()
-                    else:
-                        st.warning("No se encontraron OC confirmadas con ese nombre.")
+        if carp_in != st.session_state.carpeta_id:
+            st.session_state.carpeta_id = carp_in
+            if "carp_data" in st.session_state:
+                del st.session_state["carp_data"]
 
-            if st.session_state.carpeta_po:
-                po = st.session_state.carpeta_po
-                c1p, c2p = st.columns(2)
+        if load_btn and st.session_state.carpeta_id:
+            load_carpeta_full.clear()
+            with st.spinner(f"Cargando {st.session_state.carpeta_id} desde Odoo..."):
+                cdata = load_carpeta_full(models_url, uid, api_key, st.session_state.carpeta_id)
+            st.session_state["carp_data"] = cdata
+            if cdata.get("po"):
+                st.session_state.carpeta_po  = cdata["po"]
+                st.session_state.etapas["0"] = True
+            if cdata.get("bills"):
+                st.session_state.carpeta_bills = [b["id"] for b in cdata["bills"]]
+            for k, v in cdata.get("stages", {}).items():
+                if v:
+                    st.session_state.etapas[k] = True
+            st.rerun()
+
+        if not st.session_state.carpeta_id:
+            st.info("Ingresá el número de carpeta y presioná **🔍 Cargar** para traer los datos de Odoo.")
+            st.stop()
+
+        carp_data = st.session_state.get("carp_data")
+
+        # ── Resumen de carpeta ────────────────────────────────────
+        if carp_data:
+            if carp_data.get("error"):
+                st.error(f"Error al cargar desde Odoo: {carp_data['error']}")
+            po       = carp_data.get("po")
+            bills    = carp_data.get("bills", [])
+            pickings = carp_data.get("pickings", [])
+            tc_oc    = carp_data.get("tc_oc")
+            if po:
                 pname    = po["name"]
-                ppartner = po.get("partner_id", ["?","?"])[1]
-                c1p.success(f"✅ OC: {pname} · {ppartner}")
-                po_url = f"{ODOO_URL}/web#id={po['id']}&model=purchase.order&view_type=form"
-                c2p.markdown(f"[🔗 Abrir OC en Odoo]({po_url})")
+                ppartner = po.get("partner_id", [0, "—"])[1]
+                ptotal   = po.get("amount_total", 0)
+                pcur     = po.get("currency_id", [0, "USD"])[1] if po.get("currency_id") else "USD"
+                po_url   = f"{ODOO_URL}/web#id={po['id']}&model=purchase.order&view_type=form"
+                ci1, ci2, ci3 = st.columns([3, 2, 1])
+                ci1.success(f"📦 **{st.session_state.carpeta_id}** — OC {pname} · {ppartner}")
+                ci2.info(f"💵 {pcur} {ptotal:,.2f}" + (f" · TC: **$ {tc_oc:,.0f}**" if tc_oc else ""))
+                ci3.markdown(f"[🔗 Ver OC]({po_url})")
+                done_picks = [p for p in pickings if p.get("state") == "done"]
+                if pickings:
+                    st.caption(f"📥 {len(pickings)} picking(s) · {len(done_picks)} recibido(s) en depósito")
+            elif bills:
+                st.warning(f"⚠️ {len(bills)} comprobante(s) encontrados pero sin OC vinculada.")
+            else:
+                st.info(f"**{st.session_state.carpeta_id}** no encontrada en Odoo. "
+                        f"Subí los documentos para crear los registros.")
 
-        st.divider()
-
-        # ── Progreso ─────────────────────────────────────────────
-        st.markdown("#### 📋 Progreso de la carpeta")
+        # ── Progreso de etapas ────────────────────────────────────
+        st.markdown("#### 📋 Estado de la carpeta")
         cols_et = st.columns(len(ETAPAS_DEF))
         for i, (key, label, desc) in enumerate(ETAPAS_DEF):
             done = st.session_state.etapas.get(key, False)
             icon = "✅" if done else "⏳"
-            cols_et[i].markdown(f"**{icon}**  \n<small>{label}</small>", unsafe_allow_html=True, help=desc)
+            cols_et[i].markdown(f"**{icon}**  \n<small>{label}</small>",
+                                unsafe_allow_html=True, help=desc)
             if not done and st.session_state.carpeta_id:
                 if cols_et[i].button("✓", key=f"et_{key}", help=f"Marcar {label}"):
                     st.session_state.etapas[key] = True
                     st.rerun()
         completadas = sum(1 for v in st.session_state.etapas.values() if v)
-        st.progress(completadas / len(ETAPAS_DEF), text=f"{completadas}/{len(ETAPAS_DEF)} etapas completadas")
+        st.progress(completadas / len(ETAPAS_DEF),
+                    text=f"{completadas}/{len(ETAPAS_DEF)} etapas completadas")
 
         st.divider()
 
-        # ── Subir documentos ─────────────────────────────────────
-        st.markdown("#### ⬆️ Subir documentos")
-        if not st.session_state.carpeta_id:
-            st.warning("Primero ingresá el número de carpeta.")
-        else:
-            TIPO_OPTIONS = {
-                "Bill PETDUR (Etapa 1)":           {"tipo":"petdur",  "partner_id":49328,"journal_id":71,"doc_type":None},
-                "DI AFIP (Etapa 2)":               {"tipo":"di_afip", "partner_id":9,    "journal_id":10,"doc_type":66},
-                "Bill TRICE Transport (Etapa 2a)": {"tipo":"nac",     "partner_id":48825,"journal_id":10,"doc_type":None},
-                "Bill Terminal 4 SA (Etapa 2a)":   {"tipo":"nac",     "partner_id":48828,"journal_id":10,"doc_type":None},
-                "Bill Mundo Comex (Etapa 2a)":     {"tipo":"nac",     "partner_id":48826,"journal_id":10,"doc_type":None},
-                "Bill SENASA (Etapa 2a)":          {"tipo":"nac",     "partner_id":48827,"journal_id":10,"doc_type":None},
-                "Otro comprobante":                {"tipo":"other",   "partner_id":None, "journal_id":10,"doc_type":None},
-            }
-            imp_files = st.file_uploader(
-                f"Documentos de {st.session_state.carpeta_id} — podés subir todos juntos",
-                type=["pdf","jpg","jpeg","png"], accept_multiple_files=True, key="import_uploader")
+        # ── Comprobantes cargados en Odoo ─────────────────────────
+        if carp_data and carp_data.get("bills"):
+            st.markdown("#### 📄 Comprobantes en Odoo")
+            bill_rows = []
+            for b in carp_data["bills"]:
+                pid      = b["partner_id"][0] if b.get("partner_id") else 0
+                tipo_inf = PARTNER_TO_TIPO.get(pid,
+                    {"etapa": "—", "label": b["partner_id"][1] if b.get("partner_id") else "Otro"})
+                cur_name = b["currency_id"][1] if b.get("currency_id") else "ARS"
 
-            classified_docs = []
-            if imp_files:
-                st.markdown("**Clasificación automática — revisá y ajustá si es necesario**")
-                for uf in imp_files:
-                    ext        = uf.name.rsplit(".", 1)[-1].lower()
-                    file_bytes = uf.read()
-                    mimetype   = MIMETYPES.get(ext, "application/octet-stream")
-                    raw_text   = ""
-                    if ext == "pdf":
-                        _, raw_text = extract_pdf_fields(file_bytes)
-                    auto = classify_document(raw_text)
-                    default_label = auto["label"] if auto["label"] in TIPO_OPTIONS else "Otro comprobante"
-                    with st.expander(f"📎 {uf.name} — {auto['label']}", expanded=True):
-                        ct1, ct2, ct3, ct4 = st.columns([3, 2, 2, 1])
-                        tipo_sel  = ct1.selectbox("Tipo", list(TIPO_OPTIONS.keys()),
-                            index=list(TIPO_OPTIONS.keys()).index(default_label), key=f"tipo_{uf.name}")
-                        ref_doc   = ct2.text_input("N° comprobante", key=f"ref_d_{uf.name}")
-                        fecha_doc = ct3.text_input("Fecha (AAAA-MM-DD)", key=f"fec_d_{uf.name}", placeholder="2026-05-12")
-                        moneda    = ct4.selectbox("Moneda", ["ARS","USD"], key=f"cur_{uf.name}")
-                        classified_docs.append({
-                            "filename":uf.name, "file_bytes":file_bytes, "mimetype":mimetype,
-                            "tipo_cfg":TIPO_OPTIONS[tipo_sel], "ref":ref_doc, "fecha":fecha_doc,
-                            "moneda": moneda,
-                        })
+                tc_disp = "—"
+                if cur_name == "USD":
+                    icr = b.get("invoice_currency_rate")
+                    if icr and float(icr or 0) > 0:
+                        v = float(icr)
+                        tc_val = v if v > 100 else (1.0 / v if 0 < v < 1 else v)
+                        tc_disp = f"$ {tc_val:,.0f}"
+                    elif carp_data.get("tc_oc"):
+                        tc_disp = f"$ {carp_data['tc_oc']:,.0f} (OC)"
 
-                if classified_docs:
-                    if st.button(f"⬆️ Crear {len(classified_docs)} registro(s) en Odoo",
-                                 type="primary", key="btn_create_all_imp"):
-                        prog = st.progress(0)
-                        ok, errs = 0, []
-                        carp = st.session_state.carpeta_id
-                        for i, doc in enumerate(classified_docs):
-                            try:
-                                full_ref = f"{carp} / {doc['ref']}" if doc["ref"] else carp
-                                _cur_id = None
-                                if doc.get("moneda","ARS") == "USD":
-                                    _cur_id = get_currency_id(models_url, uid, api_key, "USD")
-                                move_id = create_vendor_bill(models, uid, api_key,
-                                    partner_id  = doc["tipo_cfg"]["partner_id"],
-                                    ref         = full_ref,
-                                    invoice_date= doc["fecha"] or False,
-                                    filename    = doc["filename"],
-                                    file_bytes  = doc["file_bytes"],
-                                    mimetype    = doc["mimetype"],
-                                    journal_id  = doc["tipo_cfg"]["journal_id"],
-                                    doc_type_id = doc["tipo_cfg"]["doc_type"],
-                                    currency_id = _cur_id,
-                                )
-                                url = f"{ODOO_URL}/web#id={move_id}&model=account.move&view_type=form"
-                                st.success(f"✅ {doc['filename']} → Factura ID {move_id} — [Ver en Odoo]({url})")
-                                tipo = doc["tipo_cfg"]["tipo"]
-                                if tipo == "petdur":
-                                    st.session_state.etapas["1"] = True
-                                elif tipo == "di_afip":
-                                    st.session_state.etapas["2"] = True
-                                elif tipo == "nac":
-                                    st.session_state.etapas["2a"] = True
-                                if move_id not in st.session_state.carpeta_bills:
-                                    st.session_state.carpeta_bills.append(move_id)
-                                st.session_state.history.append({"tipo":f"Importación {carp}",
-                                    "archivo":doc["filename"],"id":move_id,"url":url,"estado":"✅"})
-                                ok += 1
-                            except Exception as e:
-                                errs.append(f"❌ {doc['filename']}: {str(e)[:120]}")
-                            prog.progress((i+1)/len(classified_docs))
-                        if ok: st.success(f"✅ {ok} registro(s) creados para {carp}.")
-                        for err in errs: st.error(err)
-                        st.rerun()
+                amt_orig = (f"USD {b.get('amount_total', 0):,.2f}"
+                            if cur_name == "USD" else fmt_ars(b.get("amount_total", 0)))
+                amt_ars = abs(float(b.get("amount_total_signed") or b.get("amount_total") or 0))
+                bill_url = f"{ODOO_URL}/web#id={b['id']}&model=account.move&view_type=form"
+                estado_map = {"draft": "Borrador", "posted": "Sin pagar", "cancel": "Cancelado"}
+
+                bill_rows.append({
+                    "Etapa":       tipo_inf["etapa"],
+                    "Proveedor":   tipo_inf["label"],
+                    "Comprobante": b.get("name") or f"ID {b['id']}",
+                    "Fecha":       b.get("invoice_date") or "—",
+                    "Moneda":      cur_name,
+                    "TC ARS/USD":  tc_disp,
+                    "Monto orig.": amt_orig,
+                    "ARS equiv.":  fmt_ars(amt_ars) if cur_name == "USD" else "—",
+                    "Estado":      estado_map.get(b.get("state", ""), b.get("state", "")),
+                    "_url":        bill_url,
+                })
+
+            df_bills = pd.DataFrame([{k: v for k, v in r.items() if k != "_url"}
+                                     for r in bill_rows])
+            st.dataframe(df_bills, use_container_width=True, hide_index=True)
+            links = "  ·  ".join(f"[{r['Proveedor']}]({r['_url']})" for r in bill_rows[:8])
+            st.caption(f"Ver en Odoo: {links}")
+
+            st.divider()
+
+        # ── Desglose de costos por producto ───────────────────────
+        _po_cost    = st.session_state.get("carpeta_po") or (carp_data.get("po") if carp_data else None)
+        _bills_cost = carp_data.get("bills", []) if carp_data else []
+        _tc_oc      = carp_data.get("tc_oc")       if carp_data else None
+
+        if _po_cost and _bills_cost:
+            st.markdown("#### 💰 Desglose de costos por producto")
+
+            # Determinar TC: OC primero, luego Odoo currency rate
+            _tc_src = None
+            if not _tc_oc:
+                _petdur_b = next((b for b in _bills_cost
+                                  if b.get("partner_id") and b["partner_id"][0] == 49328), None)
+                _ref_date = ((_petdur_b.get("invoice_date") if _petdur_b else None)
+                             or pd.Timestamp.today().strftime("%Y-%m-%d"))
+                _tc_oc, _tc_dt = get_usd_rate_odoo(models_url, uid, api_key, _ref_date)
+                _tc_src = f"Odoo ({_tc_dt})" if _tc_oc else None
+            else:
+                _tc_src = f"OC {_po_cost.get('name', '')} (campo Cotización dólar)"
+
+            if not _tc_oc:
+                st.warning("⚠️ No se encontró TC USD/ARS. Verificá el campo 'Cotización dólar' en "
+                           "la OC o que esté cargado en Odoo (Contabilidad → Divisas → USD).")
+            else:
+                with st.spinner("Calculando costos..."):
+                    _po_lns    = get_po_lines(models_url, uid, api_key, _po_cost["id"])
+                    _cost_rows, _summary = _calc_cost_breakdown(_po_lns, _bills_cost, _tc_oc)
+
+                if _cost_rows and _summary:
+                    st.caption(f"TC USD/ARS: **$ {_summary['tc_usd']:,.2f}** — Fuente: {_tc_src}")
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("FOB (USD)",         f"USD {_summary['total_fob_usd']:,.0f}")
+                    c2.metric("FOB (ARS)",          fmt_ars(_summary["total_fob_ars"]))
+                    c3.metric("Gastos nac. (ARS)",  fmt_ars(_summary["total_nac_ars"]))
+                    c4.metric("Total estimado",     fmt_ars(_summary["grand_total_ars"]))
+
+                    with st.expander("📊 Detalle gastos de nacionalización", expanded=False):
+                        _tot_nac = _summary["total_nac_ars"]
+                        for _lbl, _amt in _summary.get("nac_detail", {}).items():
+                            _pct = _amt / _tot_nac * 100 if _tot_nac > 0 else 0
+                            st.caption(f"• **{_lbl}**: {fmt_ars(_amt)}  ({_pct:.1f}%)")
+
+                    st.dataframe(pd.DataFrame(_cost_rows), use_container_width=True, hide_index=True)
+                else:
+                    st.info("No hay líneas de productos en la OC o aún no hay comprobantes de costo.")
+
+        st.divider()
+
+        # ── Subir comprobantes ────────────────────────────────────
+        st.markdown("#### ⬆️ Subir comprobantes")
+        _etapas_done = st.session_state.etapas
+        _missing = []
+        if not _etapas_done.get("1"):  _missing.append("Etapa 1: Bill PETDUR (USD)")
+        if not _etapas_done.get("2"):  _missing.append("Etapa 2: DI AFIP")
+        if not _etapas_done.get("2a"): _missing.append("Etapa 2a: TRICE / Terminal 4 / Mundo Comex / SENASA")
+        if _missing:
+            st.caption("⏳ Pendiente: " + "  ·  ".join(_missing))
+
+        TIPO_OPTIONS_IMP = {
+            "Bill PETDUR (Etapa 1)":           {"tipo":"petdur",  "partner_id":49328,"journal_id":71, "doc_type":None},
+            "DI AFIP (Etapa 2)":               {"tipo":"di_afip", "partner_id":9,    "journal_id":10, "doc_type":66},
+            "Bill TRICE Transport (Etapa 2a)": {"tipo":"nac",     "partner_id":48825,"journal_id":10, "doc_type":None},
+            "Bill Terminal 4 SA (Etapa 2a)":   {"tipo":"nac",     "partner_id":48828,"journal_id":10, "doc_type":None},
+            "Bill Mundo Comex (Etapa 2a)":     {"tipo":"nac",     "partner_id":48826,"journal_id":10, "doc_type":None},
+            "Bill SENASA (Etapa 2a)":          {"tipo":"nac",     "partner_id":48827,"journal_id":10, "doc_type":None},
+            "Otro comprobante":                {"tipo":"other",   "partner_id":None, "journal_id":10, "doc_type":None},
+        }
+
+        imp_files = st.file_uploader(
+            f"Documentos de {st.session_state.carpeta_id}",
+            type=["pdf","jpg","jpeg","png"], accept_multiple_files=True, key="import_uploader")
+
+        classified_docs = []
+        if imp_files:
+            st.markdown("**Clasificación automática — revisá y ajustá si hace falta**")
+            for uf in imp_files:
+                ext        = uf.name.rsplit(".", 1)[-1].lower()
+                file_bytes = uf.read()
+                mimetype   = MIMETYPES.get(ext, "application/octet-stream")
+                raw_text   = ""
+                if ext == "pdf":
+                    _, raw_text = extract_pdf_fields(file_bytes)
+                auto        = classify_document(raw_text)
+                default_lbl = auto["label"] if auto["label"] in TIPO_OPTIONS_IMP else "Otro comprobante"
+                with st.expander(f"📎 {uf.name} — {auto['label']}", expanded=True):
+                    ct1, ct2, ct3, ct4 = st.columns([3, 2, 2, 1])
+                    tipo_sel  = ct1.selectbox("Tipo", list(TIPO_OPTIONS_IMP.keys()),
+                        index=list(TIPO_OPTIONS_IMP.keys()).index(default_lbl), key=f"tipo_{uf.name}")
+                    ref_doc   = ct2.text_input("N° comprobante", key=f"ref_d_{uf.name}")
+                    fecha_doc = ct3.text_input("Fecha (AAAA-MM-DD)", key=f"fec_d_{uf.name}",
+                                               placeholder="2026-05-12")
+                    moneda    = ct4.selectbox("Moneda", ["ARS","USD"], key=f"cur_{uf.name}")
+                    if moneda == "USD":
+                        _rd = fecha_doc or pd.Timestamp.today().strftime("%Y-%m-%d")
+                        _tc_up, _dt_up = get_usd_rate_odoo(models_url, uid, api_key, _rd)
+                        st.caption(f"TC Odoo para {_dt_up or _rd}: **$ {_tc_up:,.2f}**"
+                                   if _tc_up else "TC no encontrado en Odoo para esa fecha")
+                    classified_docs.append({
+                        "filename": uf.name, "file_bytes": file_bytes, "mimetype": mimetype,
+                        "tipo_cfg": TIPO_OPTIONS_IMP[tipo_sel],
+                        "ref": ref_doc, "fecha": fecha_doc, "moneda": moneda,
+                    })
+
+            if classified_docs:
+                if st.button(f"⬆️ Crear {len(classified_docs)} registro(s) en Odoo",
+                             type="primary", key="btn_create_all_imp"):
+                    _prog = st.progress(0)
+                    _ok, _errs = 0, []
+                    _carp = st.session_state.carpeta_id
+                    for _i, _doc in enumerate(classified_docs):
+                        try:
+                            _full_ref = f"{_carp} / {_doc['ref']}" if _doc["ref"] else _carp
+                            _cur_id   = None
+                            if _doc.get("moneda", "ARS") == "USD":
+                                _cur_id = get_currency_id(models_url, uid, api_key, "USD")
+                            _move_id = create_vendor_bill(models, uid, api_key,
+                                partner_id   = _doc["tipo_cfg"]["partner_id"],
+                                ref          = _full_ref,
+                                invoice_date = _doc["fecha"] or False,
+                                filename     = _doc["filename"],
+                                file_bytes   = _doc["file_bytes"],
+                                mimetype     = _doc["mimetype"],
+                                journal_id   = _doc["tipo_cfg"]["journal_id"],
+                                doc_type_id  = _doc["tipo_cfg"]["doc_type"],
+                                currency_id  = _cur_id,
+                            )
+                            _url = f"{ODOO_URL}/web#id={_move_id}&model=account.move&view_type=form"
+                            st.success(f"✅ {_doc['filename']} → ID {_move_id} — [Ver en Odoo]({_url})")
+                            _tipo = _doc["tipo_cfg"]["tipo"]
+                            if _tipo == "petdur":    st.session_state.etapas["1"]  = True
+                            elif _tipo == "di_afip": st.session_state.etapas["2"]  = True
+                            elif _tipo == "nac":     st.session_state.etapas["2a"] = True
+                            if _move_id not in st.session_state.carpeta_bills:
+                                st.session_state.carpeta_bills.append(_move_id)
+                            st.session_state.history.append({
+                                "tipo":   f"Importación {_carp}",
+                                "archivo":_doc["filename"], "id":_move_id,
+                                "url":_url, "estado":"✅"
+                            })
+                            _ok += 1
+                        except Exception as _e:
+                            _errs.append(f"❌ {_doc['filename']}: {str(_e)[:120]}")
+                        _prog.progress((_i + 1) / len(classified_docs))
+                    if _ok:
+                        st.success(f"✅ {_ok} registro(s) creados para {_carp}.")
+                        load_carpeta_full.clear()
+                    for _err in _errs:
+                        st.error(_err)
+                    st.rerun()
 
         st.divider()
 
         # ── Landed Cost ──────────────────────────────────────────
         st.markdown("#### 🔗 Crear Landed Cost — Etapa 4 Bis")
-        st.caption("`split_method: by_current_cost_price` — CFO Dios estricto · distribuye por valor CFR proporcional")
+        st.caption("`split_method: by_current_cost_price` · distribuye por valor CFR proporcional")
 
-        if not st.session_state.carpeta_po:
-            st.info("Vinculá una OC primero para seleccionar el picking de recepción.")
-        elif not st.session_state.carpeta_id:
-            st.info("Ingresá el número de carpeta.")
+        _lc_po       = st.session_state.get("carpeta_po") or (carp_data.get("po") if carp_data else None)
+        _lc_pickings = carp_data.get("pickings", []) if carp_data else []
+
+        if not _lc_po:
+            with st.expander("🔗 Vincular OC manualmente", expanded=True):
+                _oc_q = st.text_input("Buscar OC por número", placeholder="P00025", key="oc_search_q")
+                if _oc_q:
+                    with st.spinner("Buscando..."):
+                        _pos_man = search_purchase_orders(models_url, uid, api_key, _oc_q)
+                    if _pos_man:
+                        _po_opts = {
+                            f"{p['name']}  ·  {p['partner_id'][1] if p.get('partner_id') else '?'}  ·  ${p.get('amount_total',0):,.0f}": p
+                            for p in _pos_man
+                        }
+                        _sel_po = st.selectbox("OC encontrada", list(_po_opts.keys()), key="sel_po_imp")
+                        if st.button("✅ Vincular OC", key="btn_link_po"):
+                            st.session_state.carpeta_po  = _po_opts[_sel_po]
+                            st.session_state.etapas["0"] = True
+                            st.rerun()
+                    else:
+                        st.warning("No se encontraron OC confirmadas.")
         else:
-            with st.spinner("Cargando pickings..."):
-                pickings = get_pickings_for_po(models_url, uid, api_key, st.session_state.carpeta_po["id"])
-            if not pickings:
+            _po     = _lc_po
+            _po_url = f"{ODOO_URL}/web#id={_po['id']}&model=purchase.order&view_type=form"
+            st.success(f"✅ OC: **{_po['name']}** · "
+                       f"{_po.get('partner_id',[0,'?'])[1]}  —  [🔗 Ver en Odoo]({_po_url})")
+
+            if not _lc_pickings:
+                with st.spinner("Cargando pickings..."):
+                    _lc_pickings = get_pickings_for_po(models_url, uid, api_key, _po["id"])
+
+            if not _lc_pickings:
                 st.warning("No se encontraron pickings para esta OC. Verificá en Odoo.")
             else:
-                pick_opts = {}
-                for p in pickings:
-                    dest = p.get("location_dest_id", ["?","?"])[1]
-                    pick_opts[f"{p['name']}  ·  {p['state']}  ·  {dest}"] = p["id"]
-                sel_pick    = st.selectbox("Picking IN a asociar", list(pick_opts.keys()), key="sel_pick_lc")
-                sel_pick_id = pick_opts[sel_pick]
+                _pick_opts  = {
+                    f"{p['name']}  ·  {p.get('state','')}  ·  {p.get('location_dest_id',[0,'?'])[1]}": p["id"]
+                    for p in _lc_pickings
+                }
+                _sel_pick    = st.selectbox("Picking IN", list(_pick_opts.keys()), key="sel_pick_lc")
+                _sel_pick_id = _pick_opts[_sel_pick]
 
-                with st.spinner(f"Cargando bills de {st.session_state.carpeta_id}..."):
-                    bills_carp = get_bills_for_carpeta(models_url, uid, api_key, st.session_state.carpeta_id)
-
-                if not bills_carp:
-                    st.warning("No se encontraron facturas con esa referencia. Subí los comprobantes primero.")
+                with st.spinner("Cargando comprobantes..."):
+                    _bills_lc = get_bills_for_carpeta(models_url, uid, api_key,
+                                                      st.session_state.carpeta_id)
+                if not _bills_lc:
+                    st.warning("No se encontraron facturas con esa referencia.")
                 else:
-                    st.markdown("**Líneas del Landed Cost** — una por cada bill de costo")
-                    lc_prod_labels = {f"{pid}: {pname}": pid for pid, pname in LC_PRODUCTS.items()}
-                    lc_lines = []
-                    for bill in bills_carp:
-                        bname    = bill.get("name") or f"ID {bill['id']}"
-                        bpartner = bill["partner_id"][1] if bill.get("partner_id") else "?"
-                        bstate   = bill.get("state","")
-                        ba_total = float(bill.get("amount_total") or 0)
-                        bc1, bc2, bc3, bc4 = st.columns([3,3,2,1])
-                        bc1.caption(f"📄 {bname} — {bpartner} [{bstate}]")
-                        chosen_prod = bc2.selectbox("Producto LC", list(lc_prod_labels.keys()), key=f"lc_p_{bill['id']}")
-                        lc_amt      = bc3.number_input("Monto", min_value=0.0, value=ba_total,
-                                         key=f"lc_a_{bill['id']}", format="%.2f")
-                        incl        = bc4.checkbox("✓", value=True, key=f"lc_i_{bill['id']}")
-                        if incl and lc_amt > 0:
-                            lc_lines.append({"product_id": lc_prod_labels[chosen_prod], "price_unit": lc_amt})
+                    st.markdown("**Líneas del Landed Cost**")
+                    _lc_prod_labels = {f"{pid}: {pname}": pid for pid, pname in LC_PRODUCTS.items()}
+                    _lc_lines = []
+                    for _bill in _bills_lc:
+                        _bname    = _bill.get("name") or f"ID {_bill['id']}"
+                        _bpartner = _bill["partner_id"][1] if _bill.get("partner_id") else "?"
+                        _bstate   = _bill.get("state", "")
+                        _ba_total = float(_bill.get("amount_total") or 0)
+                        _bc1, _bc2, _bc3, _bc4 = st.columns([3, 3, 2, 1])
+                        _bc1.caption(f"📄 {_bname} — {_bpartner} [{_bstate}]")
+                        _ch_prod = _bc2.selectbox("Producto LC", list(_lc_prod_labels.keys()),
+                                                   key=f"lc_p_{_bill['id']}")
+                        _lc_amt  = _bc3.number_input("Monto", min_value=0.0, value=_ba_total,
+                                       key=f"lc_a_{_bill['id']}", format="%.2f")
+                        _incl    = _bc4.checkbox("✓", value=True, key=f"lc_i_{_bill['id']}")
+                        if _incl and _lc_amt > 0:
+                            _lc_lines.append({"product_id": _lc_prod_labels[_ch_prod],
+                                              "price_unit": _lc_amt})
 
-                    if lc_lines:
-                        st.caption(f"{len(lc_lines)} línea(s) seleccionadas para el Landed Cost")
-                        if st.button("🔗 Crear Landed Cost en Odoo", type="primary", key="btn_lc_create"):
+                    if _lc_lines:
+                        st.caption(f"{len(_lc_lines)} línea(s) seleccionadas")
+                        if st.button("🔗 Crear Landed Cost en Odoo", type="primary",
+                                     key="btn_lc_create"):
                             try:
-                                lc_id = create_landed_cost(models, uid, api_key,
-                                    picking_ids=[sel_pick_id], cost_lines=lc_lines)
-                                st.session_state.carpeta_lc_id = lc_id
+                                _lc_id = create_landed_cost(models, uid, api_key,
+                                    picking_ids=[_sel_pick_id], cost_lines=_lc_lines)
+                                st.session_state.carpeta_lc_id = _lc_id
                                 st.session_state.etapas["4"]   = True
-                                lc_url = f"{ODOO_URL}/web#id={lc_id}&model=stock.landed.cost&view_type=form"
-                                st.success(f"✅ Landed Cost ID {lc_id} creado — [Abrir en Odoo]({lc_url})")
-                                st.info("⚠️ Recordá validarlo en Odoo para que BA #23 actualice el PPP USD.")
-                                st.session_state.history.append({"tipo":f"Landed Cost {st.session_state.carpeta_id}",
-                                    "archivo":f"LC {st.session_state.carpeta_id} · {len(lc_lines)} líneas",
-                                    "id":lc_id,"url":lc_url,"estado":"✅"})
-                            except Exception as e:
-                                st.error(f"❌ Error creando Landed Cost: {e}")
+                                _lc_url = (f"{ODOO_URL}/web#id={_lc_id}"
+                                           f"&model=stock.landed.cost&view_type=form")
+                                st.success(f"✅ Landed Cost ID {_lc_id} — "
+                                           f"[Abrir en Odoo]({_lc_url})")
+                                st.info("⚠️ Recordá validarlo en Odoo para que BA #23 "
+                                        "actualice el PPP USD.")
+                                st.session_state.history.append({
+                                    "tipo":    f"Landed Cost {st.session_state.carpeta_id}",
+                                    "archivo": (f"LC {st.session_state.carpeta_id} · "
+                                                f"{len(_lc_lines)} líneas"),
+                                    "id": _lc_id, "url": _lc_url, "estado": "✅"
+                                })
+                                load_carpeta_full.clear()
+                            except Exception as _e:
+                                st.error(f"❌ Error creando Landed Cost: {_e}")
                     else:
                         st.info("Seleccioná al menos una línea con monto > 0.")
 
-        st.divider()
-
-        # ── Acta CFO ───
