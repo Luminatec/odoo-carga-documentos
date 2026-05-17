@@ -263,6 +263,14 @@ PARTNER_TO_TIPO = {
     48827: {"tipo": "nac",    "etapa": "2a", "label": "SENASA"},
 }
 
+# ── CUIT → partner (sin guiones, 11 dígitos) ────────────────────────────────
+CUIT_TO_PARTNER = {
+    "30711100314": {"tipo":"nac",    "label":"Bill TRICE Transport (Etapa 2a)", "partner_id":48825,"journal_id":10,"doc_type":None},
+    "30717845419": {"tipo":"nac",    "label":"Bill Mundo Comex (Etapa 2a)",     "partner_id":48826,"journal_id":10,"doc_type":None},
+    "30678196165": {"tipo":"nac",    "label":"Bill Terminal 4 SA (Etapa 2a)",   "partner_id":48828,"journal_id":10,"doc_type":None},
+    "33546700939": {"tipo":"nac",    "label":"Bill SENASA (Etapa 2a)",          "partner_id":48827,"journal_id":10,"doc_type":None},
+}
+
 @st.cache_data(ttl=300, show_spinner=False)
 def get_usd_rate_odoo(models_url, uid, api_key, date_str):
     """TC ARS/USD del día o el más reciente anterior en Odoo."""
@@ -413,15 +421,19 @@ def _calc_cost_breakdown(po_lines, bills, tc_usd):
         total  = fob_a + nac_a
         unit   = total / qty if qty > 0 else 0
         pct    = nac_a / fob_a * 100 if fob_a > 0 else 0
+        # Cálculo en USD para coeficiente de landeo
+        landeo_u_usd = (nac_a / tc_usd) / qty if (tc_usd > 0 and qty > 0) else 0
+        total_u_usd  = fob_pu + landeo_u_usd
+        coef_pct     = (landeo_u_usd / fob_pu * 100) if fob_pu > 0 else 0
+        cost_u_ars   = total_u_usd * tc_usd
         rows.append({
-            "Producto":         prod,
-            "Cant.":            int(qty) if qty == int(qty) else qty,
-            "FOB unit (USD)":   fmt_usd(fob_pu),
-            "FOB total (ARS)":  fmt_ars(fob_a),
-            "Nac. asignada":    fmt_ars(nac_a),
-            "Costo total (ARS)":fmt_ars(total),
-            "Costo unit. (ARS)":fmt_ars(unit),
-            "% nac/FOB":        f"+{pct:.1f}%",
+            "Producto":           prod,
+            "Cant.":              int(qty) if qty == int(qty) else qty,
+            "FOB unit (u$s)":     fmt_usd(fob_pu),
+            "Landeo unit (u$s)":  fmt_usd(landeo_u_usd),
+            "Total unit (u$s)":   fmt_usd(total_u_usd),
+            "Coef. landeo":       f"+{coef_pct:.1f}%",
+            "Costo unit. (ARS)":  fmt_ars(cost_u_ars),
         })
 
     # Desglose de gastos de nac para el expander
@@ -1485,21 +1497,105 @@ def extract_excel_oc_fields(file_bytes):
     return fields
 
 
-def classify_document(text):
+def classify_document(text, carpeta_id=""):
+    """
+    Clasifica un documento de importación.
+    Prioridad: sin-texto → no-aplica → CUIT → keyword.
+    Retorna dict con: tipo, label, partner_id, journal_id, doc_type,
+                      no_aplica (bool), mismatch (bool), extracted (dict).
+    """
+    _other = {"tipo":"other","label":"Otro comprobante","partner_id":None,
+              "journal_id":10,"doc_type":None,
+              "no_aplica":False,"mismatch":False,"extracted":{}}
+
+    # ── Sin texto ─────────────────────────────────────────────────────────
+    if not text.strip():
+        return {**_other, "label":"Sin texto — no aplica", "no_aplica":True}
+
     tu = text.upper()
-    rules = [
-        ("PETDUR",       {"tipo":"petdur",  "label":"Bill PETDUR (Etapa 1)",        "partner_id":49328,"journal_id":71,"doc_type":None}),
-        ("DECLARACI",    {"tipo":"di_afip", "label":"DI AFIP (Etapa 2)",            "partner_id":9,    "journal_id":10,"doc_type":66}),
-        ("33693450239",  {"tipo":"di_afip", "label":"DI AFIP (Etapa 2)",            "partner_id":9,    "journal_id":10,"doc_type":66}),
-        ("TRICE",        {"tipo":"nac",     "label":"Bill TRICE (Etapa 2a)",        "partner_id":48825,"journal_id":10,"doc_type":None}),
-        ("TERMINAL 4",   {"tipo":"nac",     "label":"Bill Terminal 4 (Etapa 2a)",   "partner_id":48828,"journal_id":10,"doc_type":None}),
-        ("MUNDO COMEX",  {"tipo":"nac",     "label":"Bill Mundo Comex (Etapa 2a)",  "partner_id":48826,"journal_id":10,"doc_type":None}),
-        ("SENASA",       {"tipo":"nac",     "label":"Bill SENASA (Etapa 2a)",       "partner_id":48827,"journal_id":10,"doc_type":None}),
+    extracted = {}
+
+    # ── Extracción de campos comunes ──────────────────────────────────────
+    # Fecha (DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY)
+    _fm = re.search(r'(\d{2}[/\-\.]\d{2}[/\-\.]\d{4})', text)
+    if _fm:
+        extracted["fecha"] = parse_ar_date(_fm.group(1))
+
+    # CUIT (con o sin guiones): captura el primero que aparece
+    _cm = re.search(r'(\d{2})[-\s]?(\d{8})[-\s]?(\d)\b', text)
+    if _cm:
+        extracted["cuit"]      = f"{_cm.group(1)}-{_cm.group(2)}-{_cm.group(3)}"
+        extracted["cuit_norm"] = _cm.group(1) + _cm.group(2) + _cm.group(3)
+
+    # Monto total
+    _am = re.search(r'TOTAL[^\d$]*([\d\.]+,[\d]{2})', tu)
+    if _am:
+        extracted["monto"] = normalize_amount(_am.group(1))
+
+    # TC desde texto: "Tipo de cambio USD 1 = ARG 1.505,18000" o similar
+    _tc_m = re.search(
+        r'(?:TIPO\s+DE\s+CAMBIO|T\.?\s*C\.?)\s*.*?(?:USD\s*1\s*=\s*(?:ARG\s*)?)?([\d\.]+,[\d]+)',
+        tu, re.DOTALL)
+    if _tc_m:
+        extracted["tc_pdf"] = normalize_amount(_tc_m.group(1))
+
+    # N° comprobante — patrón argentino: letra + 4 dígitos + guion + 8 dígitos
+    _nr = re.search(r'\b([A-Z]\d{4}-\d{8})\b', text)
+    if _nr:
+        extracted["nro_comp"] = _nr.group(1)
+    else:
+        _nr2 = re.search(r'N[°º]?\s*(?:COMP\.?|FACTURA|COMPROBANTE)?[:\s]+([A-Z0-9\-]{5,20})', tu)
+        if _nr2:
+            extracted["nro_comp"] = _nr2.group(1).strip()
+
+    # ── No aplica ─────────────────────────────────────────────────────────
+    if "VOLANTE ELECTRONICO DE PAGO" in tu or (
+            re.search(r'\bVEP\b', tu) and ("PAGO" in tu or "AFIP" in tu)):
+        return {**_other, "label":"VEP — no aplica", "no_aplica":True, "extracted":extracted}
+
+    if re.search(r'\bPRESUPUESTO\b', tu) and not re.search(r'\bFACTURA\b', tu):
+        return {**_other, "label":"Presupuesto — no aplica", "no_aplica":True, "extracted":extracted}
+
+    if "BILL OF LADING" in tu or ("CONOCIMIENTO" in tu and "EMBARQUE" in tu):
+        return {**_other, "label":"Bill of Lading — no aplica", "no_aplica":True, "extracted":extracted}
+
+    # ── Mismatch de carpeta ────────────────────────────────────────────────
+    mismatch = False
+    if carpeta_id:
+        _carp_norm = re.sub(r'[_\s]', '_', carpeta_id.strip().upper())
+        _refs = re.findall(r'LUMI[_\s]?\d+[A-Z]?', tu)
+        for _r in _refs:
+            _r_norm = re.sub(r'[_\s]', '_', _r.strip())
+            if _r_norm != _carp_norm:
+                mismatch = True
+                extracted["mismatch_ref"] = _r_norm
+                break
+
+    # ── Clasificación por CUIT ─────────────────────────────────────────────
+    cuit_norm = extracted.get("cuit_norm", "")
+    # Buscar en todo el texto (por si el PDF tiene CUITs sin guiones)
+    _tu_no_sep = tu.replace("-","").replace(" ","")
+    for _ck, _cfg in CUIT_TO_PARTNER.items():
+        if cuit_norm == _ck or _ck in _tu_no_sep:
+            return {**_cfg, "no_aplica":False, "mismatch":mismatch, "extracted":extracted}
+
+    # ── Fallback por keyword ───────────────────────────────────────────────
+    _kw = [
+        ("PETDUR",                {"tipo":"petdur", "label":"Bill PETDUR (Etapa 1)",  "partner_id":49328,"journal_id":71,"doc_type":None}),
+        ("217016440010",          {"tipo":"petdur", "label":"Bill PETDUR (Etapa 1)",  "partner_id":49328,"journal_id":71,"doc_type":None}),
+        ("26001IC",               {"tipo":"di_afip","label":"DI AFIP (Etapa 2)",      "partner_id":9,    "journal_id":10,"doc_type":66}),
+        ("DECLARACION DE IMPORT", {"tipo":"di_afip","label":"DI AFIP (Etapa 2)",      "partner_id":9,    "journal_id":10,"doc_type":66}),
+        ("SUBREGIMEN",            {"tipo":"di_afip","label":"DI AFIP (Etapa 2)",      "partner_id":9,    "journal_id":10,"doc_type":66}),
+        ("SENASA",                {"tipo":"nac",    "label":"Bill SENASA (Etapa 2a)", "partner_id":48827,"journal_id":10,"doc_type":None}),
+        ("TRICE",                 {"tipo":"nac",    "label":"Bill TRICE Transport (Etapa 2a)", "partner_id":48825,"journal_id":10,"doc_type":None}),
+        ("TERMINAL 4",            {"tipo":"nac",    "label":"Bill Terminal 4 SA (Etapa 2a)",   "partner_id":48828,"journal_id":10,"doc_type":None}),
+        ("MUNDO COMEX",           {"tipo":"nac",    "label":"Bill Mundo Comex (Etapa 2a)",     "partner_id":48826,"journal_id":10,"doc_type":None}),
     ]
-    for keyword, cfg in rules:
-        if keyword in tu:
-            return cfg
-    return {"tipo":"other","label":"Otro comprobante","partner_id":None,"journal_id":10,"doc_type":None}
+    for _kword, _cfg in _kw:
+        if _kword in tu:
+            return {**_cfg, "no_aplica":False, "mismatch":mismatch, "extracted":extracted}
+
+    return {**_other, "mismatch":mismatch, "extracted":extracted}
 
 
 # ───────────────────────────────────────────────────
@@ -2422,26 +2518,53 @@ if tab_import is not None:
                 raw_text   = ""
                 if ext == "pdf":
                     _, raw_text = extract_pdf_fields(file_bytes)
-                auto        = classify_document(raw_text)
+                auto        = classify_document(raw_text, st.session_state.carpeta_id)
                 default_lbl = auto["label"] if auto["label"] in TIPO_OPTIONS_IMP else "Otro comprobante"
-                with st.expander(f"📎 {uf.name} — {auto['label']}", expanded=True):
-                    ct1, ct2, ct3, ct4 = st.columns([3, 2, 2, 1])
-                    tipo_sel  = ct1.selectbox("Tipo", list(TIPO_OPTIONS_IMP.keys()),
-                        index=list(TIPO_OPTIONS_IMP.keys()).index(default_lbl), key=f"tipo_{uf.name}")
-                    ref_doc   = ct2.text_input("N° comprobante", key=f"ref_d_{uf.name}")
-                    fecha_doc = ct3.text_input("Fecha (AAAA-MM-DD)", key=f"fec_d_{uf.name}",
-                                               placeholder="2026-05-12")
-                    moneda    = ct4.selectbox("Moneda", ["ARS","USD"], key=f"cur_{uf.name}")
-                    if moneda == "USD":
-                        _rd = fecha_doc or pd.Timestamp.today().strftime("%Y-%m-%d")
-                        _tc_up, _dt_up = get_usd_rate_odoo(models_url, uid, api_key, _rd)
-                        st.caption(f"TC Odoo para {_dt_up or _rd}: **$ {_tc_up:,.2f}**"
-                                   if _tc_up else "TC no encontrado en Odoo para esa fecha")
-                    classified_docs.append({
-                        "filename": uf.name, "file_bytes": file_bytes, "mimetype": mimetype,
-                        "tipo_cfg": TIPO_OPTIONS_IMP[tipo_sel],
-                        "ref": ref_doc, "fecha": fecha_doc, "moneda": moneda,
-                    })
+                _ext_info   = auto.get("extracted", {})
+                _icon       = "🚫" if auto.get("no_aplica") else ("⚠️" if auto.get("mismatch") else "📎")
+                with st.expander(f"{_icon} {uf.name} — {auto['label']}", expanded=True):
+                    # Warnings de no-aplica y mismatch
+                    if auto.get("no_aplica"):
+                        st.warning(f"🚫 **Este documento no aplica** ({auto['label']}) — "
+                                   "no se cargará en Odoo. Podés ignorarlo.")
+                    elif auto.get("mismatch"):
+                        st.warning(f"⚠️ **Carpeta mismatch** — este doc referencia "
+                                   f"**{_ext_info.get('mismatch_ref','')}** "
+                                   f"pero la carpeta activa es **{st.session_state.carpeta_id}**. "
+                                   "Verificá que sea el documento correcto.")
+
+                    # Info extraída del PDF
+                    _info_parts = []
+                    if _ext_info.get("cuit"):     _info_parts.append(f"CUIT: `{_ext_info['cuit']}`")
+                    if _ext_info.get("nro_comp"): _info_parts.append(f"Comprobante: `{_ext_info['nro_comp']}`")
+                    if _ext_info.get("fecha"):    _info_parts.append(f"Fecha: `{_ext_info['fecha']}`")
+                    if _ext_info.get("monto"):    _info_parts.append(f"Monto: `{_ext_info['monto']}`")
+                    if _ext_info.get("tc_pdf"):   _info_parts.append(f"TC (PDF): `{_ext_info['tc_pdf']}`")
+                    if _info_parts:
+                        st.caption("  ·  ".join(_info_parts))
+
+                    if not auto.get("no_aplica"):
+                        ct1, ct2, ct3, ct4 = st.columns([3, 2, 2, 1])
+                        tipo_sel  = ct1.selectbox("Tipo", list(TIPO_OPTIONS_IMP.keys()),
+                            index=list(TIPO_OPTIONS_IMP.keys()).index(default_lbl), key=f"tipo_{uf.name}")
+                        ref_doc   = ct2.text_input("N° comprobante",
+                            value=_ext_info.get("nro_comp",""), key=f"ref_d_{uf.name}")
+                        fecha_doc = ct3.text_input("Fecha (AAAA-MM-DD)",
+                            value=_ext_info.get("fecha",""), key=f"fec_d_{uf.name}",
+                            placeholder="2026-05-12")
+                        _def_mon  = "USD" if auto.get("tipo") == "petdur" else "ARS"
+                        moneda    = ct4.selectbox("Moneda", ["ARS","USD"],
+                            index=["ARS","USD"].index(_def_mon), key=f"cur_{uf.name}")
+                        if moneda == "USD":
+                            _rd = fecha_doc or pd.Timestamp.today().strftime("%Y-%m-%d")
+                            _tc_up, _dt_up = get_usd_rate_odoo(models_url, uid, api_key, _rd)
+                            st.caption(f"TC Odoo para {_dt_up or _rd}: **$ {_tc_up:,.2f}**"
+                                       if _tc_up else "TC no encontrado en Odoo para esa fecha")
+                        classified_docs.append({
+                            "filename": uf.name, "file_bytes": file_bytes, "mimetype": mimetype,
+                            "tipo_cfg": TIPO_OPTIONS_IMP[tipo_sel],
+                            "ref": ref_doc, "fecha": fecha_doc, "moneda": moneda,
+                        })
 
             if classified_docs:
                 if st.button(f"⬆️ Crear {len(classified_docs)} registro(s) en Odoo",
@@ -2732,5 +2855,3 @@ if tab_import is not None:
                                 st.error(f"❌ Error creando Landed Cost: {_e}")
                     else:
                         st.info("Seleccioná al menos una línea con monto > 0.")
-
-                        
