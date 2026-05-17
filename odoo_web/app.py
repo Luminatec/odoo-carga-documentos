@@ -401,34 +401,63 @@ def load_carpeta_full(models_url, uid, api_key, carpeta_id):
     return result
 
 
+def _bill_currency(b):
+    """Devuelve el nombre de moneda del bill ('ARS', 'USD', etc.)"""
+    c = b.get("currency_id")
+    if c and isinstance(c, (list, tuple)) and len(c) > 1:
+        return str(c[1])
+    return "ARS"
+
+def _bill_ars_amount(b):
+    """Monto del bill en ARS usando amount_total_signed (siempre ARS en Odoo)."""
+    return abs(float(b.get("amount_total_signed") or b.get("amount_total") or 0))
+
 def _calc_cost_breakdown(po_lines, bills, tc_usd):
     """
-    Calcula costo estimado por producto.
-    Usa amount_total_signed (siempre en ARS) para los gastos de nacionalización.
-    Distribuye los costos proporcionalmente al valor FOB de cada línea.
+    Calcula costo estimado por producto en USD y ARS.
+    Fuentes de costo:
+      - FOB: líneas de la OC (precio del proveedor extranjero, en USD)
+      - Nac: bills de TRICE/T4/MundoComex/SENASA (gastos locales, en ARS)
+      - AFIP: DI AFIP (derechos + IVA aduanero, en ARS)
+    El landeo = (total_nac_ARS + total_afip_ARS) / TC → expresado en USD por unidad.
+    Coef. de landeo = landeo_unit_USD / FOB_unit_USD × 100%
     """
     if not po_lines or not tc_usd:
         return [], {}
 
-    petdur   = next((b for b in bills if b.get("partner_id") and b["partner_id"][0] == 49328), None)
-    nac_bils = [b for b in bills if b.get("partner_id") and b["partner_id"][0] in {48825,48826,48827,48828}]
-    afip     = next((b for b in bills if b.get("partner_id") and b["partner_id"][0] == 9), None)
+    # ── Identificar bills por rol ──────────────────────────────────────────
+    # PETDUR: proveedor extranjero (USD). Se usa solo para refinar el TC.
+    petdur   = next((b for b in bills
+                     if b.get("partner_id") and b["partner_id"][0] == 49328), None)
 
-    # Intentar refinar TC desde el bill PETDUR
+    # Nac: gastos locales en ARS. Filtramos SOLO bills en ARS para no
+    # contaminar el total con el bill USD de PETDUR si el partner_id difiere.
+    nac_bils = [b for b in bills
+                if b.get("partner_id")
+                and b["partner_id"][0] in {48825, 48826, 48827, 48828}
+                and _bill_currency(b) != "USD"]
+
+    # AFIP: derechos de importación (ARS)
+    afip     = next((b for b in bills
+                     if b.get("partner_id")
+                     and b["partner_id"][0] == 9
+                     and _bill_currency(b) != "USD"), None)
+
+    # Refinar TC desde invoice_currency_rate del bill PETDUR
     if petdur:
         icr = petdur.get("invoice_currency_rate")
-        if icr:
-            v = float(icr)
-            if v > 100:
-                tc_usd = v
-            elif 0 < v < 1:
-                tc_usd = 1.0 / v
+        if icr and icr is not False:
+            tc_ref = _parse_odoo_rate({"rate": icr, "inverse_company_rate": None})
+            if tc_ref:
+                tc_usd = tc_ref
 
-    # amount_total_signed ya viene en ARS (moneda de la empresa)
-    total_nac_ars  = sum(abs(float(b.get("amount_total_signed") or b.get("amount_total") or 0)) for b in nac_bils)
-    total_afip_ars = abs(float(afip.get("amount_total_signed") or afip.get("amount_total") or 0)) if afip else 0
-    total_extra    = total_nac_ars + total_afip_ars
+    # ── Totales de costos de nacionalización (todos en ARS) ───────────────
+    total_nac_ars  = sum(_bill_ars_amount(b) for b in nac_bils)
+    total_afip_ars = _bill_ars_amount(afip) if afip else 0
+    # Landeo total en USD = costos ARS convertidos al TC
+    total_landeo_usd = (total_nac_ars + total_afip_ars) / tc_usd if tc_usd > 0 else 0
 
+    # ── FOB total (en USD, desde líneas OC) ───────────────────────────────
     total_fob_usd = sum(float(l.get("price_subtotal") or 0) for l in po_lines)
     if total_fob_usd == 0:
         return [], {}
@@ -437,19 +466,18 @@ def _calc_cost_breakdown(po_lines, bills, tc_usd):
     for ln in po_lines:
         prod   = ln["product_id"][1] if ln.get("product_id") else ln.get("name", "?")
         qty    = float(ln.get("product_qty") or 1)
-        fob_u  = float(ln.get("price_subtotal") or 0)
-        fob_pu = fob_u / qty if qty > 0 else 0
-        fob_a  = fob_u * tc_usd
-        prop   = fob_u / total_fob_usd
-        nac_a  = total_extra * prop
-        total  = fob_a + nac_a
-        unit   = total / qty if qty > 0 else 0
-        pct    = nac_a / fob_a * 100 if fob_a > 0 else 0
-        # Cálculo en USD para coeficiente de landeo
-        landeo_u_usd = (nac_a / tc_usd) / qty if (tc_usd > 0 and qty > 0) else 0
-        total_u_usd  = fob_pu + landeo_u_usd
-        coef_pct     = (landeo_u_usd / fob_pu * 100) if fob_pu > 0 else 0
-        cost_u_ars   = total_u_usd * tc_usd
+        fob_total_usd = float(ln.get("price_subtotal") or 0)   # FOB total línea en USD
+        fob_pu        = fob_total_usd / qty if qty > 0 else 0  # FOB por unidad en USD
+
+        # Proporción de esta línea sobre el total FOB → distribuir landeo
+        prop            = fob_total_usd / total_fob_usd
+        landeo_line_usd = total_landeo_usd * prop               # landeo asignado a esta línea
+        landeo_u_usd    = landeo_line_usd / qty if qty > 0 else 0  # landeo por unidad en USD
+
+        # Total y coeficiente
+        total_u_usd = fob_pu + landeo_u_usd                    # costo total por unidad en USD
+        coef_pct    = (landeo_u_usd / fob_pu * 100) if fob_pu > 0 else 0
+        cost_u_ars  = total_u_usd * tc_usd                     # costo por unidad en ARS
         rows.append({
             "Producto":           prod,
             "Cant.":              int(qty) if qty == int(qty) else qty,
@@ -465,18 +493,26 @@ def _calc_cost_breakdown(po_lines, bills, tc_usd):
     for b in nac_bils:
         pid   = b["partner_id"][0] if b.get("partner_id") else 0
         lbl   = PARTNER_TO_TIPO.get(pid, {}).get("label", "Otro")
-        amt   = abs(float(b.get("amount_total_signed") or b.get("amount_total") or 0))
+        amt   = _bill_ars_amount(b)
         nac_detail[lbl] = nac_detail.get(lbl, 0) + amt
     if afip:
         nac_detail["AFIP"] = total_afip_ars
 
+    total_landeo_ars = total_nac_ars + total_afip_ars
     summary = {
-        "tc_usd":         tc_usd,
-        "total_fob_usd":  total_fob_usd,
-        "total_fob_ars":  total_fob_usd * tc_usd,
-        "total_nac_ars":  total_extra,
-        "grand_total_ars":total_fob_usd * tc_usd + total_extra,
-        "nac_detail":     nac_detail,
+        "tc_usd":              tc_usd,
+        "total_fob_usd":       total_fob_usd,
+        "total_fob_ars":       total_fob_usd * tc_usd,
+        "total_landeo_usd":    total_landeo_usd,
+        "total_landeo_ars":    total_landeo_ars,
+        "grand_total_usd":     total_fob_usd + total_landeo_usd,
+        "grand_total_ars":     total_fob_usd * tc_usd + total_landeo_ars,
+        "coef_landeo_total":   (total_landeo_usd / total_fob_usd * 100) if total_fob_usd > 0 else 0,
+        "nac_detail":          nac_detail,
+        # debug
+        "_nac_bils_count":     len(nac_bils),
+        "_afip_found":         afip is not None,
+        "_petdur_found":       petdur is not None,
     }
     return rows, summary
 
@@ -2794,18 +2830,24 @@ if tab_import is not None:
                     _cost_rows, _summary = _calc_cost_breakdown(_po_lns, _bills_cost, _tc_oc)
 
                 if _cost_rows and _summary:
-                    st.caption(f"TC USD/ARS: **$ {_summary['tc_usd']:,.2f}** — Fuente: {_tc_src}")
+                    st.caption(
+                        f"TC USD/ARS: **$ {_summary['tc_usd']:,.2f}** — Fuente: {_tc_src}  ·  "
+                        f"Coef. landeo total: **+{_summary['coef_landeo_total']:.1f}%**")
                     c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("FOB (USD)",         fmt_usd(_summary["total_fob_usd"]))
-                    c2.metric("FOB (ARS)",          fmt_ars(_summary["total_fob_ars"]))
-                    c3.metric("Gastos nac. (ARS)",  fmt_ars(_summary["total_nac_ars"]))
-                    c4.metric("Total estimado",     fmt_ars(_summary["grand_total_ars"]))
+                    c1.metric("FOB total (u$s)",    fmt_usd(_summary["total_fob_usd"]))
+                    c2.metric("Landeo total (u$s)",  fmt_usd(_summary["total_landeo_usd"]))
+                    c3.metric("Total (u$s)",         fmt_usd(_summary["grand_total_usd"]))
+                    c4.metric("Total (ARS)",         fmt_ars(_summary["grand_total_ars"]))
 
-                    with st.expander("📊 Detalle gastos de nacionalización", expanded=False):
-                        _tot_nac = _summary["total_nac_ars"]
+                    with st.expander("📊 Detalle gastos de nacionalización (ARS)", expanded=False):
+                        _tot_nac = _summary["total_landeo_ars"]
                         for _lbl, _amt in _summary.get("nac_detail", {}).items():
                             _pct = _amt / _tot_nac * 100 if _tot_nac > 0 else 0
                             st.caption(f"• **{_lbl}**: {fmt_ars(_amt)}  ({_pct:.1f}%)")
+                        st.caption(
+                            f"Bills nac encontradas: {_summary['_nac_bils_count']}  ·  "
+                            f"AFIP: {'✅' if _summary['_afip_found'] else '—'}  ·  "
+                            f"PETDUR: {'✅' if _summary['_petdur_found'] else '—'}")
 
                     st.dataframe(pd.DataFrame(_cost_rows), use_container_width=True, hide_index=True)
                 else:
