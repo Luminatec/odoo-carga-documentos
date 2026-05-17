@@ -696,12 +696,25 @@ def search_product_by_code_or_name(models_url, uid, api_key, code="", name_keywo
                            if re.search(r'[A-Za-z]', w) and re.search(r'\d', w) and len(w) >= 4]
             generic_kws = [w for w in all_words if w not in model_kws]
             keywords = (model_kws + generic_kws)[:3]
+
+            def _best(rows):
+                """Prefiere productos con default_code que empiece con 'L' (LCANO…).
+                Si no hay ninguno con L, toma el de mayor standard_price.
+                Ante empate total, devuelve el primero."""
+                if not rows:
+                    return rows
+                l_codes = [r for r in rows if str(r.get("default_code") or "").upper().startswith("L")]
+                if l_codes:
+                    return [sorted(l_codes, key=lambda r: float(r.get("standard_price") or 0), reverse=True)[0]]
+                return [sorted(rows, key=lambda r: float(r.get("standard_price") or 0), reverse=True)[0]]
+
             if keywords:
                 # Intento 1: solo nº de modelo (G3110, G2110, etc.) — muy específico
                 if model_kws:
                     rows = m.execute_kw(ODOO_DB, uid, api_key, "product.product", "search_read",
                         [[("active", "=", True), ("name", "ilike", model_kws[0])]],
-                        {"fields": fields, "limit": limit})
+                        {"fields": fields, "limit": 20})
+                    rows = _best(rows)
                     if rows:
                         return rows
                 # Intento 2: AND con las 3 keywords limpias
@@ -709,14 +722,16 @@ def search_product_by_code_or_name(models_url, uid, api_key, code="", name_keywo
                 for kw in keywords:
                     domain.append(("name", "ilike", kw))
                 rows = m.execute_kw(ODOO_DB, uid, api_key, "product.product", "search_read",
-                    [domain], {"fields": fields, "limit": limit})
+                    [domain], {"fields": fields, "limit": 20})
+                rows = _best(rows)
                 if rows:
                     return rows
                 # Intento 3: primera keyword genérica sola
                 fallback_kw = generic_kws[0] if generic_kws else keywords[0]
                 rows = m.execute_kw(ODOO_DB, uid, api_key, "product.product", "search_read",
                     [[("active", "=", True), ("name", "ilike", fallback_kw)]],
-                    {"fields": fields, "limit": limit})
+                    {"fields": fields, "limit": 20})
+                rows = _best(rows)
                 if rows:
                     return rows
     except Exception:
@@ -1876,16 +1891,25 @@ with tab_orders:
             _lineas_oc = oc_fields.get("lineas", [])
             _enriched  = []
 
+            # Session state para overrides manuales de producto
+            _ss_overrides = f"prod_ov_{uf.name}"
+            if _ss_overrides not in st.session_state:
+                st.session_state[_ss_overrides] = {}
+
             if _lineas_oc:
-                for _ln in _lineas_oc:
-                    _prods = search_product_by_code_or_name(
-                        models_url, uid, api_key,
-                        code=_ln.get("codigo",""),
-                        name_keywords=_ln.get("descripcion",""),
-                        ean13=_ln.get("ean13",""),
-                        limit=1,
-                    )
-                    _op    = _prods[0] if _prods else None
+                for _li, _ln in enumerate(_lineas_oc):
+                    _override = st.session_state[_ss_overrides].get(_li)
+                    if _override:
+                        _op = _override
+                    else:
+                        _prods = search_product_by_code_or_name(
+                            models_url, uid, api_key,
+                            code=_ln.get("codigo",""),
+                            name_keywords=_ln.get("descripcion",""),
+                            ean13=_ln.get("ean13",""),
+                            limit=1,
+                        )
+                        _op = _prods[0] if _prods else None
                     _cost  = float(_op["standard_price"]) if _op else 0.0
                     _price = float(_ln.get("precio_unit") or 0)
                     _margin = ((_price - _cost) / _price * 100) if _price > 0 else 0.0
@@ -1894,6 +1918,14 @@ with tab_orders:
                         "cost": _cost,
                         "margin_pct": _margin,
                     })
+
+                def _fmt_cost(v):
+                    """Igual que fmt_ars pero muestra $ 0,00 para costo cero."""
+                    try:
+                        s = "{:,.2f}".format(float(v))
+                        return "$ " + s.replace(",", "X").replace(".", ",").replace("X", ".")
+                    except Exception:
+                        return "$ 0,00"
 
                 _df_rows = []
                 for _el in _enriched:
@@ -1904,12 +1936,58 @@ with tab_orders:
                         "Precio unit.":  fmt_ars(_el.get("precio_unit",0)),
                         "IVA %":         _el.get("iva_pct","21"),
                         "Subtotal":      fmt_ars(_el.get("subtotal",0)),
-                        "Costo Odoo":    fmt_ars(_el.get("cost",0)),
+                        "Costo Odoo":    _fmt_cost(_el.get("cost",0)),
                         "Margen %":      f"{_el.get('margin_pct',0):.1f}%",
                         "Match Odoo":    (_el["odoo_product"]["name"]
-                                          if _el.get("odoo_product") else "⚠️ Sin match"),
+                                          if _el.get("odoo_product")
+                                          else f"⚠️ [{_el.get('codigo','')}]"),
                     })
                 st.dataframe(pd.DataFrame(_df_rows), use_container_width=True, hide_index=True)
+
+                # ── Asignación manual para líneas sin match ────────────────
+                _unmatched = [(i, el) for i, el in enumerate(_enriched)
+                              if not el.get("odoo_product")]
+                if _unmatched:
+                    with st.expander(
+                        f"🔍 Asignar productos manualmente ({len(_unmatched)} sin match)",
+                        expanded=True,
+                    ):
+                        for _li2, _el2 in _unmatched:
+                            st.caption(
+                                f"**{_el2.get('descripcion','')}** · "
+                                f"Código OC: `{_el2.get('codigo','')}`"
+                            )
+                            _sk_q   = f"mq_{uf.name}_{_li2}"
+                            _sk_sel = f"ms_{uf.name}_{_li2}"
+                            _sk_btn = f"mc_{uf.name}_{_li2}"
+                            _mq = st.text_input(
+                                "Buscar en Odoo (nombre o código)",
+                                key=_sk_q,
+                                placeholder="Ej: G2110  o  013004054",
+                            )
+                            if _mq and len(_mq) >= 2:
+                                _res = search_product_by_code_or_name(
+                                    models_url, uid, api_key,
+                                    code=_mq,
+                                    name_keywords=_mq,
+                                    limit=8,
+                                )
+                                if _res:
+                                    _opts_labels = [
+                                        f"{r['name']}  [{r.get('default_code','')}]"
+                                        for r in _res
+                                    ]
+                                    _chosen_lbl = st.selectbox(
+                                        "Resultados", _opts_labels, key=_sk_sel
+                                    )
+                                    _chosen_idx = _opts_labels.index(_chosen_lbl)
+                                    if st.button("✅ Confirmar asignación", key=_sk_btn):
+                                        st.session_state[_ss_overrides][_li2] = _res[_chosen_idx]
+                                        st.rerun()
+                                else:
+                                    st.caption("Sin resultados — probá con otro término.")
+                            if _li2 < len(_unmatched) - 1:
+                                st.divider()
             else:
                 st.info("No se detectaron líneas de productos automáticamente.")
 
