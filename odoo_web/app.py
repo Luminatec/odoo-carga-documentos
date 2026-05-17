@@ -1799,12 +1799,18 @@ def get_pending_bills(models_url, uid, api_key):
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_payment_journals(models_url, uid, api_key):
-    """Diarios bancarios / de caja disponibles para pagos."""
+    """
+    Diarios bancarios / de caja que operan en ARS (moneda de la empresa).
+    Excluye diarios con moneda propia seteada (ej: cuenta en USD).
+    """
     try:
         m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
         rows = m.execute_kw(ODOO_DB, uid, api_key, "account.journal", "search_read",
-            [[("type", "in", ["bank", "cash"])]],
-            {"fields": ["id", "name", "currency_id"], "order": "name asc"})
+            [[("type", "in", ["bank", "cash"]),
+              "|",
+              ("currency_id", "=", False),
+              ("currency_id.name", "=", "ARS")]],
+            {"fields": ["id", "name"], "order": "name asc"})
         return [(r["id"], r["name"]) for r in rows]
     except Exception:
         return []
@@ -3106,26 +3112,22 @@ with tab_op:
                         for b in _all_pending
                         if (b.get("currency_id") or [0, "ARS"])[1] == "USD")
 
-    _tm1, _tm2, _tm3 = st.columns(3)
-    _tm1.metric(
-        "Deuda total ARS",
-        fmt_ars(_tot_ars_filt),
-        delta=(None if _tot_ars_filt == _tot_ars_all
-               else fmt_ars(_tot_ars_all) + " sin filtro"),
-        delta_color="off",
+    _hay_filtro = len(_filtered) != len(_all_pending)
+    _resumen_parts = []
+    if _tot_ars_filt > 0:
+        _resumen_parts.append(f"**ARS:** {fmt_ars(_tot_ars_filt)}")
+    if _tot_usd_filt > 0:
+        _resumen_parts.append(f"**USD:** {fmt_usd(_tot_usd_filt)}")
+    _resumen_parts.append(
+        f"**{len(_filtered)}** factura(s)"
+        + (f" de {len(_all_pending)} totales" if _hay_filtro else "")
     )
-    _tm2.metric(
-        "Deuda total USD",
-        fmt_usd(_tot_usd_filt),
-        delta=(None if _tot_usd_filt == _tot_usd_all
-               else fmt_usd(_tot_usd_all) + " sin filtro"),
-        delta_color="off",
-    )
-    _tm3.metric(
-        "Facturas pendientes",
-        f"{len(_filtered)}"
-        + (f" / {len(_all_pending)}" if len(_filtered) != len(_all_pending) else ""),
-    )
+    st.info("  ·  ".join(_resumen_parts) if _resumen_parts else "Sin deuda pendiente.")
+    if _hay_filtro and (_tot_ars_all != _tot_ars_filt or _tot_usd_all != _tot_usd_filt):
+        _sin_filt = []
+        if _tot_ars_all > 0: _sin_filt.append(f"ARS {fmt_ars(_tot_ars_all)}")
+        if _tot_usd_all > 0: _sin_filt.append(f"USD {fmt_usd(_tot_usd_all)}")
+        st.caption("Sin filtro: " + "  ·  ".join(_sin_filt))
 
     if not _filtered:
         st.warning("Ninguna factura cumple los filtros aplicados.")
@@ -3292,8 +3294,8 @@ with tab_history:
             _h_url  = _h.get("url", "")
             if _h_url:
                 st.markdown(
-                    f"{_h_icon} **{_h_tipo}** \u2014 {_h_arch} "
-                    f"\u2014 ID {_h_id} \u2014 [\U0001f517 Ver en Odoo]({_h_url})"
+                    f"{_h_icon} **{_h_tipo}** — {_h_arch} "
+                    f"— ID {_h_id} — [🔗 Ver en Odoo]({_h_url})"
                 )
             else:
                 st.markdown(f"{_h_icon} **{_h_tipo}** — {_h_arch} — ID {_h_id}")
