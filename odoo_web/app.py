@@ -619,6 +619,22 @@ def normalize_amount(raw):
     else:
         return raw.replace(",", ".")
 
+_ODOO17_PATHS = {
+    "account.move":       "odoo/accounting/vendor-bills",
+    "purchase.order":     "odoo/purchase",
+    "sale.order":         "odoo/sales",
+    "stock.picking":      "odoo/inventory/receipts",
+    "stock.landed.cost":  "odoo/inventory/landed-costs",
+}
+
+def odoo_url(model, record_id):
+    """URL directa Odoo 17 para un registro. Funciona en Odoo 16+ también."""
+    path = _ODOO17_PATHS.get(model)
+    if path:
+        return f"{ODOO_URL}/{path}/{record_id}"
+    # fallback hash-URL por si el modelo no está mapeado
+    return odoo_url("{model}", record_id)
+
 def fmt_ars(v):
     """Formatea número como moneda ARS: $ 1.234,56"""
     if not v:
@@ -1816,7 +1832,7 @@ with tab_bills:
                             filename=f"{uf.name}_fila{i+1}.pdf",
                             file_bytes=file_bytes, mimetype=mimetype)
                         ok += 1
-                        url = f"{ODOO_URL}/web#id={move_id}&model=account.move&view_type=form"
+                        url = odoo_url("account.move", move_id)
                         st.session_state.history.append({"tipo":"Factura proveedor",
                             "archivo":f"{uf.name}·fila{i+1}","id":move_id,"url":url,"estado":"✅"})
                     except Exception as e:
@@ -1869,7 +1885,7 @@ with tab_bills:
             if _num_raw:
                 _dup_exists, _dup_id, _dup_name = check_invoice_exists(models_url, uid, api_key, _num_raw)
             if _dup_exists:
-                _dup_url = f"{ODOO_URL}/web#id={_dup_id}&model=account.move&view_type=form"
+                _dup_url = odoo_url("account.move", _dup_id)
                 st.error(
                     f"🚫 Esta factura **ya fue cargada** en Odoo ({_dup_name}). "
                     f"[Ver factura existente]({_dup_url})"
@@ -1966,7 +1982,7 @@ with tab_bills:
                             _dup2, _dup2_id, _dup2_name = check_invoice_exists(
                                 models_url, uid, api_key, ref_i.strip())
                             if _dup2:
-                                _dup2_url = f"{ODOO_URL}/web#id={_dup2_id}&model=account.move&view_type=form"
+                                _dup2_url = odoo_url("account.move", _dup2_id)
                                 st.error(
                                     f"🚫 La factura **{ref_i}** ya existe en Odoo ({_dup2_name}). "
                                     f"[Ver factura existente]({_dup2_url})"
@@ -1987,7 +2003,7 @@ with tab_bills:
                             filename=uf.name, file_bytes=file_bytes, mimetype=mimetype,
                             account_id=account_id_sel,
                             amount_neto=extracted.get("neto") or None)
-                        url = f"{ODOO_URL}/web#id={move_id}&model=account.move&view_type=form"
+                        url = odoo_url("account.move", move_id)
                         st.success(f"✅ Factura creada — [Abrir en Odoo]({url})")
                         st.session_state.history.append({"tipo":"Factura proveedor",
                             "archivo":uf.name,"id":move_id,"url":url,"estado":"✅"})
@@ -2161,7 +2177,7 @@ with tab_orders:
                             mimetype        = mimetype,
                             payment_term_id = _xl_pt_id or None,
                         )
-                        url = f"{ODOO_URL}/web#id={_xl_order_id}&model=sale.order&view_type=form"
+                        url = odoo_url("sale.order", _xl_order_id)
                         st.success(f"✅ Pedido creado — [Abrir en Odoo]({url})")
                         st.session_state.history.append({"tipo":"Pedido cliente",
                             "archivo":uf.name,"id":_xl_order_id,"url":url,"estado":"✅"})
@@ -2481,7 +2497,7 @@ with tab_orders:
                             payment_term_id  = _pt_choice_id or None,
                             date_order       = _fec_oc,
                         )
-                        url = f"{ODOO_URL}/web#id={order_id}&model=sale.order&view_type=form"
+                        url = odoo_url("sale.order", order_id)
                         st.success(f"✅ Pedido creado — [Abrir en Odoo]({url})")
                         st.session_state.history.append({"tipo":"Pedido cliente",
                             "archivo":uf.name,"id":order_id,"url":url,"estado":"✅"})
@@ -2681,7 +2697,7 @@ if tab_import is not None:
                                 doc_type_id  = _doc["tipo_cfg"]["doc_type"],
                                 currency_id  = _cur_id,
                             )
-                            _url = f"{ODOO_URL}/web#id={_move_id}&model=account.move&view_type=form"
+                            _url = odoo_url("account.move", _move_id)
                             st.success(f"✅ {_doc['filename']} → ID {_move_id} — [Ver en Odoo]({_url})")
                             _tipo = _doc["tipo_cfg"]["tipo"]
                             if _tipo == "petdur":    st.session_state.etapas["1"]  = True
@@ -2722,7 +2738,7 @@ if tab_import is not None:
                 ppartner = po.get("partner_id", [0, "—"])[1]
                 ptotal   = po.get("amount_total", 0)
                 pcur     = po.get("currency_id", [0, "USD"])[1] if po.get("currency_id") else "USD"
-                po_url   = f"{ODOO_URL}/web#id={po['id']}&model=purchase.order&view_type=form"
+                po_url   = odoo_url("purchase.order", po['id'])
                 ci1, ci2, ci3 = st.columns([3, 2, 1])
                 ci1.success(f"📦 **{st.session_state.carpeta_id}** — OC {pname} · {ppartner}")
                 ci2.info(f"💵 {pcur} {ptotal:,.2f}" + (f" · TC: **$ {tc_oc:,.0f}**" if tc_oc else ""))
@@ -2777,7 +2793,7 @@ if tab_import is not None:
                 amt_orig = (f"USD {b.get('amount_total', 0):,.2f}"
                             if cur_name == "USD" else fmt_ars(b.get("amount_total", 0)))
                 amt_ars = abs(float(b.get("amount_total_signed") or b.get("amount_total") or 0))
-                bill_url = f"{ODOO_URL}/web#id={b['id']}&model=account.move&view_type=form"
+                bill_url = odoo_url("account.move", b['id'])
                 estado_map = {"draft": "Borrador", "posted": "Sin pagar", "cancel": "Cancelado"}
 
                 bill_rows.append({
@@ -2850,61 +2866,40 @@ if tab_import is not None:
                             f"PETDUR: {'✅' if _summary['_petdur_found'] else '—'}")
 
                     st.dataframe(pd.DataFrame(_cost_rows), use_container_width=True, hide_index=True)
-                else:
-                    st.info("No hay líneas de productos en la OC o aún no hay comprobantes de costo.")
 
-        st.divider()
+                    # ── Asientos que va a generar el Landed Cost ──────────
+                    with st.expander("📒 Asientos estimados del Landed Cost", expanded=False):
+                        st.caption(
+                            "Basado en `split_method: by_current_cost_price`. "
+                            "Los montos son estimados — el LC de Odoo los calcula al validar.")
+                        _tc_ae   = _summary["tc_usd"]
+                        _nac_ars = _summary["total_landeo_ars"]
+                        _nac_usd = _summary["total_landeo_usd"]
 
-        st.divider()
+                        # Asiento 1: bills nac ya registradas (DR Cuenta Puente / CR Proveedor)
+                        st.markdown("**Asiento 1 — Bills de nacionalización (ya creadas)**")
+                        _ae1 = []
+                        for _lbl, _amt in _summary.get("nac_detail", {}).items():
+                            _ae1.append({"Cuenta (DR)": "3284 · Cuenta Puente Recepciones",
+                                         "Cuenta (CR)": f"Proveedores · {_lbl}",
+                                         "Monto (ARS)": fmt_ars(_amt)})
+                        if _ae1:
+                            st.dataframe(pd.DataFrame(_ae1), use_container_width=True, hide_index=True)
+                        else:
+                            st.caption("Sin bills de nac cargadas aún.")
 
-        # ── Landed Cost ──────────────────────────────────────────
-        st.markdown("#### 🔗 Crear Landed Cost — Etapa 4 Bis")
-        st.caption("`split_method: by_current_cost_price` · distribuye por valor CFR proporcional")
-
-        _lc_po       = st.session_state.get("carpeta_po") or (carp_data.get("po") if carp_data else None)
-        _lc_pickings = carp_data.get("pickings", []) if carp_data else []
-
-        if not _lc_po:
-            with st.expander("🔗 Vincular OC manualmente", expanded=True):
-                _oc_q = st.text_input("Buscar OC por número", placeholder="P00025", key="oc_search_q")
-                if _oc_q:
-                    with st.spinner("Buscando..."):
-                        _pos_man = search_purchase_orders(models_url, uid, api_key, _oc_q)
-                    if _pos_man:
-                        _po_opts = {
-                            f"{p['name']}  ·  {p['partner_id'][1] if p.get('partner_id') else '?'}  ·  ${p.get('amount_total',0):,.0f}": p
-                            for p in _pos_man
-                        }
-                        _sel_po = st.selectbox("OC encontrada", list(_po_opts.keys()), key="sel_po_imp")
-                        if st.button("✅ Vincular OC", key="btn_link_po"):
-                            st.session_state.carpeta_po  = _po_opts[_sel_po]
-                            st.session_state.etapas["0"] = True
-                            st.rerun()
-                    else:
-                        st.warning("No se encontraron OC confirmadas.")
-        else:
-            _po     = _lc_po
-            _po_url = f"{ODOO_URL}/web#id={_po['id']}&model=purchase.order&view_type=form"
-            st.success(f"✅ OC: **{_po['name']}** · "
-                       f"{_po.get('partner_id',[0,'?'])[1]}  —  [🔗 Ver en Odoo]({_po_url})")
-
-            if not _lc_pickings:
-                with st.spinner("Cargando pickings..."):
-                    _lc_pickings = get_pickings_for_po(models_url, uid, api_key, _po["id"])
-
-            if not _lc_pickings:
-                st.warning("No se encontraron pickings para esta OC. Verificá en Odoo.")
-            else:
-                _pick_opts  = {
-                    f"{p['name']}  ·  {p.get('state','')}  ·  {p.get('location_dest_id',[0,'?'])[1]}": p["id"]
-                    for p in _lc_pickings
-                }
-                _sel_pick    = st.selectbox("Picking IN", list(_pick_opts.keys()), key="sel_pick_lc")
-                _sel_pick_id = _pick_opts[_sel_pick]
-
-                with st.spinner("Cargando comprobantes..."):
-                    _bills_lc = get_bills_for_carpeta(models_url, uid, api_key,
-                                                      st.session_state.carpeta_id)
-                if not _bills_lc:
-                    st.warning("No se encontraron facturas con esa referencia.")
-       
+                        st.markdown("**Asiento 2 — Landed Cost (al validar)**")
+                        st.caption("DR: Valuación de inventario por producto · CR: 3284 Cuenta Puente Recepciones")
+                        _ae2 = []
+                        for _row in _cost_rows:
+                            # Reconstruct amounts from the formatted strings is hard; recalculate
+                            pass
+                        # Recalculate LC distribution from po_lines
+                        _ae2 = []
+                        for _ln in _po_lns:
+                            _prod_name = _ln["product_id"][1] if _ln.get("product_id") else _ln.get("name","?")
+                            _qty       = float(_ln.get("product_qty") or 1)
+                            _fob_line  = float(_ln.get("price_subtotal") or 0)
+                            _prop      = _fob_line / _summary["total_fob_usd"] if _summary["total_fob_usd"] > 0 else 0
+                            _lc_line_ars = _nac_ars * _prop
+                            _lc_unit_usd = (_nac_usd * _prop / _qty) if _qty > 0 else 0
