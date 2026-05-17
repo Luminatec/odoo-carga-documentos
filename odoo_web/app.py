@@ -59,9 +59,12 @@ st.markdown("""
 ODOO_URL = "https://gpowerbyte-luminatec.odoo.com"
 ODOO_DB  = "gpowerbyte-luminatec-master-22753148"
 
-# Emails con acceso a Importaciones — también configurable en st.secrets["ADMIN_EMAILS"]
-_raw_admin = st.secrets.get("ADMIN_EMAILS", "ivarela@luminatec.com,dario@luminatec.com")
-ADMIN_EMAILS = {e.strip().lower() for e in _raw_admin.split(",")}
+# Emails con acceso a Importaciones.
+# BASE_ADMIN_EMAILS siempre tienen acceso, independientemente del secret.
+# Se puede agregar más emails via st.secrets["ADMIN_EMAILS"] (separados por coma).
+BASE_ADMIN_EMAILS = {"ivarela@luminatec.com", "dario@luminatec.com"}
+_raw_admin = st.secrets.get("ADMIN_EMAILS", "")
+ADMIN_EMAILS = BASE_ADMIN_EMAILS | {e.strip().lower() for e in _raw_admin.split(",") if e.strip()}
 
 MIMETYPES = {
     "pdf":  "application/pdf",
@@ -3089,9 +3092,39 @@ with tab_op:
         _filtered = [b for b in _filtered
                      if b.get("invoice_date_due") and b["invoice_date_due"] < _today]
 
-    st.caption(
-        f"{len(_filtered)} factura(s) pendiente(s)"
-        + (f" (de {len(_all_pending)} totales)" if len(_filtered) != len(_all_pending) else "")
+    # ── Totales de deuda por moneda (siempre visibles como filtro/resumen) ────
+    _tot_ars_filt = sum(float(b.get("amount_residual") or 0)
+                        for b in _filtered
+                        if (b.get("currency_id") or [0, "ARS"])[1] == "ARS")
+    _tot_usd_filt = sum(float(b.get("amount_residual") or 0)
+                        for b in _filtered
+                        if (b.get("currency_id") or [0, "ARS"])[1] == "USD")
+    _tot_ars_all  = sum(float(b.get("amount_residual") or 0)
+                        for b in _all_pending
+                        if (b.get("currency_id") or [0, "ARS"])[1] == "ARS")
+    _tot_usd_all  = sum(float(b.get("amount_residual") or 0)
+                        for b in _all_pending
+                        if (b.get("currency_id") or [0, "ARS"])[1] == "USD")
+
+    _tm1, _tm2, _tm3 = st.columns(3)
+    _tm1.metric(
+        "Deuda total ARS",
+        fmt_ars(_tot_ars_filt),
+        delta=(None if _tot_ars_filt == _tot_ars_all
+               else fmt_ars(_tot_ars_all) + " sin filtro"),
+        delta_color="off",
+    )
+    _tm2.metric(
+        "Deuda total USD",
+        fmt_usd(_tot_usd_filt),
+        delta=(None if _tot_usd_filt == _tot_usd_all
+               else fmt_usd(_tot_usd_all) + " sin filtro"),
+        delta_color="off",
+    )
+    _tm3.metric(
+        "Facturas pendientes",
+        f"{len(_filtered)}"
+        + (f" / {len(_all_pending)}" if len(_filtered) != len(_all_pending) else ""),
     )
 
     if not _filtered:
@@ -3181,16 +3214,6 @@ with tab_op:
         # ── Formulario de pago ────────────────────────────────────────────────
         st.markdown("#### Datos de la Orden de Pago")
 
-        # Advertencia si hay mezcla de monedas
-        _monedas_sel = _selected_op["Moneda"].unique().tolist()
-        if len(_monedas_sel) > 1:
-            st.warning(
-                "⚠️ Tenés facturas en distintas monedas seleccionadas "
-                f"({', '.join(_monedas_sel)}). "
-                "Odoo requiere que cada pago sea en una sola moneda. "
-                "Se generará una OP separada por moneda."
-            )
-
         _jours = get_payment_journals(models_url, uid, api_key)
         if not _jours:
             st.error("No se encontraron diarios de pago en Odoo.")
@@ -3203,58 +3226,54 @@ with tab_op:
                 "Fecha de pago", value=_date_cls.today(), key="op_pay_date")
             _pay_journal_id = _jour_opts[_pay_journal]
 
+            st.caption(
+                f"Se generará **una OP separada por cada factura** seleccionada "
+                f"({n_sel} OP en total)."
+            )
+
             _op_btn = st.button(
                 f"\U0001f4b8 Generar {n_sel} Orden(es) de Pago en Odoo",
                 type="primary", key="btn_gen_op")
 
             if _op_btn:
-                # Agrupar por moneda para crear OPs separadas si hay mezcla
-                _groups = {}
-                for _, _sr in _selected_op.iterrows():
-                    _cur_key = _sr["Moneda"]
-                    if _cur_key not in _groups:
-                        _groups[_cur_key] = []
-                    _groups[_cur_key].append(int(_sr["_id"]))
-
                 _op_ok, _op_errs = 0, []
                 _pay_date_str = _pay_date.strftime("%Y-%m-%d")
+                _prog_op = st.progress(0)
 
-                for _cur_key, _move_ids_grp in _groups.items():
+                for _op_i, (_, _sr) in enumerate(_selected_op.iterrows()):
+                    _move_id_single = int(_sr["_id"])
+                    _comp_name      = _sr["Comprobante"]
+                    _prov_name      = _sr["Proveedor"]
+                    _cur_name       = _sr["Moneda"]
+                    _monto          = _sr["Pendiente"]
                     try:
                         _ok, _res = register_payment_wizard(
                             models, uid, api_key,
-                            _move_ids_grp, _pay_date_str, _pay_journal_id)
+                            [_move_id_single], _pay_date_str, _pay_journal_id)
                         if _ok:
                             st.success(
-                                f"✅ OP generada para {len(_move_ids_grp)} "
-                                f"factura(s) en {_cur_key} — diario: {_pay_journal}"
+                                f"✅ OP generada — **{_prov_name}** · {_comp_name} "
+                                f"· {_cur_name} {_monto:,.2f}"
                             )
-                            _op_ok += len(_move_ids_grp)
+                            _op_ok += 1
                         else:
-                            _op_errs.append(f"Error {_cur_key}: {_res}")
+                            _op_errs.append(
+                                f"❌ {_comp_name} ({_prov_name}): {_res}")
                     except Exception as _ope:
-                        _op_errs.append(f"Error {_cur_key}: {str(_ope)[:150]}")
+                        _op_errs.append(
+                            f"❌ {_comp_name} ({_prov_name}): {str(_ope)[:150]}")
+                    _prog_op.progress((_op_i + 1) / n_sel)
 
                 for _oe in _op_errs:
                     st.error(_oe)
 
                 if _op_ok:
+                    st.success(f"✅ {_op_ok} OP(s) generada(s) correctamente.")
                     get_pending_bills.clear()
-                    st.info("Actualizando lista... presioná \U0001f504 Actualizar para ver el nuevo estado.")
+                    st.info("Presioná \U0001f504 Actualizar para ver el nuevo estado.")
     else:
         st.info("Marcá el ✓ en la columna de la izquierda para seleccionar facturas a pagar.")
 
-    # ── Totales globales al pie ─────────────────────────────────────────────
-    st.divider()
-    _tot_ars_all = sum(float(b.get("amount_residual") or 0)
-                       for b in _filtered if (b.get("currency_id") or [0,"ARS"])[1] == "ARS")
-    _tot_usd_all = sum(float(b.get("amount_residual") or 0)
-                       for b in _filtered if (b.get("currency_id") or [0,"ARS"])[1] == "USD")
-    _tg1, _tg2 = st.columns(2)
-    if _tot_ars_all > 0:
-        _tg1.metric("Total pendiente ARS", fmt_ars(_tot_ars_all))
-    if _tot_usd_all > 0:
-        _tg2.metric("Total pendiente USD", fmt_usd(_tot_usd_all))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3273,11 +3292,11 @@ with tab_history:
             _h_url  = _h.get("url", "")
             if _h_url:
                 st.markdown(
-                    f"{_h_icon} **{_h_tipo}** — {_h_arch} "
-                    f"— ID {_h_id} — [\U0001f517 Ver en Odoo]({_h_url})"
+                    f"{_h_icon} **{_h_tipo}** \u2014 {_h_arch} "
+                    f"\u2014 ID {_h_id} \u2014 [\U0001f517 Ver en Odoo]({_h_url})"
                 )
             else:
                 st.markdown(f"{_h_icon} **{_h_tipo}** — {_h_arch} — ID {_h_id}")
-        if st.button("\U0001f5d1️ Limpiar historial", key="btn_clear_hist"):
+        if st.button("🗑️ Limpiar historial", key="btn_clear_hist"):
             st.session_state.history = []
             st.rerun()
