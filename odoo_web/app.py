@@ -648,74 +648,35 @@ def get_customer_payment_terms(models_url, uid, api_key, partner_id):
 @st.cache_data(ttl=300, show_spinner=False)
 def search_product_by_code_or_name(models_url, uid, api_key, code="", name_keywords="", limit=3, ean13=""):
     """
-    Busca producto en Odoo por EAN13 (barcode), código (default_code) y/o palabras clave.
-    Retorna lista de dicts con id, name, default_code, standard_price, list_price, barcode.
+    Busca producto en Odoo. Orden de prioridad:
+    1. Nombre (product.template, prefiere códigos L y mayor standard_price)
+    2. Código exacto / ilike / sin-ceros (product.product)
+    3. EAN13 barcode (product.product, último recurso)
+    Retorna lista de dicts con id, name, default_code, standard_price, list_price.
     """
     try:
         m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
-        fields = ["id", "name", "default_code", "standard_price", "list_price", "barcode"]
-        # 0. EAN13 barcode search (más confiable para productos Carsa)
-        if ean13 and len(str(ean13)) == 13 and str(ean13).isdigit():
-            rows = m.execute_kw(ODOO_DB, uid, api_key, "product.product", "search_read",
-                [[("barcode", "=", str(ean13)), ("active", "=", True)]],
-                {"fields": fields, "limit": 1})
-            if rows:
+        _pp_fields   = ["id", "name", "default_code", "standard_price", "list_price"]
+        _tmpl_fields = ["id", "name", "default_code", "standard_price", "list_price"]
+
+        def _best(rows):
+            """Prefiere default_code que empiece con L; desempata por mayor standard_price."""
+            if not rows:
                 return rows
-        # 1. Exact code match
-        if code and code.strip():
-            _code_s = code.strip()
-            rows = m.execute_kw(ODOO_DB, uid, api_key, "product.product", "search_read",
-                [[("default_code", "=", _code_s), ("active", "=", True)]],
-                {"fields": fields, "limit": 1})
-            if rows:
-                return rows
-            # ilike fallback
-            rows = m.execute_kw(ODOO_DB, uid, api_key, "product.product", "search_read",
-                [[("default_code", "ilike", _code_s), ("active", "=", True)]],
-                {"fields": fields, "limit": limit})
-            if rows:
-                return rows
-            # Sin ceros iniciales (ej: 013004054 → 13004054)
-            _code_nz = _code_s.lstrip("0")
-            if _code_nz and _code_nz != _code_s:
-                rows = m.execute_kw(ODOO_DB, uid, api_key, "product.product", "search_read",
-                    [[("default_code", "=", _code_nz), ("active", "=", True)]],
-                    {"fields": fields, "limit": 1})
-                if rows:
-                    return rows
-                rows = m.execute_kw(ODOO_DB, uid, api_key, "product.product", "search_read",
-                    [[("default_code", "ilike", _code_nz), ("active", "=", True)]],
-                    {"fields": fields, "limit": limit})
-                if rows:
-                    return rows
-        # 2. Name keywords — limpia puntuación y prioriza número de modelo
+            l_codes = [r for r in rows if str(r.get("default_code") or "").upper().startswith("L")]
+            pool = l_codes if l_codes else rows
+            return [sorted(pool, key=lambda r: float(r.get("standard_price") or 0), reverse=True)[0]]
+
+        # ── 1. Nombre (product.template, _best para elegir LCANO) ────────────
         if name_keywords and name_keywords.strip():
-            _clean = re.sub(r'[^\w\s]', ' ', name_keywords.strip())
+            _clean    = re.sub(r'[^\w\s]', ' ', name_keywords.strip())
             all_words = [w for w in _clean.split() if len(w) >= 3]
             model_kws   = [w for w in all_words
                            if re.search(r'[A-Za-z]', w) and re.search(r'\d', w) and len(w) >= 4]
             generic_kws = [w for w in all_words if w not in model_kws]
-            keywords = (model_kws + generic_kws)[:3]
-
-            def _best(rows):
-                """Prefiere productos con default_code que empiece con 'L' (LCANO…).
-                Si no hay ninguno con L, toma el de mayor standard_price.
-                Ante empate total, devuelve el primero."""
-                if not rows:
-                    return rows
-                l_codes = [r for r in rows if str(r.get("default_code") or "").upper().startswith("L")]
-                if l_codes:
-                    return [sorted(l_codes, key=lambda r: float(r.get("standard_price") or 0), reverse=True)[0]]
-                return [sorted(rows, key=lambda r: float(r.get("standard_price") or 0), reverse=True)[0]]
-
+            keywords    = (model_kws + generic_kws)[:3]
             if keywords:
-                # Búsquedas por nombre usan product.template donde viven los códigos LCANO
-                _tmpl_fields = ["id", "name", "default_code", "standard_price", "list_price"]
-                def _tmpl_to_prod(tmpl_rows):
-                    """Convierte resultados de product.template al formato esperado."""
-                    return tmpl_rows  # mismos campos relevantes
-
-                # Intento 1: solo nº de modelo (G3110, G2110, etc.) — muy específico
+                # Intento 1a: número de modelo solo (G1110, G3110, GI-190, etc.)
                 if model_kws:
                     rows = m.execute_kw(ODOO_DB, uid, api_key, "product.template", "search_read",
                         [[("active", "=", True), ("name", "ilike", model_kws[0])]],
@@ -723,7 +684,7 @@ def search_product_by_code_or_name(models_url, uid, api_key, code="", name_keywo
                     rows = _best(rows)
                     if rows:
                         return rows
-                # Intento 2: AND con las 3 keywords limpias
+                # Intento 1b: AND con hasta 3 keywords
                 domain = [("active", "=", True)]
                 for kw in keywords:
                     domain.append(("name", "ilike", kw))
@@ -732,7 +693,7 @@ def search_product_by_code_or_name(models_url, uid, api_key, code="", name_keywo
                 rows = _best(rows)
                 if rows:
                     return rows
-                # Intento 3: primera keyword genérica sola
+                # Intento 1c: keyword genérica sola
                 fallback_kw = generic_kws[0] if generic_kws else keywords[0]
                 rows = m.execute_kw(ODOO_DB, uid, api_key, "product.template", "search_read",
                     [[("active", "=", True), ("name", "ilike", fallback_kw)]],
@@ -740,6 +701,32 @@ def search_product_by_code_or_name(models_url, uid, api_key, code="", name_keywo
                 rows = _best(rows)
                 if rows:
                     return rows
+
+        # ── 2. Código interno (product.product) ──────────────────────────────
+        if code and code.strip():
+            _code_s = code.strip()
+            for _c in [_code_s, _code_s.lstrip("0")]:
+                if not _c:
+                    continue
+                rows = m.execute_kw(ODOO_DB, uid, api_key, "product.product", "search_read",
+                    [[("default_code", "=", _c), ("active", "=", True)]],
+                    {"fields": _pp_fields, "limit": 1})
+                if rows:
+                    return rows
+                rows = m.execute_kw(ODOO_DB, uid, api_key, "product.product", "search_read",
+                    [[("default_code", "ilike", _c), ("active", "=", True)]],
+                    {"fields": _pp_fields, "limit": limit})
+                if rows:
+                    return rows
+
+        # ── 3. EAN13 barcode (último recurso) ─────────────────────────────────
+        if ean13 and len(str(ean13)) == 13 and str(ean13).isdigit():
+            rows = m.execute_kw(ODOO_DB, uid, api_key, "product.product", "search_read",
+                [[("barcode", "=", str(ean13)), ("active", "=", True)]],
+                {"fields": _pp_fields, "limit": 1})
+            if rows:
+                return rows
+
     except Exception:
         pass
     return []
