@@ -709,11 +709,17 @@ def search_product_by_code_or_name(models_url, uid, api_key, code="", name_keywo
                 return [sorted(rows, key=lambda r: float(r.get("standard_price") or 0), reverse=True)[0]]
 
             if keywords:
+                # Búsquedas por nombre usan product.template donde viven los códigos LCANO
+                _tmpl_fields = ["id", "name", "default_code", "standard_price", "list_price"]
+                def _tmpl_to_prod(tmpl_rows):
+                    """Convierte resultados de product.template al formato esperado."""
+                    return tmpl_rows  # mismos campos relevantes
+
                 # Intento 1: solo nº de modelo (G3110, G2110, etc.) — muy específico
                 if model_kws:
-                    rows = m.execute_kw(ODOO_DB, uid, api_key, "product.product", "search_read",
+                    rows = m.execute_kw(ODOO_DB, uid, api_key, "product.template", "search_read",
                         [[("active", "=", True), ("name", "ilike", model_kws[0])]],
-                        {"fields": fields, "limit": 20})
+                        {"fields": _tmpl_fields, "limit": 20})
                     rows = _best(rows)
                     if rows:
                         return rows
@@ -721,16 +727,16 @@ def search_product_by_code_or_name(models_url, uid, api_key, code="", name_keywo
                 domain = [("active", "=", True)]
                 for kw in keywords:
                     domain.append(("name", "ilike", kw))
-                rows = m.execute_kw(ODOO_DB, uid, api_key, "product.product", "search_read",
-                    [domain], {"fields": fields, "limit": 20})
+                rows = m.execute_kw(ODOO_DB, uid, api_key, "product.template", "search_read",
+                    [domain], {"fields": _tmpl_fields, "limit": 20})
                 rows = _best(rows)
                 if rows:
                     return rows
                 # Intento 3: primera keyword genérica sola
                 fallback_kw = generic_kws[0] if generic_kws else keywords[0]
-                rows = m.execute_kw(ODOO_DB, uid, api_key, "product.product", "search_read",
+                rows = m.execute_kw(ODOO_DB, uid, api_key, "product.template", "search_read",
                     [[("active", "=", True), ("name", "ilike", fallback_kw)]],
-                    {"fields": fields, "limit": 20})
+                    {"fields": _tmpl_fields, "limit": 20})
                 rows = _best(rows)
                 if rows:
                     return rows
