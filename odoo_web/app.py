@@ -676,7 +676,7 @@ def search_product_by_code_or_name(models_url, uid, api_key, code="", name_keywo
             generic_kws = [w for w in all_words if w not in model_kws]
             keywords    = (model_kws + generic_kws)[:3]
             if keywords:
-                # Intento 1a: número de modelo solo (G1110, G3110, GI-190, etc.)
+                # Intento 1a: número de modelo solo (G1110, G3110, etc.)
                 if model_kws:
                     rows = m.execute_kw(ODOO_DB, uid, api_key, "product.template", "search_read",
                         [[("active", "=", True), ("name", "ilike", model_kws[0])]],
@@ -693,14 +693,32 @@ def search_product_by_code_or_name(models_url, uid, api_key, code="", name_keywo
                 rows = _best(rows)
                 if rows:
                     return rows
-                # Intento 1c: keyword genérica sola
-                fallback_kw = generic_kws[0] if generic_kws else keywords[0]
-                rows = m.execute_kw(ODOO_DB, uid, api_key, "product.template", "search_read",
-                    [[("active", "=", True), ("name", "ilike", fallback_kw)]],
-                    {"fields": _tmpl_fields, "limit": 20})
-                rows = _best(rows)
-                if rows:
-                    return rows
+                # Intento 1c: separar SOLO el primer token alfanumérico en partes
+                # Ej: "190BK" → ["190","BK"] → AND("190","BK") → encuentra "GI-190 PGBK"
+                if model_kws:
+                    _pieces = []
+                    for part in re.split(r'(?<=[A-Za-z])(?=\d)|(?<=\d)(?=[A-Za-z])', model_kws[0]):
+                        if part and len(part) >= 1:
+                            _pieces.append(part)
+                    _pieces = list(dict.fromkeys(_pieces))  # dedup
+                    if len(_pieces) >= 2:
+                        domain2 = [("active", "=", True)]
+                        for p in _pieces[:3]:
+                            domain2.append(("name", "ilike", p))
+                        rows = m.execute_kw(ODOO_DB, uid, api_key, "product.template", "search_read",
+                            [domain2], {"fields": _tmpl_fields, "limit": 20})
+                        rows = _best(rows)
+                        if rows:
+                            return rows
+                # Intento 1d: keyword genérica larga (>=5 chars) como último recurso
+                long_generic = [w for w in generic_kws if len(w) >= 5]
+                if long_generic:
+                    rows = m.execute_kw(ODOO_DB, uid, api_key, "product.template", "search_read",
+                        [[("active", "=", True), ("name", "ilike", long_generic[0])]],
+                        {"fields": _tmpl_fields, "limit": 20})
+                    rows = _best(rows)
+                    if rows:
+                        return rows
 
         # ── 2. Código interno (product.product) ──────────────────────────────
         if code and code.strip():
