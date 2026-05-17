@@ -2526,9 +2526,8 @@ if tab_import is not None:
             for k in ["carpeta_id", "carpeta_po", "carpeta_bills", "carpeta_lc_id"]:
                 st.session_state[k] = DEFAULTS.get(k, "")
             st.session_state.etapas = {k: False for k, *_ in ETAPAS_DEF}
-            # Limpiar también el estado interno del widget text_input
-            st.session_state["input_carpeta"] = ""
-            for _sk in ["_imp_preview_open", "carp_data"]:
+            # Borrar el estado interno del widget text_input (no se puede setear, solo borrar)
+            for _sk in ["input_carpeta", "_imp_preview_open", "carp_data"]:
                 st.session_state.pop(_sk, None)
             st.rerun()
 
