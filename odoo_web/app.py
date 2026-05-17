@@ -2526,8 +2526,10 @@ if tab_import is not None:
             for k in ["carpeta_id", "carpeta_po", "carpeta_bills", "carpeta_lc_id"]:
                 st.session_state[k] = DEFAULTS.get(k, "")
             st.session_state.etapas = {k: False for k, *_ in ETAPAS_DEF}
-            if "carp_data" in st.session_state:
-                del st.session_state["carp_data"]
+            # Limpiar también el estado interno del widget text_input
+            st.session_state["input_carpeta"] = ""
+            for _sk in ["_imp_preview_open", "carp_data"]:
+                st.session_state.pop(_sk, None)
             st.rerun()
 
         if carp_in != st.session_state.carpeta_id:
@@ -2903,5 +2905,4 @@ if tab_import is not None:
                             _qty       = float(_ln.get("product_qty") or 1)
                             _fob_line  = float(_ln.get("price_subtotal") or 0)
                             _prop      = _fob_line / _summary["total_fob_usd"] if _summary["total_fob_usd"] > 0 else 0
-                            _lc_line_ars = _nac_ars * _prop
-                            _lc_unit_usd = (_nac_usd * _prop / _qty) if _qty > 0 else 0
+                 
