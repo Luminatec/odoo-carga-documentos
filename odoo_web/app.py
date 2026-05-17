@@ -710,19 +710,27 @@ def search_product_by_code_or_name(models_url, uid, api_key, code="", name_keywo
                 rows = _best(rows)
                 if rows:
                     return rows
-                # Intento 2c: separar primer token alfanumérico en partes +
-                # tokens de 2 chars (ej "GI") para mayor especificidad
-                # "190BK" → ["190","BK"] + "GI" → AND("190","BK","GI")
+                # Intento 2c: separar primer token alfanumérico, buscar con espacio
+                # "190C" → "190 C" → ilike "190 C" matchea "GI-190 C" exactamente
+                # Fallback AND: "190 BK" no matchea "PGBK", usa AND("190","BK","GI")
                 if model_kws:
                     _pieces = []
                     for part in re.split(r'(?<=[A-Za-z])(?=\d)|(?<=\d)(?=[A-Za-z])', model_kws[0]):
                         if part and len(part) >= 1:
                             _pieces.append(part)
                     _pieces = list(dict.fromkeys(_pieces))
-                    # Agregar tokens 2-char alfabéticos del original (ej: "GI")
-                    _short = [w for w in _clean.split() if len(w) == 2 and w.isalpha()]
-                    _pieces_ctx = list(dict.fromkeys(_pieces + _short[:1]))
-                    if len(_pieces_ctx) >= 2:
+                    if len(_pieces) >= 2:
+                        # 2c-i: buscar con espacio insertado ("190 C" → único en Odoo)
+                        _spaced = ' '.join(_pieces)
+                        rows = m.execute_kw(ODOO_DB, uid, api_key, "product.template", "search_read",
+                            [[("active", "=", True), ("name", "ilike", _spaced)]],
+                            {"fields": _tmpl_fields, "limit": 20})
+                        rows = _best(rows)
+                        if rows:
+                            return rows
+                        # 2c-ii: AND de partes + token 2-char (para "PGBK" que no tiene espacio)
+                        _short = [w for w in _clean.split() if len(w) == 2 and w.isalpha()]
+                        _pieces_ctx = list(dict.fromkeys(_pieces + _short[:1]))
                         domain2 = [("active", "=", True)]
                         for p in _pieces_ctx[:3]:
                             domain2.append(("name", "ilike", p))
@@ -1959,26 +1967,32 @@ with tab_orders:
                     })
                 st.dataframe(pd.DataFrame(_df_rows), use_container_width=True, hide_index=True)
 
-                # ── Asignación manual para líneas sin match ────────────────
+                # ── Edición de match para todas las líneas ──────────────────
                 _unmatched = [(i, el) for i, el in enumerate(_enriched)
                               if not el.get("odoo_product")]
-                if _unmatched:
-                    with st.expander(
-                        f"🔍 Asignar productos manualmente ({len(_unmatched)} sin match)",
-                        expanded=True,
-                    ):
-                        for _li2, _el2 in _unmatched:
+                _n_unmatched = len(_unmatched)
+                _exp_label = (
+                    f"🔍 Asignar productos manualmente ({_n_unmatched} sin match)"
+                    if _n_unmatched > 0
+                    else "✏️ Editar asignaciones de productos"
+                )
+                with st.expander(_exp_label, expanded=_n_unmatched > 0):
+                    for _li2, _el2 in enumerate(_enriched):
+                            _cur_match = (_el2.get("odoo_product") or {}).get("name","")
+                            _cur_code  = (_el2.get("odoo_product") or {}).get("default_code","")
+                            _match_str = f"{_cur_match} [{_cur_code}]" if _cur_match else "⚠️ Sin match"
                             st.caption(
                                 f"**{_el2.get('descripcion','')}** · "
-                                f"Código OC: `{_el2.get('codigo','')}`"
+                                f"Código OC: `{_el2.get('codigo','')}` · "
+                                f"Match actual: *{_match_str}*"
                             )
                             _sk_q   = f"mq_{uf.name}_{_li2}"
                             _sk_sel = f"ms_{uf.name}_{_li2}"
                             _sk_btn = f"mc_{uf.name}_{_li2}"
                             _mq = st.text_input(
-                                "Buscar en Odoo (nombre o código)",
+                                "Reasignar — buscar en Odoo (nombre o código)",
                                 key=_sk_q,
-                                placeholder="Ej: G2110  o  013004054",
+                                placeholder="Ej: G2110  o  LCANO00015",
                             )
                             if _mq and len(_mq) >= 2:
                                 _res = search_product_by_code_or_name(
@@ -2001,7 +2015,7 @@ with tab_orders:
                                         st.rerun()
                                 else:
                                     st.caption("Sin resultados — probá con otro término.")
-                            if _li2 < len(_unmatched) - 1:
+                            if _li2 < len(_enriched) - 1:
                                 st.divider()
             else:
                 st.info("No se detectaron líneas de productos automáticamente.")
