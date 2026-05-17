@@ -1800,18 +1800,21 @@ def get_pending_bills(models_url, uid, api_key):
 @st.cache_data(ttl=300, show_spinner=False)
 def get_payment_journals(models_url, uid, api_key):
     """
-    Diarios bancarios / de caja que operan en ARS (moneda de la empresa).
-    Excluye diarios con moneda propia seteada (ej: cuenta en USD).
+    Diarios bancarios y de caja. Incluye todos — la moneda del diario
+    se muestra entre paréntesis; si no tiene moneda propia usa ARS (moneda empresa).
     """
     try:
         m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
         rows = m.execute_kw(ODOO_DB, uid, api_key, "account.journal", "search_read",
-            [[("type", "in", ["bank", "cash"]),
-              "|",
-              ("currency_id", "=", False),
-              ("currency_id.name", "=", "ARS")]],
-            {"fields": ["id", "name"], "order": "name asc"})
-        return [(r["id"], r["name"]) for r in rows]
+            [[("type", "in", ["bank", "cash"])]],
+            {"fields": ["id", "name", "currency_id"], "order": "name asc"})
+        result = []
+        for r in rows:
+            cur = r.get("currency_id")
+            cur_name = cur[1] if cur and isinstance(cur, (list, tuple)) and len(cur) > 1 else "ARS"
+            label = r["name"] if cur_name == "ARS" else f"{r['name']} ({cur_name})"
+            result.append((r["id"], label, cur_name))
+        return result   # list of (id, label, currency_name)
     except Exception:
         return []
 
@@ -3220,13 +3223,48 @@ with tab_op:
         if not _jours:
             st.error("No se encontraron diarios de pago en Odoo.")
         else:
-            _jour_opts = {name: jid for jid, name in _jours}
+            # _jours = list of (id, label, currency_name)
+            _jour_opts    = {label: jid  for jid, label, _ in _jours}
+            _jour_cur     = {label: cur  for _,   label, cur in _jours}
             _fp_c1, _fp_c2 = st.columns(2)
             _pay_journal   = _fp_c1.selectbox(
                 "Diario de pago", list(_jour_opts.keys()), key="op_journal")
             _pay_date      = _fp_c2.date_input(
                 "Fecha de pago", value=_date_cls.today(), key="op_pay_date")
-            _pay_journal_id = _jour_opts[_pay_journal]
+            _pay_journal_id  = _jour_opts[_pay_journal]
+            _pay_journal_cur = _jour_cur[_pay_journal]
+
+            # ── Asientos estimados ────────────────────────────────────────────
+            with st.expander("📒 Asientos que generará cada pago", expanded=True):
+                _ae_rows = []
+                for _, _sr in _selected_op.iterrows():
+                    _cur_op   = _sr["Moneda"]
+                    _monto_op = _sr["Pendiente"]
+                    _fmt_monto = (fmt_usd(_monto_op) if _cur_op == "USD"
+                                  else fmt_ars(_monto_op))
+                    # DR Proveedores
+                    _ae_rows.append({
+                        "Tipo":        "DR",
+                        "Cuenta":      "Proveedores",
+                        "Descripción": f"{_sr['Proveedor']} · {_sr['Comprobante']}",
+                        "Moneda":      _cur_op,
+                        "Monto":       _fmt_monto,
+                    })
+                    # CR Banco
+                    _ae_rows.append({
+                        "Tipo":        "CR",
+                        "Cuenta":      _pay_journal,
+                        "Descripción": f"Pago {_sr['Comprobante']} — {_pay_date}",
+                        "Moneda":      _pay_journal_cur,
+                        "Monto":       _fmt_monto,
+                    })
+                if _ae_rows:
+                    _df_ae = pd.DataFrame(_ae_rows)
+                    st.dataframe(_df_ae, use_container_width=True, hide_index=True)
+                    st.caption(
+                        "Asientos estimados. Los importes exactos los calcula Odoo "
+                        "al confirmar el pago."
+                    )
 
             st.caption(
                 f"Se generará **una OP separada por cada factura** seleccionada "
@@ -3272,17 +3310,16 @@ with tab_op:
                 if _op_ok:
                     st.success(f"✅ {_op_ok} OP(s) generada(s) correctamente.")
                     get_pending_bills.clear()
-                    st.info("Presioná \U0001f504 Actualizar para ver el nuevo estado.")
+                    st.info("Presioná 🔄 Actualizar para ver el nuevo estado.")
     else:
         st.info("Marcá el ✓ en la columna de la izquierda para seleccionar facturas a pagar.")
 
 
-
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────
 # TAB — HISTORIAL DE SESIÓN
-# ─────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────
 with tab_history:
-    st.subheader("\U0001f4cb Historial de sesión")
+    st.subheader("📋 Historial de sesión")
     if not st.session_state.history:
         st.info("Todavía no se creó ningún registro en esta sesión.")
     else:
