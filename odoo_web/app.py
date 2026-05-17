@@ -656,7 +656,6 @@ def search_product_by_code_or_name(models_url, uid, api_key, code="", name_keywo
     """
     try:
         m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
-        _pp_fields   = ["id", "name", "default_code", "standard_price", "list_price"]
         _tmpl_fields = ["id", "name", "default_code", "standard_price", "list_price"]
 
         def _best(rows):
@@ -667,7 +666,25 @@ def search_product_by_code_or_name(models_url, uid, api_key, code="", name_keywo
             pool = l_codes if l_codes else rows
             return [sorted(pool, key=lambda r: float(r.get("standard_price") or 0), reverse=True)[0]]
 
-        # ── 1. Nombre (product.template, _best para elegir LCANO) ────────────
+        # ── 1. Código exacto en product.template (máxima prioridad) ──────────
+        # Cuando el cliente pone el código de Odoo directamente (ej: LFANT00006)
+        if code and code.strip():
+            _code_s = code.strip()
+            for _c in [_code_s, _code_s.lstrip("0")]:
+                if not _c:
+                    continue
+                rows = m.execute_kw(ODOO_DB, uid, api_key, "product.template", "search_read",
+                    [[("default_code", "=", _c), ("active", "=", True)]],
+                    {"fields": _tmpl_fields, "limit": 5})
+                if rows:
+                    return _best(rows)
+                rows = m.execute_kw(ODOO_DB, uid, api_key, "product.template", "search_read",
+                    [[("default_code", "ilike", _c), ("active", "=", True)]],
+                    {"fields": _tmpl_fields, "limit": 10})
+                if rows:
+                    return _best(rows)
+
+        # ── 2. Nombre (product.template, _best para elegir LCANO) ────────────
         if name_keywords and name_keywords.strip():
             _clean    = re.sub(r'[^\w\s]', ' ', name_keywords.strip())
             all_words = [w for w in _clean.split() if len(w) >= 3]
@@ -676,7 +693,7 @@ def search_product_by_code_or_name(models_url, uid, api_key, code="", name_keywo
             generic_kws = [w for w in all_words if w not in model_kws]
             keywords    = (model_kws + generic_kws)[:3]
             if keywords:
-                # Intento 1a: número de modelo solo (G1110, G3110, etc.)
+                # Intento 2a: número de modelo solo (G1110, G3110, etc.)
                 if model_kws:
                     rows = m.execute_kw(ODOO_DB, uid, api_key, "product.template", "search_read",
                         [[("active", "=", True), ("name", "ilike", model_kws[0])]],
@@ -684,7 +701,7 @@ def search_product_by_code_or_name(models_url, uid, api_key, code="", name_keywo
                     rows = _best(rows)
                     if rows:
                         return rows
-                # Intento 1b: AND con hasta 3 keywords
+                # Intento 2b: AND con hasta 3 keywords
                 domain = [("active", "=", True)]
                 for kw in keywords:
                     domain.append(("name", "ilike", kw))
@@ -693,24 +710,28 @@ def search_product_by_code_or_name(models_url, uid, api_key, code="", name_keywo
                 rows = _best(rows)
                 if rows:
                     return rows
-                # Intento 1c: separar SOLO el primer token alfanumérico en partes
-                # Ej: "190BK" → ["190","BK"] → AND("190","BK") → encuentra "GI-190 PGBK"
+                # Intento 2c: separar primer token alfanumérico en partes +
+                # tokens de 2 chars (ej "GI") para mayor especificidad
+                # "190BK" → ["190","BK"] + "GI" → AND("190","BK","GI")
                 if model_kws:
                     _pieces = []
                     for part in re.split(r'(?<=[A-Za-z])(?=\d)|(?<=\d)(?=[A-Za-z])', model_kws[0]):
                         if part and len(part) >= 1:
                             _pieces.append(part)
-                    _pieces = list(dict.fromkeys(_pieces))  # dedup
-                    if len(_pieces) >= 2:
+                    _pieces = list(dict.fromkeys(_pieces))
+                    # Agregar tokens 2-char alfabéticos del original (ej: "GI")
+                    _short = [w for w in _clean.split() if len(w) == 2 and w.isalpha()]
+                    _pieces_ctx = list(dict.fromkeys(_pieces + _short[:1]))
+                    if len(_pieces_ctx) >= 2:
                         domain2 = [("active", "=", True)]
-                        for p in _pieces[:3]:
+                        for p in _pieces_ctx[:3]:
                             domain2.append(("name", "ilike", p))
                         rows = m.execute_kw(ODOO_DB, uid, api_key, "product.template", "search_read",
                             [domain2], {"fields": _tmpl_fields, "limit": 20})
                         rows = _best(rows)
                         if rows:
                             return rows
-                # Intento 1d: keyword genérica larga (>=5 chars) como último recurso
+                # Intento 2d: keyword genérica larga (>=5 chars) como último recurso
                 long_generic = [w for w in generic_kws if len(w) >= 5]
                 if long_generic:
                     rows = m.execute_kw(ODOO_DB, uid, api_key, "product.template", "search_read",
@@ -720,28 +741,11 @@ def search_product_by_code_or_name(models_url, uid, api_key, code="", name_keywo
                     if rows:
                         return rows
 
-        # ── 2. Código interno (product.product) ──────────────────────────────
-        if code and code.strip():
-            _code_s = code.strip()
-            for _c in [_code_s, _code_s.lstrip("0")]:
-                if not _c:
-                    continue
-                rows = m.execute_kw(ODOO_DB, uid, api_key, "product.product", "search_read",
-                    [[("default_code", "=", _c), ("active", "=", True)]],
-                    {"fields": _pp_fields, "limit": 1})
-                if rows:
-                    return rows
-                rows = m.execute_kw(ODOO_DB, uid, api_key, "product.product", "search_read",
-                    [[("default_code", "ilike", _c), ("active", "=", True)]],
-                    {"fields": _pp_fields, "limit": limit})
-                if rows:
-                    return rows
-
         # ── 3. EAN13 barcode (último recurso) ─────────────────────────────────
         if ean13 and len(str(ean13)) == 13 and str(ean13).isdigit():
             rows = m.execute_kw(ODOO_DB, uid, api_key, "product.product", "search_read",
                 [[("barcode", "=", str(ean13)), ("active", "=", True)]],
-                {"fields": _pp_fields, "limit": 1})
+                {"fields": _tmpl_fields, "limit": 1})
             if rows:
                 return rows
 
