@@ -3060,262 +3060,361 @@ if tab_import is not None:
                     st.checkbox(_ditem, key=f"dec_{_di}")
 
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB — ÓRDENES DE PAGO
 # ─────────────────────────────────────────────────────────────────────────────
 with tab_op:
-    st.subheader("\U0001f3e6 Órdenes de Pago — Facturas pendientes")
+    st.subheader("🏦 Órdenes de Pago")
 
-    # ── Filtros y refresco ──────────────────────────────────────────────────
-    _op_c1, _op_c2, _op_c3, _op_c4 = st.columns([2, 2, 1, 1])
-    _op_partner_filter = _op_c1.text_input(
-        "Filtrar proveedor", key="op_filt_partner", placeholder="Nombre del proveedor")
-    _op_cur_filter     = _op_c2.selectbox(
-        "Moneda", ["Todas", "ARS", "USD"], key="op_filt_cur")
-    _op_only_vencidas  = _op_c3.checkbox("Solo vencidas", key="op_vencidas")
-    _op_refresh        = _op_c4.button("\U0001f504 Actualizar", key="op_refresh_btn")
+    _op_tipo = st.radio(
+        "Tipo de orden",
+        ["💳 Pago de factura", "📤 Pago a cuenta", "🧾 Gastos / VEPs"],
+        horizontal=True, key="op_tipo",
+    )
+    st.divider()
 
-    if _op_refresh:
-        get_pending_bills.clear()
-
-    with st.spinner("Cargando facturas pendientes..."):
-        _all_pending = get_pending_bills(models_url, uid, api_key)
-
-    if not _all_pending:
-        st.info("No hay facturas de proveedor pendientes de pago.")
-        st.stop()
-
-    # ── Aplicar filtros ─────────────────────────────────────────────────────
     from datetime import date as _date_cls
-    _today = _date_cls.today().isoformat()
 
-    _filtered = _all_pending
-    if _op_partner_filter:
-        _pf = _op_partner_filter.lower()
-        _filtered = [b for b in _filtered
-                     if _pf in (b.get("partner_id") or [0, ""])[1].lower()]
-    if _op_cur_filter != "Todas":
-        _filtered = [b for b in _filtered
-                     if (b.get("currency_id") or [0, "ARS"])[1] == _op_cur_filter]
-    if _op_only_vencidas:
-        _filtered = [b for b in _filtered
-                     if b.get("invoice_date_due") and b["invoice_date_due"] < _today]
-
-    # ── Totales de deuda por moneda (siempre visibles como filtro/resumen) ────
-    _tot_ars_filt = sum(float(b.get("amount_residual") or 0)
-                        for b in _filtered
-                        if (b.get("currency_id") or [0, "ARS"])[1] == "ARS")
-    _tot_usd_filt = sum(float(b.get("amount_residual") or 0)
-                        for b in _filtered
-                        if (b.get("currency_id") or [0, "ARS"])[1] == "USD")
-    _tot_ars_all  = sum(float(b.get("amount_residual") or 0)
-                        for b in _all_pending
-                        if (b.get("currency_id") or [0, "ARS"])[1] == "ARS")
-    _tot_usd_all  = sum(float(b.get("amount_residual") or 0)
-                        for b in _all_pending
-                        if (b.get("currency_id") or [0, "ARS"])[1] == "USD")
-
-    _hay_filtro = len(_filtered) != len(_all_pending)
-    _resumen_parts = []
-    if _tot_ars_filt > 0:
-        _resumen_parts.append(f"**ARS:** {fmt_ars(_tot_ars_filt)}")
-    if _tot_usd_filt > 0:
-        _resumen_parts.append(f"**USD:** {fmt_usd(_tot_usd_filt)}")
-    _resumen_parts.append(
-        f"**{len(_filtered)}** factura(s)"
-        + (f" de {len(_all_pending)} totales" if _hay_filtro else "")
-    )
-    st.info("  ·  ".join(_resumen_parts) if _resumen_parts else "Sin deuda pendiente.")
-    if _hay_filtro and (_tot_ars_all != _tot_ars_filt or _tot_usd_all != _tot_usd_filt):
-        _sin_filt = []
-        if _tot_ars_all > 0: _sin_filt.append(f"ARS {fmt_ars(_tot_ars_all)}")
-        if _tot_usd_all > 0: _sin_filt.append(f"USD {fmt_usd(_tot_usd_all)}")
-        st.caption("Sin filtro: " + "  ·  ".join(_sin_filt))
-
-    if not _filtered:
-        st.warning("Ninguna factura cumple los filtros aplicados.")
-        st.stop()
-
-    # ── Construir dataframe con columna de selección ─────────────────────────
-    _op_rows = []
-    for _b in _filtered:
-        _cur   = (_b.get("currency_id") or [0, "ARS"])[1]
-        _resid = float(_b.get("amount_residual") or 0)
-        _total = float(_b.get("amount_total") or 0)
-        _due   = _b.get("invoice_date_due") or ""
-        _venc_flag = "⚠️" if (_due and _due < _today) else ""
-        _pstate_map = {"not_paid": "Sin pagar", "partial": "Parcial"}
-
-        _op_rows.append({
-            "Sel":          False,
-            "Venc.":        _venc_flag,
-            "Proveedor":    (_b.get("partner_id") or [0, "—"])[1],
-            "Comprobante":  _b.get("name") or f"ID {_b['id']}",
-            "Ref.":         (_b.get("ref") or "")[:30],
-            "Fecha FA":     _b.get("invoice_date") or None,
-            "Vto. pago":    _due or None,
-            "Moneda":       _cur,
-            "Total":        _total,
-            "Pendiente":    _resid,
-            "Estado pago":  _pstate_map.get(_b.get("payment_state",""), _b.get("payment_state","")),
-            "_id":          _b["id"],
-            "_partner_id":  (_b.get("partner_id") or [0])[0],
-            "_currency_id": (_b.get("currency_id") or [0])[0],
-        })
-
-    _df_op = pd.DataFrame(_op_rows)
-
-    _col_cfg_op = {
-        "Sel":          st.column_config.CheckboxColumn("✓", width="small"),
-        "Venc.":        st.column_config.TextColumn("", width="small"),
-        "Fecha FA":     st.column_config.DateColumn("Fecha FA", format="DD/MM/YYYY"),
-        "Vto. pago":    st.column_config.DateColumn("Vto. pago", format="DD/MM/YYYY"),
-        "Total":        st.column_config.NumberColumn("Total", format="{:,.2f}"),
-        "Pendiente":    st.column_config.NumberColumn("Pendiente", format="{:,.2f}"),
-        "_id":          None,
-        "_partner_id":  None,
-        "_currency_id": None,
-    }
-
-    _display_cols = ["Sel", "Venc.", "Proveedor", "Comprobante", "Ref.",
-                     "Fecha FA", "Vto. pago", "Moneda", "Total", "Pendiente", "Estado pago"]
-
-    st.markdown("**Seleccioná las facturas a pagar y completá los datos de la orden:**")
-    _edited_op = st.data_editor(
-        _df_op[_display_cols + ["_id", "_partner_id", "_currency_id"]],
-        column_config=_col_cfg_op,
-        column_order=_display_cols,
-        use_container_width=True,
-        hide_index=True,
-        key="op_data_editor",
-        disabled=[c for c in _display_cols if c != "Sel"],
-    )
-
-    # ── Resumen de seleccionadas ─────────────────────────────────────────────
-    _selected_op = _edited_op[_edited_op["Sel"] == True]
-    n_sel = len(_selected_op)
-
-    if n_sel > 0:
-        st.divider()
-        _total_ars_sel = _selected_op[_selected_op["Moneda"] == "ARS"]["Pendiente"].sum()
-        _total_usd_sel = _selected_op[_selected_op["Moneda"] == "USD"]["Pendiente"].sum()
-
-        _rs1, _rs2, _rs3 = st.columns(3)
-        _rs1.metric(f"{n_sel} factura(s) seleccionada(s)", "")
-        if _total_ars_sel > 0:
-            _rs2.metric("Total ARS", fmt_ars(_total_ars_sel))
-        if _total_usd_sel > 0:
-            _rs3.metric("Total USD", fmt_usd(_total_usd_sel))
-
-        # Lista de seleccionadas
-        with st.expander("Ver detalle de seleccionadas", expanded=False):
-            for _, _sr in _selected_op.iterrows():
-                st.caption(
-                    f"• **{_sr['Proveedor']}** — {_sr['Comprobante']}"
-                    f" — {_sr['Moneda']} {_sr['Pendiente']:,.2f}"
-                    + (f" (venc. {_sr['Vto. pago']})" if _sr.get('Vto. pago') else "")
-                )
-
-        # ── Formulario de pago ────────────────────────────────────────────────
-        st.markdown("#### Datos de la Orden de Pago")
-
-        _jours = get_payment_journals(models_url, uid, api_key)
-        if not _jours:
-            st.error("No se encontraron diarios de pago en Odoo.")
-        else:
-            # _jours = list of (id, label, currency_name)
-            _jour_opts    = {label: jid  for jid, label, _ in _jours}
-            _jour_cur     = {label: cur  for _,   label, cur in _jours}
-            _fp_c1, _fp_c2 = st.columns(2)
-            _pay_journal   = _fp_c1.selectbox(
-                "Diario de pago", list(_jour_opts.keys()), key="op_journal")
-            _pay_date      = _fp_c2.date_input(
-                "Fecha de pago", value=_date_cls.today(), key="op_pay_date")
-            _pay_journal_id  = _jour_opts[_pay_journal]
-            _pay_journal_cur = _jour_cur[_pay_journal]
-
-            # ── Asientos estimados ────────────────────────────────────────────
-            with st.expander("📒 Asientos que generará cada pago", expanded=True):
-                _ae_rows = []
-                for _, _sr in _selected_op.iterrows():
-                    _cur_op   = _sr["Moneda"]
-                    _monto_op = _sr["Pendiente"]
-                    _fmt_monto = (fmt_usd(_monto_op) if _cur_op == "USD"
-                                  else fmt_ars(_monto_op))
-                    # DR Proveedores
-                    _ae_rows.append({
-                        "Tipo":        "DR",
-                        "Cuenta":      "Proveedores",
-                        "Descripción": f"{_sr['Proveedor']} · {_sr['Comprobante']}",
-                        "Moneda":      _cur_op,
-                        "Monto":       _fmt_monto,
-                    })
-                    # CR Banco
-                    _ae_rows.append({
-                        "Tipo":        "CR",
-                        "Cuenta":      _pay_journal,
-                        "Descripción": f"Pago {_sr['Comprobante']} — {_pay_date}",
-                        "Moneda":      _pay_journal_cur,
-                        "Monto":       _fmt_monto,
-                    })
-                if _ae_rows:
-                    _df_ae = pd.DataFrame(_ae_rows)
-                    st.dataframe(_df_ae, use_container_width=True, hide_index=True)
-                    st.caption(
-                        "Asientos estimados. Los importes exactos los calcula Odoo "
-                        "al confirmar el pago."
-                    )
-
-            st.caption(
-                f"Se generará **una OP separada por cada factura** seleccionada "
-                f"({n_sel} OP en total)."
-            )
-
-            _op_btn = st.button(
-                f"\U0001f4b8 Generar {n_sel} Orden(es) de Pago en Odoo",
-                type="primary", key="btn_gen_op")
-
-            if _op_btn:
-                _op_ok, _op_errs = 0, []
-                _pay_date_str = _pay_date.strftime("%Y-%m-%d")
-                _prog_op = st.progress(0)
-
-                for _op_i, (_, _sr) in enumerate(_selected_op.iterrows()):
-                    _move_id_single = int(_sr["_id"])
-                    _comp_name      = _sr["Comprobante"]
-                    _prov_name      = _sr["Proveedor"]
-                    _cur_name       = _sr["Moneda"]
-                    _monto          = _sr["Pendiente"]
-                    try:
-                        _ok, _res = register_payment_wizard(
-                            models, uid, api_key,
-                            [_move_id_single], _pay_date_str, _pay_journal_id)
-                        if _ok:
-                            st.success(
-                                f"✅ OP generada — **{_prov_name}** · {_comp_name} "
-                                f"· {_cur_name} {_monto:,.2f}"
-                            )
-                            _op_ok += 1
-                        else:
-                            _op_errs.append(
-                                f"❌ {_comp_name} ({_prov_name}): {_res}")
-                    except Exception as _ope:
-                        _op_errs.append(
-                            f"❌ {_comp_name} ({_prov_name}): {str(_ope)[:150]}")
-                    _prog_op.progress((_op_i + 1) / n_sel)
-
-                for _oe in _op_errs:
-                    st.error(_oe)
-
-                if _op_ok:
-                    st.success(f"✅ {_op_ok} OP(s) generada(s) correctamente.")
-                    get_pending_bills.clear()
-                    st.info("Presioná 🔄 Actualizar para ver el nuevo estado.")
+    _jours = get_payment_journals(models_url, uid, api_key)
+    if _jours:
+        _jour_opts = {label: jid for jid, label, _ in _jours}
+        _jour_cur  = {label: cur for _,   label, cur in _jours}
     else:
-        st.info("Marcá el ✓ en la columna de la izquierda para seleccionar facturas a pagar.")
+        _jour_opts, _jour_cur = {}, {}
+
+    # =========================================================================
+    # MODO 1 — PAGO DE FACTURA CONTABILIZADA
+    # =========================================================================
+    if _op_tipo == "💳 Pago de factura":
+
+        _op_c1, _op_c2, _op_c3, _op_c4 = st.columns([2, 2, 1, 1])
+        _op_partner_filter = _op_c1.text_input(
+            "Filtrar proveedor", key="op_filt_partner", placeholder="Nombre del proveedor")
+        _op_cur_filter    = _op_c2.selectbox(
+            "Moneda", ["Todas", "ARS", "USD"], key="op_filt_cur")
+        _op_only_vencidas = _op_c3.checkbox("Solo vencidas", key="op_vencidas")
+        _op_refresh       = _op_c4.button("🔄 Actualizar", key="op_refresh_btn")
+
+        if _op_refresh:
+            get_pending_bills.clear()
+
+        with st.spinner("Cargando facturas pendientes..."):
+            _all_pending = get_pending_bills(models_url, uid, api_key)
+
+        if not _all_pending:
+            st.info("No hay facturas de proveedor pendientes de pago.")
+            st.stop()
+
+        _today = _date_cls.today().isoformat()
+        _filtered = _all_pending
+        if _op_partner_filter:
+            _pf = _op_partner_filter.lower()
+            _filtered = [b for b in _filtered
+                         if _pf in (b.get("partner_id") or [0, ""])[1].lower()]
+        if _op_cur_filter != "Todas":
+            _filtered = [b for b in _filtered
+                         if (b.get("currency_id") or [0, "ARS"])[1] == _op_cur_filter]
+        if _op_only_vencidas:
+            _filtered = [b for b in _filtered
+                         if b.get("invoice_date_due") and b["invoice_date_due"] < _today]
+
+        _tot_ars_filt = sum(float(b.get("amount_residual") or 0) for b in _filtered
+                            if (b.get("currency_id") or [0,"ARS"])[1] == "ARS")
+        _tot_usd_filt = sum(float(b.get("amount_residual") or 0) for b in _filtered
+                            if (b.get("currency_id") or [0,"ARS"])[1] == "USD")
+        _tot_ars_all  = sum(float(b.get("amount_residual") or 0) for b in _all_pending
+                            if (b.get("currency_id") or [0,"ARS"])[1] == "ARS")
+        _tot_usd_all  = sum(float(b.get("amount_residual") or 0) for b in _all_pending
+                            if (b.get("currency_id") or [0,"ARS"])[1] == "USD")
+
+        _hay_filtro = len(_filtered) != len(_all_pending)
+        _res_parts = []
+        if _tot_ars_filt > 0: _res_parts.append(f"**ARS:** {fmt_ars(_tot_ars_filt)}")
+        if _tot_usd_filt > 0: _res_parts.append(f"**USD:** {fmt_usd(_tot_usd_filt)}")
+        _res_parts.append(
+            f"**{len(_filtered)}** factura(s)"
+            + (f" de {len(_all_pending)} totales" if _hay_filtro else ""))
+        st.info("  ·  ".join(_res_parts) if _res_parts else "Sin deuda pendiente.")
+        if _hay_filtro and (_tot_ars_all != _tot_ars_filt or _tot_usd_all != _tot_usd_filt):
+            _sf = []
+            if _tot_ars_all > 0: _sf.append(f"ARS {fmt_ars(_tot_ars_all)}")
+            if _tot_usd_all > 0: _sf.append(f"USD {fmt_usd(_tot_usd_all)}")
+            st.caption("Sin filtro: " + "  ·  ".join(_sf))
+
+        if not _filtered:
+            st.warning("Ninguna factura cumple los filtros aplicados.")
+            st.stop()
+
+        _op_rows = []
+        for _b in _filtered:
+            _cur   = (_b.get("currency_id") or [0,"ARS"])[1]
+            _resid = float(_b.get("amount_residual") or 0)
+            _total = float(_b.get("amount_total") or 0)
+            _due   = _b.get("invoice_date_due") or ""
+            _venc_flag = "⚠️" if (_due and _due < _today) else ""
+            _pstate_map = {"not_paid": "Sin pagar", "partial": "Parcial"}
+            _op_rows.append({
+                "Sel": False, "Venc.": _venc_flag,
+                "Proveedor":   (_b.get("partner_id") or [0, "—"])[1],
+                "Comprobante": _b.get("name") or f"ID {_b['id']}",
+                "Ref.":        (_b.get("ref") or "")[:30],
+                "Fecha FA":    _b.get("invoice_date") or None,
+                "Vto. pago":   _due or None,
+                "Moneda": _cur, "Total": _total, "Pendiente": _resid,
+                "Estado pago": _pstate_map.get(_b.get("payment_state",""),
+                                               _b.get("payment_state","")),
+                "_id": _b["id"],
+                "_partner_id":  (_b.get("partner_id") or [0])[0],
+                "_currency_id": (_b.get("currency_id") or [0])[0],
+            })
+
+        _df_op = pd.DataFrame(_op_rows)
+        _col_cfg_op = {
+            "Sel":       st.column_config.CheckboxColumn("✓", width="small"),
+            "Venc.":     st.column_config.TextColumn("", width="small"),
+            "Fecha FA":  st.column_config.DateColumn("Fecha FA",  format="DD/MM/YYYY"),
+            "Vto. pago": st.column_config.DateColumn("Vto. pago", format="DD/MM/YYYY"),
+            "Total":     st.column_config.NumberColumn("Total",    format="{:,.2f}"),
+            "Pendiente": st.column_config.NumberColumn("Pendiente",format="{:,.2f}"),
+            "_id": None, "_partner_id": None, "_currency_id": None,
+        }
+        _display_cols = ["Sel","Venc.","Proveedor","Comprobante","Ref.",
+                         "Fecha FA","Vto. pago","Moneda","Total","Pendiente","Estado pago"]
+
+        st.markdown("**Seleccioná las facturas a pagar:**")
+        _edited_op = st.data_editor(
+            _df_op[_display_cols + ["_id","_partner_id","_currency_id"]],
+            column_config=_col_cfg_op, column_order=_display_cols,
+            use_container_width=True, hide_index=True, key="op_data_editor",
+            disabled=[c for c in _display_cols if c != "Sel"],
+        )
+
+        _selected_op = _edited_op[_edited_op["Sel"] == True]
+        n_sel = len(_selected_op)
+
+        if n_sel > 0:
+            st.divider()
+            _total_ars_sel = _selected_op[_selected_op["Moneda"]=="ARS"]["Pendiente"].sum()
+            _total_usd_sel = _selected_op[_selected_op["Moneda"]=="USD"]["Pendiente"].sum()
+            _rs_parts = [f"{n_sel} factura(s) seleccionada(s)"]
+            if _total_ars_sel > 0: _rs_parts.append(f"ARS {fmt_ars(_total_ars_sel)}")
+            if _total_usd_sel > 0: _rs_parts.append(f"USD {fmt_usd(_total_usd_sel)}")
+            st.info("  ·  ".join(_rs_parts))
+
+            with st.expander("Ver detalle de seleccionadas", expanded=False):
+                for _, _sr in _selected_op.iterrows():
+                    st.caption(
+                        f"• **{_sr['Proveedor']}** — {_sr['Comprobante']}"
+                        f" — {_sr['Moneda']} {_sr['Pendiente']:,.2f}"
+                        + (f" (venc. {_sr['Vto. pago']})" if _sr.get("Vto. pago") else ""))
+
+            st.markdown("#### Datos del pago")
+            if not _jour_opts:
+                st.error("No se encontraron diarios de pago en Odoo.")
+            else:
+                _fp_c1, _fp_c2 = st.columns(2)
+                _pay_journal    = _fp_c1.selectbox(
+                    "Diario de pago", list(_jour_opts.keys()), key="op_journal")
+                _pay_date       = _fp_c2.date_input(
+                    "Fecha de pago", value=_date_cls.today(), key="op_pay_date")
+                _pay_journal_id  = _jour_opts[_pay_journal]
+                _pay_journal_cur = _jour_cur[_pay_journal]
+
+                with st.expander("📒 Asientos que generará cada pago", expanded=True):
+                    _ae_rows = []
+                    for _, _sr in _selected_op.iterrows():
+                        _cur_op   = _sr["Moneda"]
+                        _monto_op = _sr["Pendiente"]
+                        _fmt_m    = (fmt_usd(_monto_op) if _cur_op == "USD"
+                                     else fmt_ars(_monto_op))
+                        _ae_rows.append({
+                            "Tipo": "DR", "Cuenta": "Proveedores",
+                            "Descripción": (f"{_sr['Proveedor']}"
+                                            f" · {_sr['Comprobante']}"),
+                            "Moneda": _cur_op, "Monto": _fmt_m,
+                        })
+                        _ae_rows.append({
+                            "Tipo": "  CR", "Cuenta": _pay_journal,
+                            "Descripción": (f"Pago {_sr['Comprobante']}"
+                                            f" — {_pay_date}"),
+                            "Moneda": _pay_journal_cur, "Monto": _fmt_m,
+                        })
+                    if _ae_rows:
+                        st.dataframe(pd.DataFrame(_ae_rows),
+                                     use_container_width=True, hide_index=True)
+                        st.caption(
+                            "Estimado. Odoo calcula los importes exactos al confirmar.")
+
+                st.caption(
+                    f"Se generará **una OP por factura** ({n_sel} OP en total).")
+
+                _op_btn = st.button(
+                    f"💸 Generar {n_sel} Orden(es) de Pago en Odoo",
+                    type="primary", key="btn_gen_op")
+
+                if _op_btn:
+                    _op_ok, _op_errs = 0, []
+                    _pay_date_str = _pay_date.strftime("%Y-%m-%d")
+                    _prog_op = st.progress(0)
+                    for _op_i, (_, _sr) in enumerate(_selected_op.iterrows()):
+                        _mid   = int(_sr["_id"])
+                        _cname = _sr["Comprobante"]
+                        _pname = _sr["Proveedor"]
+                        _curx  = _sr["Moneda"]
+                        _mont  = _sr["Pendiente"]
+                        try:
+                            _ok, _res = register_payment_wizard(
+                                models, uid, api_key,
+                                [_mid], _pay_date_str, _pay_journal_id)
+                            if _ok:
+                                st.success(
+                                    f"✅ OP generada — **{_pname}** · "
+                                    f"{_cname} · {_curx} {_mont:,.2f}")
+                                _op_ok += 1
+                            else:
+                                _op_errs.append(f"❌ {_cname} ({_pname}): {_res}")
+                        except Exception as _ope:
+                            _op_errs.append(
+                                f"❌ {_cname} ({_pname}): {str(_ope)[:150]}")
+                        _prog_op.progress((_op_i + 1) / n_sel)
+                    for _oe in _op_errs:
+                        st.error(_oe)
+                    if _op_ok:
+                        st.success(f"✅ {_op_ok} OP(s) generada(s) correctamente.")
+                        get_pending_bills.clear()
+                        st.info(
+                            "Presioná 🔄 Actualizar para ver el nuevo estado.")
+        else:
+            st.info(
+                "Marcá el ✓ en la columna izquierda para seleccionar facturas.")
+
+    # =========================================================================
+    # MODO 2 — PAGO A CUENTA (sin factura previa)
+    # =========================================================================
+    elif _op_tipo == "📤 Pago a cuenta":
+        st.info(
+            "📤 **Pago a cuenta:** el pago se registra sin vincularlo a ninguna "
+            "factura existente. Queda como crédito en la cuenta del proveedor y "
+            "se imputa a una factura futura desde Odoo (Contabilidad → Proveedores "
+            "→ Pagos)."
+        )
+        with st.form("form_pago_a_cuenta"):
+            _pac_c1, _pac_c2 = st.columns(2)
+            _pac_prov_name = _pac_c1.text_input(
+                "Proveedor (nombre)", placeholder="Nombre o razón social")
+            _pac_prov_cuit = _pac_c2.text_input(
+                "CUIT (opcional)", placeholder="Sin guiones")
+            _pac_c3, _pac_c4, _pac_c5 = st.columns(3)
+            _pac_amount   = _pac_c3.number_input(
+                "Monto", min_value=0.01, value=1.0, step=0.01)
+            _pac_currency = _pac_c4.selectbox(
+                "Moneda", ["ARS", "USD"], key="pac_cur")
+            _pac_date     = _pac_c5.date_input(
+                "Fecha de pago", value=_date_cls.today(), key="pac_date")
+            _pac_c6, _pac_c7 = st.columns(2)
+            _pac_journal = (
+                _pac_c6.selectbox(
+                    "Diario de pago", list(_jour_opts.keys()), key="pac_journal")
+                if _jour_opts else None
+            )
+            _pac_memo = _pac_c7.text_input(
+                "Referencia / Concepto",
+                placeholder="Ej: Anticipo FA-0001-00000123")
+
+            if _pac_journal and _pac_amount > 0:
+                _pac_j_cur = _jour_cur.get(_pac_journal, "ARS")
+                _pac_fmt_m = (fmt_usd(_pac_amount) if _pac_currency == "USD"
+                              else fmt_ars(_pac_amount))
+                st.markdown("**Asiento estimado:**")
+                st.dataframe(pd.DataFrame([
+                    {"Tipo": "DR",
+                     "Cuenta": "Proveedores",
+                     "Descripción": _pac_prov_name or "(proveedor)",
+                     "Monto": _pac_fmt_m},
+                    {"Tipo": "  CR",
+                     "Cuenta": _pac_journal,
+                     "Descripción": _pac_memo or "Pago a cuenta",
+                     "Monto": _pac_fmt_m},
+                ]), use_container_width=True, hide_index=True)
+
+            _pac_submit = st.form_submit_button(
+                "📤 Registrar Pago a Cuenta", type="primary")
+
+            if _pac_submit:
+                if not _pac_prov_name and not _pac_prov_cuit:
+                    st.warning("Ingresá el nombre o CUIT del proveedor.")
+                elif not _pac_journal:
+                    st.warning("Seleccioná un diario de pago.")
+                else:
+                    _pac_pid = None
+                    if _pac_prov_cuit:
+                        _found = search_partner_by_cuit(
+                            models_url, uid, api_key, _pac_prov_cuit)
+                        if _found:
+                            _pac_pid = _found[0]
+                    if not _pac_pid and _pac_prov_name:
+                        _res2 = search_partners(
+                            models_url, uid, api_key, _pac_prov_name, limit=1)
+                        if _res2:
+                            _pac_pid = _res2[0][0]
+                    if not _pac_pid:
+                        st.error(
+                            "No se encontró el proveedor en Odoo. "
+                            "Verificá el nombre o CUIT.")
+                    else:
+                        _pac_cur_id = get_currency_id(
+                            models_url, uid, api_key, _pac_currency)
+                        if not _pac_cur_id:
+                            st.error("No se encontró la moneda en Odoo.")
+                        else:
+                            try:
+                                _pac_pay_id = create_advance_payment(
+                                    models, uid, api_key,
+                                    partner_id   = _pac_pid,
+                                    amount       = _pac_amount,
+                                    currency_id  = _pac_cur_id,
+                                    payment_date = _pac_date.strftime("%Y-%m-%d"),
+                                    journal_id   = _jour_opts[_pac_journal],
+                                    memo         = _pac_memo or "",
+                                )
+                                _pac_url = (
+                                    f"{ODOO_URL}/odoo/accounting"
+                                    f"/payments/{_pac_pay_id}"
+                                )
+                                st.success(
+                                    f"✅ Pago a cuenta registrado — "
+                                    f"ID {_pac_pay_id}")
+                                st.markdown(
+                                    f"[🔗 Ver en Odoo]({_pac_url})")
+                            except Exception as _pace:
+                                st.error(
+                                    f"Error al registrar el pago: {_pace}")
+
+    # =========================================================================
+    # MODO 3 — GASTOS / VEPs
+    # =========================================================================
+    else:
+        st.info(
+            "🧾 **Gastos y VEPs** — estos pagos se gestionan desde el "
+            "módulo de **Gastos de Odoo**, no desde Órdenes de Pago."
+        )
+        st.markdown(
+            "**Ejemplos:**  \n"
+            "- VEP AFIP (IVA, Ganancias, IIBB, Cargas Sociales)  \n"
+            "- Gastos de representación  \n"
+            "- Viajes y viáticos  \n"
+            "- Otros gastos sin factura de proveedor  \n\n"
+            "**Flujo en Odoo:**  \n"
+            "1. El empleado carga el gasto en *Gastos → Mis gastos*  \n"
+            "2. El responsable lo aprueba  \n"
+            "3. Se genera el pago desde *Gastos → Gastos a pagar*"
+        )
+        st.markdown(
+            f"[🔗 Ir al módulo de Gastos en Odoo]"
+            f"({ODOO_URL}/odoo/expenses)")
 
 
-# ────────────────────────────────────────────────────────────────────────────
 # TAB — HISTORIAL DE SESIÓN
 # ───────────────────────────────────────────────────────────────────────────
 with tab_history:
