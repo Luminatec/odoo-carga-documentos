@@ -646,27 +646,48 @@ def get_customer_payment_terms(models_url, uid, api_key, partner_id):
     return None, None
 
 @st.cache_data(ttl=300, show_spinner=False)
-def search_product_by_code_or_name(models_url, uid, api_key, code="", name_keywords="", limit=3):
+def search_product_by_code_or_name(models_url, uid, api_key, code="", name_keywords="", limit=3, ean13=""):
     """
-    Busca producto en Odoo por código (default_code) y/o palabras clave del nombre.
-    Retorna lista de dicts con id, name, default_code, standard_price, list_price.
+    Busca producto en Odoo por EAN13 (barcode), código (default_code) y/o palabras clave.
+    Retorna lista de dicts con id, name, default_code, standard_price, list_price, barcode.
     """
     try:
         m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
-        fields = ["id", "name", "default_code", "standard_price", "list_price"]
+        fields = ["id", "name", "default_code", "standard_price", "list_price", "barcode"]
+        # 0. EAN13 barcode search (más confiable para productos Carsa)
+        if ean13 and len(str(ean13)) == 13 and str(ean13).isdigit():
+            rows = m.execute_kw(ODOO_DB, uid, api_key, "product.product", "search_read",
+                [[("barcode", "=", str(ean13)), ("active", "=", True)]],
+                {"fields": fields, "limit": 1})
+            if rows:
+                return rows
         # 1. Exact code match
         if code and code.strip():
+            _code_s = code.strip()
             rows = m.execute_kw(ODOO_DB, uid, api_key, "product.product", "search_read",
-                [[("default_code", "=", code.strip()), ("active", "=", True)]],
+                [[("default_code", "=", _code_s), ("active", "=", True)]],
                 {"fields": fields, "limit": 1})
             if rows:
                 return rows
             # ilike fallback
             rows = m.execute_kw(ODOO_DB, uid, api_key, "product.product", "search_read",
-                [[("default_code", "ilike", code.strip()), ("active", "=", True)]],
+                [[("default_code", "ilike", _code_s), ("active", "=", True)]],
                 {"fields": fields, "limit": limit})
             if rows:
                 return rows
+            # Sin ceros iniciales (ej: 013004054 → 13004054)
+            _code_nz = _code_s.lstrip("0")
+            if _code_nz and _code_nz != _code_s:
+                rows = m.execute_kw(ODOO_DB, uid, api_key, "product.product", "search_read",
+                    [[("default_code", "=", _code_nz), ("active", "=", True)]],
+                    {"fields": fields, "limit": 1})
+                if rows:
+                    return rows
+                rows = m.execute_kw(ODOO_DB, uid, api_key, "product.product", "search_read",
+                    [[("default_code", "ilike", _code_nz), ("active", "=", True)]],
+                    {"fields": fields, "limit": limit})
+                if rows:
+                    return rows
         # 2. Name keywords — limpia puntuación y prioriza número de modelo
         if name_keywords and name_keywords.strip():
             _clean = re.sub(r'[^\w\s]', ' ', name_keywords.strip())
@@ -968,6 +989,7 @@ def extract_oc_fields(file_bytes):
 
             fields["lineas"].append({
                 "codigo":      _int_code,
+                "ean13":       _ean,        # código de barras EAN13 original
                 "descripcion": _desc_ean,
                 "cantidad":    float(_qty),
                 "precio_unit": _price_f,
@@ -1724,7 +1746,8 @@ with tab_orders:
                         "Costo Odoo":    fmt_ars(_el.get("cost",0)),
                         "Margen %":      f"{_el.get('margin_pct',0):.1f}%",
                         "Match Odoo":    (_el["odoo_product"]["name"]
-                                          if _el.get("odoo_product") else "⚠️ Sin match"),
+                                          if _el.get("odoo_product")
+                                          else f"⚠️ [{_el.get('codigo','')}]"),
                     })
                 st.dataframe(pd.DataFrame(_xl_df_rows), use_container_width=True, hide_index=True)
             else:
@@ -1859,6 +1882,7 @@ with tab_orders:
                         models_url, uid, api_key,
                         code=_ln.get("codigo",""),
                         name_keywords=_ln.get("descripcion",""),
+                        ean13=_ln.get("ean13",""),
                         limit=1,
                     )
                     _op    = _prods[0] if _prods else None
