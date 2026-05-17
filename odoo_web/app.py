@@ -416,7 +416,7 @@ def _calc_cost_breakdown(po_lines, bills, tc_usd):
         rows.append({
             "Producto":         prod,
             "Cant.":            int(qty) if qty == int(qty) else qty,
-            "FOB unit (USD)":   f"USD {fob_pu:,.2f}",
+            "FOB unit (USD)":   fmt_usd(fob_pu),
             "FOB total (ARS)":  fmt_ars(fob_a),
             "Nac. asignada":    fmt_ars(nac_a),
             "Costo total (ARS)":fmt_ars(total),
@@ -556,6 +556,14 @@ def fmt_ars(v):
         return "$ " + s.replace(",", "X").replace(".", ",").replace("X", ".")
     except Exception:
         return str(v)
+
+def fmt_usd(v):
+    """Formatea número como moneda USD estilo Odoo: u$s 1.234,56"""
+    try:
+        s = "{:,.2f}".format(float(v))
+        return "u$s " + s.replace(",", "X").replace(".", ",").replace("X", ".")
+    except Exception:
+        return "u$s 0,00"
 
 def parse_payment_terms(text):
     """
@@ -2373,6 +2381,119 @@ if tab_import is not None:
 
         carp_data = st.session_state.get("carp_data")
 
+
+        st.divider()
+
+        # ── Subir comprobantes ────────────────────────────────────
+        st.markdown("#### ⬆️ Subir comprobantes")
+        _etapas_done = st.session_state.etapas
+        _missing = []
+        if not _etapas_done.get("1"):  _missing.append("Etapa 1: Bill PETDUR (USD)")
+        if not _etapas_done.get("2"):  _missing.append("Etapa 2: DI AFIP")
+        if not _etapas_done.get("2a"): _missing.append("Etapa 2a: TRICE / Terminal 4 / Mundo Comex / SENASA")
+        if _missing:
+            st.caption("⏳ Pendiente: " + "  ·  ".join(_missing))
+
+        st.info("💡 Podés subir todos los archivos de la carpeta a la vez: "
+                "seleccioná múltiples archivos con **Ctrl+A** en el explorador, "
+                "o arrastrá y soltá varios archivos al mismo tiempo.")
+
+        TIPO_OPTIONS_IMP = {
+            "Bill PETDUR (Etapa 1)":           {"tipo":"petdur",  "partner_id":49328,"journal_id":71, "doc_type":None},
+            "DI AFIP (Etapa 2)":               {"tipo":"di_afip", "partner_id":9,    "journal_id":10, "doc_type":66},
+            "Bill TRICE Transport (Etapa 2a)": {"tipo":"nac",     "partner_id":48825,"journal_id":10, "doc_type":None},
+            "Bill Terminal 4 SA (Etapa 2a)":   {"tipo":"nac",     "partner_id":48828,"journal_id":10, "doc_type":None},
+            "Bill Mundo Comex (Etapa 2a)":     {"tipo":"nac",     "partner_id":48826,"journal_id":10, "doc_type":None},
+            "Bill SENASA (Etapa 2a)":          {"tipo":"nac",     "partner_id":48827,"journal_id":10, "doc_type":None},
+            "Otro comprobante":                {"tipo":"other",   "partner_id":None, "journal_id":10, "doc_type":None},
+        }
+
+        imp_files = st.file_uploader(
+            f"Documentos de {st.session_state.carpeta_id} — seleccioná uno o todos a la vez",
+            type=["pdf","jpg","jpeg","png"], accept_multiple_files=True, key="import_uploader")
+
+        classified_docs = []
+        if imp_files:
+            st.markdown("**Clasificación automática — revisá y ajustá si hace falta**")
+            for uf in imp_files:
+                ext        = uf.name.rsplit(".", 1)[-1].lower()
+                file_bytes = uf.read()
+                mimetype   = MIMETYPES.get(ext, "application/octet-stream")
+                raw_text   = ""
+                if ext == "pdf":
+                    _, raw_text = extract_pdf_fields(file_bytes)
+                auto        = classify_document(raw_text)
+                default_lbl = auto["label"] if auto["label"] in TIPO_OPTIONS_IMP else "Otro comprobante"
+                with st.expander(f"📎 {uf.name} — {auto['label']}", expanded=True):
+                    ct1, ct2, ct3, ct4 = st.columns([3, 2, 2, 1])
+                    tipo_sel  = ct1.selectbox("Tipo", list(TIPO_OPTIONS_IMP.keys()),
+                        index=list(TIPO_OPTIONS_IMP.keys()).index(default_lbl), key=f"tipo_{uf.name}")
+                    ref_doc   = ct2.text_input("N° comprobante", key=f"ref_d_{uf.name}")
+                    fecha_doc = ct3.text_input("Fecha (AAAA-MM-DD)", key=f"fec_d_{uf.name}",
+                                               placeholder="2026-05-12")
+                    moneda    = ct4.selectbox("Moneda", ["ARS","USD"], key=f"cur_{uf.name}")
+                    if moneda == "USD":
+                        _rd = fecha_doc or pd.Timestamp.today().strftime("%Y-%m-%d")
+                        _tc_up, _dt_up = get_usd_rate_odoo(models_url, uid, api_key, _rd)
+                        st.caption(f"TC Odoo para {_dt_up or _rd}: **$ {_tc_up:,.2f}**"
+                                   if _tc_up else "TC no encontrado en Odoo para esa fecha")
+                    classified_docs.append({
+                        "filename": uf.name, "file_bytes": file_bytes, "mimetype": mimetype,
+                        "tipo_cfg": TIPO_OPTIONS_IMP[tipo_sel],
+                        "ref": ref_doc, "fecha": fecha_doc, "moneda": moneda,
+                    })
+
+            if classified_docs:
+                if st.button(f"⬆️ Crear {len(classified_docs)} registro(s) en Odoo",
+                             type="primary", key="btn_create_all_imp"):
+                    _prog = st.progress(0)
+                    _ok, _errs = 0, []
+                    _carp = st.session_state.carpeta_id
+                    for _i, _doc in enumerate(classified_docs):
+                        try:
+                            _full_ref = f"{_carp} / {_doc['ref']}" if _doc["ref"] else _carp
+                            _cur_id   = None
+                            if _doc.get("moneda", "ARS") == "USD":
+                                _cur_id = get_currency_id(models_url, uid, api_key, "USD")
+                            _move_id = create_vendor_bill(models, uid, api_key,
+                                partner_id   = _doc["tipo_cfg"]["partner_id"],
+                                ref          = _full_ref,
+                                invoice_date = _doc["fecha"] or False,
+                                filename     = _doc["filename"],
+                                file_bytes   = _doc["file_bytes"],
+                                mimetype     = _doc["mimetype"],
+                                journal_id   = _doc["tipo_cfg"]["journal_id"],
+                                doc_type_id  = _doc["tipo_cfg"]["doc_type"],
+                                currency_id  = _cur_id,
+                            )
+                            _url = f"{ODOO_URL}/web#id={_move_id}&model=account.move&view_type=form"
+                            st.success(f"✅ {_doc['filename']} → ID {_move_id} — [Ver en Odoo]({_url})")
+                            _tipo = _doc["tipo_cfg"]["tipo"]
+                            if _tipo == "petdur":    st.session_state.etapas["1"]  = True
+                            elif _tipo == "di_afip": st.session_state.etapas["2"]  = True
+                            elif _tipo == "nac":     st.session_state.etapas["2a"] = True
+                            if _move_id not in st.session_state.carpeta_bills:
+                                st.session_state.carpeta_bills.append(_move_id)
+                            st.session_state.history.append({
+                                "tipo":   f"Importación {_carp}",
+                                "archivo":_doc["filename"], "id":_move_id,
+                                "url":_url, "estado":"✅"
+                            })
+                            _ok += 1
+                        except Exception as _e:
+                            _errs.append(f"❌ {_doc['filename']}: {str(_e)[:120]}")
+                        _prog.progress((_i + 1) / len(classified_docs))
+                    if _ok:
+                        st.success(f"✅ {_ok} registro(s) creados para {_carp}.")
+                        load_carpeta_full.clear()
+                    for _err in _errs:
+                        st.error(_err)
+                    st.rerun()
+
+        st.divider()
+
+        st.divider()
+
         # ── Resumen de carpeta ────────────────────────────────────
         if carp_data:
             if carp_data.get("error"):
@@ -2496,7 +2617,7 @@ if tab_import is not None:
                 if _cost_rows and _summary:
                     st.caption(f"TC USD/ARS: **$ {_summary['tc_usd']:,.2f}** — Fuente: {_tc_src}")
                     c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("FOB (USD)",         f"USD {_summary['total_fob_usd']:,.0f}")
+                    c1.metric("FOB (USD)",         fmt_usd(_summary["total_fob_usd"]))
                     c2.metric("FOB (ARS)",          fmt_ars(_summary["total_fob_ars"]))
                     c3.metric("Gastos nac. (ARS)",  fmt_ars(_summary["total_nac_ars"]))
                     c4.metric("Total estimado",     fmt_ars(_summary["grand_total_ars"]))
@@ -2512,108 +2633,6 @@ if tab_import is not None:
                     st.info("No hay líneas de productos en la OC o aún no hay comprobantes de costo.")
 
         st.divider()
-
-        # ── Subir comprobantes ────────────────────────────────────
-        st.markdown("#### ⬆️ Subir comprobantes")
-        _etapas_done = st.session_state.etapas
-        _missing = []
-        if not _etapas_done.get("1"):  _missing.append("Etapa 1: Bill PETDUR (USD)")
-        if not _etapas_done.get("2"):  _missing.append("Etapa 2: DI AFIP")
-        if not _etapas_done.get("2a"): _missing.append("Etapa 2a: TRICE / Terminal 4 / Mundo Comex / SENASA")
-        if _missing:
-            st.caption("⏳ Pendiente: " + "  ·  ".join(_missing))
-
-        TIPO_OPTIONS_IMP = {
-            "Bill PETDUR (Etapa 1)":           {"tipo":"petdur",  "partner_id":49328,"journal_id":71, "doc_type":None},
-            "DI AFIP (Etapa 2)":               {"tipo":"di_afip", "partner_id":9,    "journal_id":10, "doc_type":66},
-            "Bill TRICE Transport (Etapa 2a)": {"tipo":"nac",     "partner_id":48825,"journal_id":10, "doc_type":None},
-            "Bill Terminal 4 SA (Etapa 2a)":   {"tipo":"nac",     "partner_id":48828,"journal_id":10, "doc_type":None},
-            "Bill Mundo Comex (Etapa 2a)":     {"tipo":"nac",     "partner_id":48826,"journal_id":10, "doc_type":None},
-            "Bill SENASA (Etapa 2a)":          {"tipo":"nac",     "partner_id":48827,"journal_id":10, "doc_type":None},
-            "Otro comprobante":                {"tipo":"other",   "partner_id":None, "journal_id":10, "doc_type":None},
-        }
-
-        imp_files = st.file_uploader(
-            f"Documentos de {st.session_state.carpeta_id}",
-            type=["pdf","jpg","jpeg","png"], accept_multiple_files=True, key="import_uploader")
-
-        classified_docs = []
-        if imp_files:
-            st.markdown("**Clasificación automática — revisá y ajustá si hace falta**")
-            for uf in imp_files:
-                ext        = uf.name.rsplit(".", 1)[-1].lower()
-                file_bytes = uf.read()
-                mimetype   = MIMETYPES.get(ext, "application/octet-stream")
-                raw_text   = ""
-                if ext == "pdf":
-                    _, raw_text = extract_pdf_fields(file_bytes)
-                auto        = classify_document(raw_text)
-                default_lbl = auto["label"] if auto["label"] in TIPO_OPTIONS_IMP else "Otro comprobante"
-                with st.expander(f"📎 {uf.name} — {auto['label']}", expanded=True):
-                    ct1, ct2, ct3, ct4 = st.columns([3, 2, 2, 1])
-                    tipo_sel  = ct1.selectbox("Tipo", list(TIPO_OPTIONS_IMP.keys()),
-                        index=list(TIPO_OPTIONS_IMP.keys()).index(default_lbl), key=f"tipo_{uf.name}")
-                    ref_doc   = ct2.text_input("N° comprobante", key=f"ref_d_{uf.name}")
-                    fecha_doc = ct3.text_input("Fecha (AAAA-MM-DD)", key=f"fec_d_{uf.name}",
-                                               placeholder="2026-05-12")
-                    moneda    = ct4.selectbox("Moneda", ["ARS","USD"], key=f"cur_{uf.name}")
-                    if moneda == "USD":
-                        _rd = fecha_doc or pd.Timestamp.today().strftime("%Y-%m-%d")
-                        _tc_up, _dt_up = get_usd_rate_odoo(models_url, uid, api_key, _rd)
-                        st.caption(f"TC Odoo para {_dt_up or _rd}: **$ {_tc_up:,.2f}**"
-                                   if _tc_up else "TC no encontrado en Odoo para esa fecha")
-                    classified_docs.append({
-                        "filename": uf.name, "file_bytes": file_bytes, "mimetype": mimetype,
-                        "tipo_cfg": TIPO_OPTIONS_IMP[tipo_sel],
-                        "ref": ref_doc, "fecha": fecha_doc, "moneda": moneda,
-                    })
-
-            if classified_docs:
-                if st.button(f"⬆️ Crear {len(classified_docs)} registro(s) en Odoo",
-                             type="primary", key="btn_create_all_imp"):
-                    _prog = st.progress(0)
-                    _ok, _errs = 0, []
-                    _carp = st.session_state.carpeta_id
-                    for _i, _doc in enumerate(classified_docs):
-                        try:
-                            _full_ref = f"{_carp} / {_doc['ref']}" if _doc["ref"] else _carp
-                            _cur_id   = None
-                            if _doc.get("moneda", "ARS") == "USD":
-                                _cur_id = get_currency_id(models_url, uid, api_key, "USD")
-                            _move_id = create_vendor_bill(models, uid, api_key,
-                                partner_id   = _doc["tipo_cfg"]["partner_id"],
-                                ref          = _full_ref,
-                                invoice_date = _doc["fecha"] or False,
-                                filename     = _doc["filename"],
-                                file_bytes   = _doc["file_bytes"],
-                                mimetype     = _doc["mimetype"],
-                                journal_id   = _doc["tipo_cfg"]["journal_id"],
-                                doc_type_id  = _doc["tipo_cfg"]["doc_type"],
-                                currency_id  = _cur_id,
-                            )
-                            _url = f"{ODOO_URL}/web#id={_move_id}&model=account.move&view_type=form"
-                            st.success(f"✅ {_doc['filename']} → ID {_move_id} — [Ver en Odoo]({_url})")
-                            _tipo = _doc["tipo_cfg"]["tipo"]
-                            if _tipo == "petdur":    st.session_state.etapas["1"]  = True
-                            elif _tipo == "di_afip": st.session_state.etapas["2"]  = True
-                            elif _tipo == "nac":     st.session_state.etapas["2a"] = True
-                            if _move_id not in st.session_state.carpeta_bills:
-                                st.session_state.carpeta_bills.append(_move_id)
-                            st.session_state.history.append({
-                                "tipo":   f"Importación {_carp}",
-                                "archivo":_doc["filename"], "id":_move_id,
-                                "url":_url, "estado":"✅"
-                            })
-                            _ok += 1
-                        except Exception as _e:
-                            _errs.append(f"❌ {_doc['filename']}: {str(_e)[:120]}")
-                        _prog.progress((_i + 1) / len(classified_docs))
-                    if _ok:
-                        st.success(f"✅ {_ok} registro(s) creados para {_carp}.")
-                        load_carpeta_full.clear()
-                    for _err in _errs:
-                        st.error(_err)
-                    st.rerun()
 
         st.divider()
 
@@ -2714,3 +2733,4 @@ if tab_import is not None:
                     else:
                         st.info("Seleccioná al menos una línea con monto > 0.")
 
+                        
