@@ -691,8 +691,13 @@ def search_product_by_code_or_name(models_url, uid, api_key,
             short  = [w for w in words if w.isalpha() and len(w) == 2]
 
             # 2a. Número de modelo literal ("G1110" → "PIXMA G1110")
+            # Con contexto corto (ej: "GI") para evitar falsos positivos:
+            # "190C" sin ctx matchea "190CM" en PILETA → con "GI" solo matchea GI-190 C
             if model:
-                r = _best(_tmpl([("active", "=", True), ("name", "ilike", model[0])]))
+                dom_2a = [("active", "=", True), ("name", "ilike", model[0])]
+                if short:
+                    dom_2a.append(("name", "ilike", short[0]))
+                r = _best(_tmpl(dom_2a))
                 if r: return r
 
             # 2b. Token alfanumérico separado con espacio + contexto 2-char
@@ -1937,6 +1942,7 @@ with tab_orders:
                                           else f"⚠️ [{_el.get('codigo','')}]"),
                     })
                 st.dataframe(pd.DataFrame(_df_rows), use_container_width=True, hide_index=True)
+                st.caption("✏️ ¿Algún match incorrecto? Expandí el panel de abajo para corregirlo.")
 
                 # ── Edición / reasignación de match para todas las líneas ───────
                 _n_unmatched = sum(1 for el in _enriched if not el.get("odoo_product"))
