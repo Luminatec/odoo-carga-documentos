@@ -1840,6 +1840,56 @@ def register_payment_wizard(models, uid, api_key, move_ids, payment_date, journa
     except Exception as e:
         return False, str(e)
 
+def create_advance_payment(models, uid, api_key, partner_id, amount,
+                           currency_id, payment_date, journal_id, memo=""):
+    """Pago a cuenta: crea y confirma un pago SIN vincular a ninguna FA."""
+    vals = {
+        "payment_type": "outbound",
+        "partner_type": "supplier",
+        "partner_id":   partner_id,
+        "amount":       float(amount),
+        "currency_id":  currency_id,
+        "date":         payment_date,
+        "journal_id":   journal_id,
+        "ref":          memo or "",
+    }
+    pay_id = models.execute_kw(ODOO_DB, uid, api_key, "account.payment", "create", [vals])
+    models.execute_kw(ODOO_DB, uid, api_key, "account.payment", "action_post", [[pay_id]])
+    return pay_id
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_pending_expense_sheets(models_url, uid, api_key):
+    """Notas de gastos aprobadas pendientes de pago (hr.expense.sheet state=post)."""
+    try:
+        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        rows = m.execute_kw(ODOO_DB, uid, api_key, "hr.expense.sheet", "search_read",
+            [[("state", "=", "post")]],
+            {"fields": ["id", "name", "employee_id", "total_amount",
+                        "currency_id", "payment_state"],
+             "order": "id asc", "limit": 100})
+        return rows
+    except Exception:
+        return []
+
+def register_expense_payment(models, uid, api_key, sheet_id, payment_date, journal_id):
+    """Registra el pago de una nota de gastos aprobada via el wizard de Odoo."""
+    ctx = {
+        "active_model": "hr.expense.sheet",
+        "active_id":    sheet_id,
+        "active_ids":   [sheet_id],
+    }
+    try:
+        wiz_id = models.execute_kw(ODOO_DB, uid, api_key,
+            "account.payment.register", "create",
+            [{"payment_date": payment_date, "journal_id": journal_id}],
+            {"context": ctx})
+        result = models.execute_kw(ODOO_DB, uid, api_key,
+            "account.payment.register", "action_create_payments",
+            [[wiz_id]], {"context": ctx})
+        return True, result
+    except Exception as e:
+        return False, str(e)
+
 _tabs = ["🧾 Facturas de proveedores", "📦 Pedidos de clientes", "🏦 Órdenes de Pago"]
 if is_admin:
     _tabs.append("🛳️ Importaciones")
@@ -3395,28 +3445,161 @@ with tab_op:
     # MODO 3 — GASTOS / VEPs
     # =========================================================================
     else:
-        st.info(
-            "🧾 **Gastos y VEPs** — estos pagos se gestionan desde el "
-            "módulo de **Gastos de Odoo**, no desde Órdenes de Pago."
-        )
-        st.markdown(
-            "**Ejemplos:**  \n"
-            "- VEP AFIP (IVA, Ganancias, IIBB, Cargas Sociales)  \n"
-            "- Gastos de representación  \n"
-            "- Viajes y viáticos  \n"
-            "- Otros gastos sin factura de proveedor  \n\n"
-            "**Flujo en Odoo:**  \n"
-            "1. El empleado carga el gasto en *Gastos → Mis gastos*  \n"
-            "2. El responsable lo aprueba  \n"
-            "3. Se genera el pago desde *Gastos → Gastos a pagar*"
-        )
-        st.markdown(
-            f"[🔗 Ir al módulo de Gastos en Odoo]"
-            f"({ODOO_URL}/odoo/expenses)")
+        _gasto_refresh = st.button("🔄 Actualizar", key="gasto_refresh_btn")
+        if _gasto_refresh:
+            get_pending_expense_sheets.clear()
+
+        with st.spinner("Cargando notas de gastos pendientes..."):
+            _sheets = get_pending_expense_sheets(models_url, uid, api_key)
+
+        if not _sheets:
+            st.info(
+                "No hay notas de gastos aprobadas pendientes de pago en Odoo.  \n"
+                "Si esperabas ver algo acá, verificá que el estado de la nota "
+                "sea **'Publicado'** (aprobada y con asiento contable generado)."
+            )
+        else:
+            st.info(
+                f"**{len(_sheets)}** nota(s) de gastos aprobada(s) pendiente(s) de pago.")
+
+            # Tabla de notas de gastos
+            _sheet_rows = []
+            for _s in _sheets:
+                _cur  = (_s.get("currency_id") or [0, "ARS"])[1]
+                _monto = float(_s.get("total_amount") or 0)
+                _emp  = (_s.get("employee_id") or [0, "—"])[1]
+                _pmap = {"not_paid": "Sin pagar", "partial": "Parcial", "paid": "Pagado"}
+                _sheet_rows.append({
+                    "Sel":        False,
+                    "Empleado":   _emp,
+                    "Nota":       _s.get("name") or f"ID {_s['id']}",
+                    "Moneda":     _cur,
+                    "Total":      _monto,
+                    "Pago":       _pmap.get(_s.get("payment_state",""),
+                                            _s.get("payment_state","")),
+                    "_id":        _s["id"],
+                })
+
+            _df_sheets = pd.DataFrame(_sheet_rows)
+            _col_cfg_sheets = {
+                "Sel":   st.column_config.CheckboxColumn("✓", width="small"),
+                "Total": st.column_config.NumberColumn("Total", format="{:,.2f}"),
+                "_id":   None,
+            }
+            _disp_sheets = ["Sel", "Empleado", "Nota", "Moneda", "Total", "Pago"]
+
+            st.markdown("**Seleccioná las notas a pagar:**")
+            _edited_sheets = st.data_editor(
+                _df_sheets[_disp_sheets + ["_id"]],
+                column_config=_col_cfg_sheets,
+                column_order=_disp_sheets,
+                use_container_width=True, hide_index=True,
+                key="gasto_data_editor",
+                disabled=[c for c in _disp_sheets if c != "Sel"],
+            )
+
+            _sel_sheets = _edited_sheets[_edited_sheets["Sel"] == True]
+            n_sel_s = len(_sel_sheets)
+
+            if n_sel_s > 0:
+                st.divider()
+                _tot_ars_s = _sel_sheets[_sel_sheets["Moneda"]=="ARS"]["Total"].sum()
+                _tot_usd_s = _sel_sheets[_sel_sheets["Moneda"]=="USD"]["Total"].sum()
+                _gs_parts  = [f"{n_sel_s} nota(s) seleccionada(s)"]
+                if _tot_ars_s > 0: _gs_parts.append(f"ARS {fmt_ars(_tot_ars_s)}")
+                if _tot_usd_s > 0: _gs_parts.append(f"USD {fmt_usd(_tot_usd_s)}")
+                st.info("  ·  ".join(_gs_parts))
+
+                st.markdown("#### Datos del pago")
+                if not _jour_opts:
+                    st.error("No se encontraron diarios de pago en Odoo.")
+                else:
+                    _gs_c1, _gs_c2 = st.columns(2)
+                    _gs_journal = _gs_c1.selectbox(
+                        "Diario de pago", list(_jour_opts.keys()), key="gs_journal")
+                    _gs_date    = _gs_c2.date_input(
+                        "Fecha de pago", value=_date_cls.today(), key="gs_date")
+                    _gs_jour_id  = _jour_opts[_gs_journal]
+                    _gs_jour_cur = _jour_cur[_gs_journal]
+
+                    with st.expander("📒 Asientos que generará cada pago", expanded=True):
+                        _gs_ae = []
+                        for _, _sr in _sel_sheets.iterrows():
+                            _cur_g  = _sr["Moneda"]
+                            _mont_g = _sr["Total"]
+                            _fmt_g  = (fmt_usd(_mont_g) if _cur_g == "USD"
+                                       else fmt_ars(_mont_g))
+                            _gs_ae.append({
+                                "Tipo": "DR",
+                                "Cuenta": "Gastos / Empleado",
+                                "Descripción": f"{_sr['Empleado']} · {_sr['Nota']}",
+                                "Moneda": _cur_g, "Monto": _fmt_g,
+                            })
+                            _gs_ae.append({
+                                "Tipo": "  CR",
+                                "Cuenta": _gs_journal,
+                                "Descripción": f"Pago {_sr['Nota']} — {_gs_date}",
+                                "Moneda": _gs_jour_cur, "Monto": _fmt_g,
+                            })
+                        if _gs_ae:
+                            st.dataframe(pd.DataFrame(_gs_ae),
+                                         use_container_width=True, hide_index=True)
+                            st.caption(
+                                "Estimado. Odoo calcula los importes exactos al confirmar.")
+
+                    st.caption(
+                        f"Se generará **una OP por nota de gastos** "
+                        f"({n_sel_s} OP en total).")
+
+                    _gs_btn = st.button(
+                        f"💸 Registrar {n_sel_s} Pago(s) de Gastos en Odoo",
+                        type="primary", key="btn_gen_gs")
+
+                    if _gs_btn:
+                        _gs_ok, _gs_errs = 0, []
+                        _gs_date_str = _gs_date.strftime("%Y-%m-%d")
+                        _prog_gs = st.progress(0)
+                        for _gi, (_, _sr) in enumerate(_sel_sheets.iterrows()):
+                            _sid   = int(_sr["_id"])
+                            _snota = _sr["Nota"]
+                            _semp  = _sr["Empleado"]
+                            try:
+                                _ok, _res = register_expense_payment(
+                                    models, uid, api_key,
+                                    _sid, _gs_date_str, _gs_jour_id)
+                                if _ok:
+                                    st.success(
+                                        f"✅ Pago registrado — **{_semp}** · {_snota}")
+                                    _gs_ok += 1
+                                else:
+                                    _gs_errs.append(f"❌ {_snota} ({_semp}): {_res}")
+                            except Exception as _gse:
+                                _gs_errs.append(
+                                    f"❌ {_snota} ({_semp}): {str(_gse)[:150]}")
+                            _prog_gs.progress((_gi + 1) / n_sel_s)
+                        for _ge in _gs_errs:
+                            st.error(_ge)
+                        if _gs_ok:
+                            st.success(f"✅ {_gs_ok} pago(s) registrado(s).")
+                            get_pending_expense_sheets.clear()
+                            st.info(
+                                "Presioná 🔄 Actualizar para ver el nuevo estado.")
+            else:
+                st.info(
+                    "Marcá el ✓ en la columna izquierda para seleccionar "
+                    "notas de gastos.")
+
+        st.divider()
+        st.caption(
+            f"Para cargar nuevos gastos o aprobar notas pendientes, "
+            f"usá el [módulo de Gastos en Odoo]"
+            f"({ODOO_URL}/odoo/expenses) directamente.")
 
 
+
+# ─────────────────────────────────────────────────────────────────────────────
 # TAB — HISTORIAL DE SESIÓN
-# ───────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 with tab_history:
     st.subheader("📋 Historial de sesión")
     if not st.session_state.history:
@@ -3434,7 +3617,8 @@ with tab_history:
                     f"— ID {_h_id} — [🔗 Ver en Odoo]({_h_url})"
                 )
             else:
-                st.markdown(f"{_h_icon} **{_h_tipo}** — {_h_arch} — ID {_h_id}")
+                st.markdown(
+                    f"{_h_icon} **{_h_tipo}** — {_h_arch} — ID {_h_id}")
         if st.button("🗑️ Limpiar historial", key="btn_clear_hist"):
             st.session_state.history = []
             st.rerun()
