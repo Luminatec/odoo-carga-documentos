@@ -271,6 +271,33 @@ CUIT_TO_PARTNER = {
     "33546700939": {"tipo":"nac",    "label":"Bill SENASA (Etapa 2a)",          "partner_id":48827,"journal_id":10,"doc_type":None},
 }
 
+def _parse_odoo_rate(r):
+    """
+    Extrae el TC ARS/USD de un registro res.currency.rate.
+    Odoo almacena la tasa de distintas formas según versión y localización:
+      - inverse_company_rate: ARS por 1 USD (ej: 1417.0)  ← Odoo 16+
+      - company_rate:         ARS por 1 USD (ej: 1417.0)  ← alternativo
+      - rate:                 USD por 1 ARS (ej: 0.000706) ← inverso
+    Siempre validamos que el resultado sea > 100 para descartar defaults de 1.0.
+    """
+    for field in ("inverse_company_rate", "company_rate"):
+        v = r.get(field)
+        if v and v is not False:
+            fv = float(v)
+            if fv > 100:
+                return fv
+            if 0 < fv < 0.01:          # almacenado como su propio inverso
+                return 1.0 / fv
+    # rate suele ser 1/TC (USD por ARS)
+    rate = r.get("rate")
+    if rate and rate is not False:
+        fv = float(rate)
+        if fv > 100:                    # ya está en ARS/USD directamente
+            return fv
+        if 0 < fv < 0.01:              # correcto: 1/TC ≈ 0.000706
+            return 1.0 / fv
+    return None
+
 @st.cache_data(ttl=300, show_spinner=False)
 def get_usd_rate_odoo(models_url, uid, api_key, date_str):
     """TC ARS/USD del día o el más reciente anterior en Odoo."""
@@ -278,15 +305,12 @@ def get_usd_rate_odoo(models_url, uid, api_key, date_str):
         m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
         rows = m.execute_kw(ODOO_DB, uid, api_key, "res.currency.rate", "search_read",
             [[("currency_id.name", "=", "USD"), ("name", "<=", date_str)]],
-            {"fields": ["name", "rate", "inverse_company_rate"], "limit": 1, "order": "name desc"})
+            {"fields": ["name", "rate", "inverse_company_rate", "company_rate"],
+             "limit": 1, "order": "name desc"})
         if rows:
-            r = rows[0]
-            icr = r.get("inverse_company_rate")
-            if icr and float(icr) > 100:
-                return float(icr), r["name"]
-            rate = r.get("rate")
-            if rate and 0 < float(rate) < 1:
-                return 1.0 / float(rate), r["name"]
+            tc = _parse_odoo_rate(rows[0])
+            if tc:
+                return tc, rows[0]["name"]
     except Exception:
         pass
     return None, None
@@ -2437,13 +2461,14 @@ if tab_import is not None:
         st.subheader("🛳️ Importaciones — Modo Claude")
 
         # ── Input carpeta ─────────────────────────────────────────
-        col_ci, col_cb, col_cr = st.columns([5, 1, 1])
-        carp_in  = col_ci.text_input("Carpeta", value=st.session_state.carpeta_id,
+        col_ci, col_cb, col_cr, col_cc = st.columns([4, 1, 1, 1])
+        carp_in    = col_ci.text_input("Carpeta", value=st.session_state.carpeta_id,
             placeholder="LUMI_293", key="input_carpeta", label_visibility="collapsed")
-        load_btn  = col_cb.button("🔍 Cargar",  key="btn_load_carp",  use_container_width=True)
-        reset_btn = col_cr.button("🔄 Nueva",   key="btn_reset_carp", use_container_width=True)
+        load_btn   = col_cb.button("🔍 Cargar",   key="btn_load_carp",   use_container_width=True)
+        reset_btn  = col_cr.button("🔄 Nueva",    key="btn_reset_carp",  use_container_width=True)
+        cancel_btn = col_cc.button("❌ Cancelar", key="btn_cancel_carp", use_container_width=True)
 
-        if reset_btn:
+        if reset_btn or cancel_btn:
             for k in ["carpeta_id", "carpeta_po", "carpeta_bills", "carpeta_lc_id"]:
                 st.session_state[k] = DEFAULTS.get(k, "")
             st.session_state.etapas = {k: False for k, *_ in ETAPAS_DEF}
@@ -2567,8 +2592,39 @@ if tab_import is not None:
                         })
 
             if classified_docs:
-                if st.button(f"⬆️ Crear {len(classified_docs)} registro(s) en Odoo",
-                             type="primary", key="btn_create_all_imp"):
+                # ── Vista previa antes de crear ────────────────────────────
+                _prev_btn, _create_btn = st.columns([1, 2])
+                _show_prev = _prev_btn.button("👁️ Vista previa", key="btn_preview_imp",
+                                              use_container_width=True)
+                if _show_prev or st.session_state.get("_imp_preview_open"):
+                    st.session_state["_imp_preview_open"] = True
+                    st.markdown("**Resumen de lo que se va a crear en Odoo:**")
+                    _prev_rows = []
+                    for _d in classified_docs:
+                        _cfg = _d["tipo_cfg"]
+                        _pid = _cfg.get("partner_id")
+                        _pname = PARTNER_TO_TIPO.get(_pid, {}).get("label", "—") if _pid else "Sin asignar"
+                        _tc_prev = "—"
+                        if _d.get("moneda") == "USD":
+                            _ref_date = _d.get("fecha") or pd.Timestamp.today().strftime("%Y-%m-%d")
+                            _tv, _td = get_usd_rate_odoo(models_url, uid, api_key, _ref_date)
+                            _tc_prev = f"$ {_tv:,.0f}" if _tv else "sin TC"
+                        _prev_rows.append({
+                            "Archivo":    _d["filename"],
+                            "Tipo":       _cfg.get("label","—")[:30],
+                            "Proveedor":  _pname,
+                            "Ref.":       (f"{st.session_state.carpeta_id} / {_d['ref']}"
+                                          if _d.get("ref") else st.session_state.carpeta_id),
+                            "Fecha":      _d.get("fecha") or "—",
+                            "Moneda":     _d.get("moneda","ARS"),
+                            "TC ARS/USD": _tc_prev,
+                        })
+                    st.dataframe(pd.DataFrame(_prev_rows), use_container_width=True, hide_index=True)
+                    st.caption("Revisá los datos antes de confirmar. Podés modificar cualquier campo arriba.")
+
+                if _create_btn.button(f"⬆️ Confirmar y crear {len(classified_docs)} registro(s) en Odoo",
+                             type="primary", key="btn_create_all_imp", use_container_width=True):
+                    st.session_state["_imp_preview_open"] = False
                     _prog = st.progress(0)
                     _ok, _errs = 0, []
                     _carp = st.session_state.carpeta_id
@@ -2675,11 +2731,11 @@ if tab_import is not None:
                 tc_disp = "—"
                 if cur_name == "USD":
                     icr = b.get("invoice_currency_rate")
-                    if icr and float(icr or 0) > 0:
-                        v = float(icr)
-                        tc_val = v if v > 100 else (1.0 / v if 0 < v < 1 else v)
-                        tc_disp = f"$ {tc_val:,.0f}"
-                    elif carp_data.get("tc_oc"):
+                    if icr and icr is not False:
+                        tc_val = _parse_odoo_rate({"rate": icr, "inverse_company_rate": None})
+                        if tc_val:
+                            tc_disp = f"$ {tc_val:,.0f}"
+                    if tc_disp == "—" and carp_data.get("tc_oc"):
                         tc_disp = f"$ {carp_data['tc_oc']:,.0f} (OC)"
 
                 amt_orig = (f"USD {b.get('amount_total', 0):,.2f}"
@@ -2809,49 +2865,4 @@ if tab_import is not None:
                                                       st.session_state.carpeta_id)
                 if not _bills_lc:
                     st.warning("No se encontraron facturas con esa referencia.")
-                else:
-                    st.markdown("**Líneas del Landed Cost**")
-                    _lc_prod_labels = {f"{pid}: {pname}": pid for pid, pname in LC_PRODUCTS.items()}
-                    _lc_lines = []
-                    for _bill in _bills_lc:
-                        _bname    = _bill.get("name") or f"ID {_bill['id']}"
-                        _bpartner = _bill["partner_id"][1] if _bill.get("partner_id") else "?"
-                        _bstate   = _bill.get("state", "")
-                        _ba_total = float(_bill.get("amount_total") or 0)
-                        _bc1, _bc2, _bc3, _bc4 = st.columns([3, 3, 2, 1])
-                        _bc1.caption(f"📄 {_bname} — {_bpartner} [{_bstate}]")
-                        _ch_prod = _bc2.selectbox("Producto LC", list(_lc_prod_labels.keys()),
-                                                   key=f"lc_p_{_bill['id']}")
-                        _lc_amt  = _bc3.number_input("Monto", min_value=0.0, value=_ba_total,
-                                       key=f"lc_a_{_bill['id']}", format="%.2f")
-                        _incl    = _bc4.checkbox("✓", value=True, key=f"lc_i_{_bill['id']}")
-                        if _incl and _lc_amt > 0:
-                            _lc_lines.append({"product_id": _lc_prod_labels[_ch_prod],
-                                              "price_unit": _lc_amt})
-
-                    if _lc_lines:
-                        st.caption(f"{len(_lc_lines)} línea(s) seleccionadas")
-                        if st.button("🔗 Crear Landed Cost en Odoo", type="primary",
-                                     key="btn_lc_create"):
-                            try:
-                                _lc_id = create_landed_cost(models, uid, api_key,
-                                    picking_ids=[_sel_pick_id], cost_lines=_lc_lines)
-                                st.session_state.carpeta_lc_id = _lc_id
-                                st.session_state.etapas["4"]   = True
-                                _lc_url = (f"{ODOO_URL}/web#id={_lc_id}"
-                                           f"&model=stock.landed.cost&view_type=form")
-                                st.success(f"✅ Landed Cost ID {_lc_id} — "
-                                           f"[Abrir en Odoo]({_lc_url})")
-                                st.info("⚠️ Recordá validarlo en Odoo para que BA #23 "
-                                        "actualice el PPP USD.")
-                                st.session_state.history.append({
-                                    "tipo":    f"Landed Cost {st.session_state.carpeta_id}",
-                                    "archivo": (f"LC {st.session_state.carpeta_id} · "
-                                                f"{len(_lc_lines)} líneas"),
-                                    "id": _lc_id, "url": _lc_url, "estado": "✅"
-                                })
-                                load_carpeta_full.clear()
-                            except Exception as _e:
-                                st.error(f"❌ Error creando Landed Cost: {_e}")
-                    else:
-                        st.info("Seleccioná al menos una línea con monto > 0.")
+       
