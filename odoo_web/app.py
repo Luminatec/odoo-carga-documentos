@@ -1995,16 +1995,20 @@ def get_payment_journals(models_url, uid, api_key):
             {"fields": ["id", "name", "currency_id"], "order": "name asc"})
         result = []
         for r in rows:
-            cur = r.get("currency_id")
-            cur_name = cur[1] if cur and isinstance(cur, (list, tuple)) and len(cur) > 1 else "ARS"
+            cur      = r.get("currency_id")
+            has_cur  = bool(cur and isinstance(cur, (list, tuple)) and cur[0])
+            cur_name = cur[1] if has_cur else ""
             name_upper = r["name"].upper()
-            # Incluir solo ARS (moneda vacía = ARS de la empresa) + MercadoPago por nombre
-            is_ars = (cur_name == "ARS")
+            # Incluir si:
+            #   • sin moneda asignada (hereda ARS de la empresa), o
+            #   • moneda contiene "ARS" o "PESO" (cualquier formato), o
+            #   • nombre contiene "MercadoPago"
+            is_ars = (not has_cur) or ("ARS" in cur_name.upper()) or ("PESO" in cur_name.upper())
             is_mp  = "MERCADOPAGO" in name_upper or "MERCADO PAGO" in name_upper
             if not (is_ars or is_mp):
                 continue
-            label = r["name"] if cur_name == "ARS" else f"{r['name']} ({cur_name})"
-            result.append((r["id"], label, cur_name))
+            label = r["name"] if not has_cur or "ARS" in cur_name.upper() else f"{r['name']} ({cur_name})"
+            result.append((r["id"], label, cur_name or "ARS"))
         return result   # list of (id, label, currency_name)
     except Exception:
         return []
@@ -4375,10 +4379,4 @@ with tab_recibos:
 # TAB HISTORIAL
 # ═══════════════════════════════════════════════════
 with tab_history:
-    st.subheader("📋 Historial de esta sesión")
-    _hist = st.session_state.get("history", [])
-    if not _hist:
-        st.caption("Todavía no se procesó ningún documento en esta sesión.")
-    else:
-        import pandas as _pd_hist
-        _hdf 
+    s
