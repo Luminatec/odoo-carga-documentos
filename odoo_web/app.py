@@ -2350,17 +2350,15 @@ with tab_bills:
                             placeholder="Nombre exacto en Odoo",
                             help="Se usa solo si el CUIT no resuelve a ningún proveedor")
 
-                # Montos extraídos (sólo referencia)
+                # Montos extraídos (sólo referencia) — sin key= para evitar que
+                # session_state cachee "" de la primera renderización
                 _ca, _cb, _cc = st.columns(3)
                 _ca.text_input("Neto gravado (ref.)",
-                    value=fmt_ars(extracted.get("neto","")), disabled=True,
-                    key=f"neto_ref_{uf.name}")
+                    value=fmt_ars(extracted.get("neto","")), disabled=True)
                 _cb.text_input("IVA (ref.)",
-                    value=fmt_ars(extracted.get("iva","")), disabled=True,
-                    key=f"iva_ref_{uf.name}")
+                    value=fmt_ars(extracted.get("iva","")), disabled=True)
                 _cc.text_input("Total c/imp. (ref.)",
-                    value=fmt_ars(extracted.get("total","")), disabled=True,
-                    key=f"total_ref_{uf.name}")
+                    value=fmt_ars(extracted.get("total","")), disabled=True)
 
                 st.text_area("Notas internas", height=55, key=f"notas_{uf.name}")
 
