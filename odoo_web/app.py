@@ -1926,14 +1926,18 @@ import streamlit.components.v1 as _stc
 _stc.html("""
 <script>
 (function() {
-    // Cada 4 minutos simula actividad para mantener el WebSocket vivo
-    setInterval(function() {
-        try {
-            // Dispara un mousemove en el documento padre (ventana Streamlit)
-            var evt = new MouseEvent('mousemove', {bubbles: true, cancelable: true});
-            window.parent.document.dispatchEvent(evt);
-        } catch(e) {}
-    }, 240000);
+    // Cada 2 minutos hace un fetch al healthcheck de Streamlit para mantener
+    // el WebSocket activo. Funciona desde iframe (mismo origen).
+    function ping() {
+        fetch('/_stcore/health', {method: 'GET', cache: 'no-store'})
+            .catch(function() {
+                // Fallback: intentar raíz si /_stcore/health no responde
+                fetch(window.location.origin + '/', {method: 'GET',
+                    mode: 'no-cors', cache: 'no-store'}).catch(function(){});
+            });
+    }
+    ping(); // ping inicial
+    setInterval(ping, 120000); // luego cada 2 minutos
 })();
 </script>
 """, height=0, scrolling=False)
