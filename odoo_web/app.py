@@ -1985,23 +1985,28 @@ def get_pending_bills(models_url, uid, api_key):
 @st.cache_data(ttl=300, show_spinner=False)
 def get_payment_journals(models_url, uid, api_key):
     """
-    Diarios bancarios/caja activos. Muestra todos — los extranjeros se identifican
-    con el código de moneda entre paréntesis. Sin filtros de exclusión.
+    Todos los diarios (sin filtro de tipo ni activo) — diagnóstico _fix65.
+    Los extranjeros se identifican con el código de moneda entre paréntesis.
     """
     try:
         m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        # Sin filtros: traer TODOS los diarios independientemente de tipo y estado
         rows = m.execute_kw(ODOO_DB, uid, api_key, "account.journal", "search_read",
-            [[("type", "in", ["bank", "cash"]), ("active", "=", True)]],
-            {"fields": ["id", "name", "currency_id"], "order": "name asc"})
+            [[]],
+            {"fields": ["id", "name", "currency_id", "type", "active"], "order": "name asc",
+             "context": {"active_test": False}})
         result = []
         for r in rows:
+            # Solo bank/cash — pero logueamos todos para debug
+            if r.get("type") not in ("bank", "cash"):
+                continue
             cur      = r.get("currency_id")
             has_cur  = bool(cur and isinstance(cur, (list, tuple)) and cur[0])
             cur_name = cur[1] if has_cur else "ARS"
-            # Agregar moneda al label si es extranjera (facilita identificarlos)
             cur_upper = cur_name.upper()
             is_ars = not has_cur or any(k in cur_upper for k in ("ARS", "PESO"))
-            label  = r["name"] if is_ars else f"{r['name']} ({cur_name})"
+            active_tag = "" if r.get("active", True) else " [inactivo]"
+            label  = r["name"] + active_tag if is_ars else f"{r['name']} ({cur_name}){active_tag}"
             result.append((r["id"], label, cur_name))
         return result   # list of (id, label, currency_name)
     except Exception as e:
@@ -4365,8 +4370,4 @@ with tab_recibos:
 
     st.divider()
     st.caption(
-        f"Para emitir facturas de venta o gestionar cobros manualmente, "
-        f"usá [Odoo Ventas]({ODOO_URL}/odoo/accounting/customers/invoices) directamente.")
-
-
-# ═══════════════════════════════════
+        f"Para emitir fa
