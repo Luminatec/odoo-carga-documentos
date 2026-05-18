@@ -269,6 +269,40 @@ def get_partner_default_account(models_url, uid, api_key, partner_id):
     return None
 
 
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_expense_products(models_url, uid, api_key):
+    """Carga productos activos y aptos para compra de Odoo (ordenados por nombre)."""
+    try:
+        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        rows = m.execute_kw(ODOO_DB, uid, api_key, "product.template", "search_read",
+            [[("active", "=", True), ("purchase_ok", "=", True)]],
+            {"fields": ["id", "name", "default_code"], "order": "name asc", "limit": 500})
+        result = []
+        for r in rows:
+            code = r.get("default_code") or ""
+            label = f"[{code}] {r['name']}" if code else r["name"]
+            result.append((r["id"], label))
+        return result
+    except Exception:
+        return []
+
+@st.cache_data(ttl=120, show_spinner=False)
+def get_partner_default_product(models_url, uid, api_key, partner_id):
+    """Devuelve (product_tmpl_id, label) del primer producto configurado para el proveedor."""
+    try:
+        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        sinfo = m.execute_kw(ODOO_DB, uid, api_key, "product.supplierinfo", "search_read",
+            [[("partner_id", "=", partner_id)]],
+            {"fields": ["product_tmpl_id"], "limit": 1, "order": "id asc"})
+        if sinfo:
+            tmpl = sinfo[0].get("product_tmpl_id")
+            if tmpl and isinstance(tmpl, (list, tuple)) and tmpl[0]:
+                return (tmpl[0], tmpl[1])
+    except Exception:
+        pass
+    return None
+
 @st.cache_data(ttl=300, show_spinner=False)
 def get_analytic_accounts(models_url, uid, api_key):
     """Carga cuentas analíticas activas (Centros de Costo) de Odoo."""
@@ -594,7 +628,8 @@ def _calc_cost_breakdown(po_lines, bills, tc_usd):
 def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                        filename, file_bytes, mimetype, journal_id=None, doc_type_id=None,
                        invoice_date_due=None, account_id=None, amount_neto=None,
-                       currency_id=None, analytic_account_id=None):
+                       currency_id=None, analytic_account_id=None, product_id=None,
+                       l10n_latam_document_number=None):
     vals = {"move_type": "in_invoice"}
     if partner_id:       vals["partner_id"]   = partner_id
     if ref:              vals["ref"]          = ref
@@ -603,13 +638,17 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
     if journal_id:       vals["journal_id"]   = journal_id
     if doc_type_id:      vals["l10n_latam_document_type_id"] = doc_type_id
     if currency_id:      vals["currency_id"]  = currency_id
-    if account_id and amount_neto:
+    if l10n_latam_document_number:
+        vals["l10n_latam_document_number"] = l10n_latam_document_number
+    # Crear línea si hay cuenta o producto + monto
+    if (account_id or product_id) and amount_neto:
         line_vals = {
-            "account_id": account_id,
             "name": ref or "Factura proveedor",
             "price_unit": float(amount_neto),
             "quantity": 1,
         }
+        if account_id:   line_vals["account_id"]  = account_id
+        if product_id:   line_vals["product_id"]  = product_id
         if analytic_account_id:
             line_vals["analytic_distribution"] = {str(analytic_account_id): 100}
         vals["invoice_line_ids"] = [(0, 0, line_vals)]
@@ -850,19 +889,28 @@ def extract_pdf_fields(file_bytes):
     # Soporta:
     #   Formato AFIP estándar:     "Nro. Comp.: 00002-00013670"
     #   Formato con letra prefijo: "FACTURA A00005-00029174"
-    num_pats = [
-        r"(?:Nro\.?\s*Comp\.?(?:\s*\(Nro\.?\s*Orig\.?\))?|N[°º]\s*Comp\.?|Comprobante\s*N[°º]?)[:\s]*(\d{4,5}[-\s]\d{6,8})",
-        r"(?:Punto\s+de\s+Venta[:\s]+\d+\s+)?(?:Comp\.?\s*Nro\.?|Nro\.)[:\s]+(\d{4,5}-\d{6,8})",
-        r"(?:FACTURA|NOTA\s+DE\s+CR[EÉ]DITO|NOTA\s+DE\s+D[EÉ]BITO|RECIBO)\s+([A-Z]\d{4,5}-\d{6,8})",
-        r"\b([A-Z]\d{4,5}-\d{6,8})\b",
-        r"\b(\d{4,5}-\d{6,8})\b",
-        r"(?:Factura|Invoice|N[°º.])[:\s#]*([A-Z0-9\-]{5,20})",
-    ]
-    for pat in num_pats:
-        m = re.search(pat, text, re.IGNORECASE)
-        if m:
-            fields["numero"] = m.group(1).strip()
-            break
+    # Primero: combinar "Punto de Venta: XXXX ... Comp. Nro: XXXXXXXX" (AFIP estándar)
+    _m_pv = re.search(
+        r"Punto\s+de\s+Venta[:\s]+(\d{4,5})[^\n]{0,60}?Comp\.?\s*Nro\.?[:\s]+(\d{6,8})",
+        text, re.IGNORECASE)
+    if _m_pv:
+        fields["numero"] = f"{_m_pv.group(1).zfill(5)}-{_m_pv.group(2).zfill(8)}"
+
+    if not fields["numero"]:
+        num_pats = [
+            r"(?:Nro\.?\s*Comp\.?(?:\s*\(Nro\.?\s*Orig\.?\))?|N[°º]\s*Comp\.?|Comprobante\s*N[°º]?)[:\s]*(\d{4,5}[-\s]\d{6,8})",
+            r"(?:Punto\s+de\s+Venta[:\s]+\d+\s+)?(?:Comp\.?\s*Nro\.?|Nro\.)[:\s]+(\d{4,5}-\d{6,8})",
+            r"(?:FACTURA|NOTA\s+DE\s+CR[EÉ]DITO|NOTA\s+DE\s+D[EÉ]BITO|RECIBO)\s+([A-Z]\d{4,5}-\d{6,8})",
+            r"\b([A-Z]\d{4,5}-\d{6,8})\b",
+            r"\b(\d{4,5}-\d{6,8})\b",
+            # Patrón 6: requiere "Factura" o "Invoice" antes del N° para no capturar "CAE N°"
+            r"(?:Factura|Invoice)\s*N[°º\.][:\s#]*([A-Z0-9\-]{5,20})",
+        ]
+        for pat in num_pats:
+            m = re.search(pat, text, re.IGNORECASE)
+            if m:
+                fields["numero"] = m.group(1).strip()
+                break
 
     # ── FECHA DE EMISIÓN ──────────────────────────────────────────────────
     emision_pats = [
@@ -2165,6 +2213,19 @@ with tab_bills:
                             _default_acct_idx = _i
                             break
 
+            # Cargar productos de gasto y calcular default del proveedor
+            _expense_products = get_expense_products(models_url, uid, api_key)
+            _prod_labels = ["— Sin producto —"] + [lbl for _, lbl in _expense_products]
+            _default_prod_idx = 0
+            if _partner_preloaded:
+                _def_prod = get_partner_default_product(models_url, uid, api_key, _partner_preloaded[0])
+                if _def_prod:
+                    _def_prod_label = _def_prod[1]
+                    for _pi, _plbl in enumerate(_prod_labels):
+                        if _plbl == _def_prod_label:
+                            _default_prod_idx = _pi
+                            break
+
             # Cargar cuentas analíticas (Centros de Costo)
             _analytic_accounts = get_analytic_accounts(models_url, uid, api_key)
             _analytic_labels   = ["— Sin centro de costo —"] + [lbl for _, lbl in _analytic_accounts]
@@ -2259,15 +2320,24 @@ with tab_bills:
 
                 st.text_area("Notas internas", height=55, key=f"notas_{uf.name}")
 
-                # Cuentas contables y Centro de Costo
-                st.markdown("##### 📒 Cuenta contable y Centro de Costo")
+                # Producto, Cuenta contable y Centro de Costo
+                st.markdown("##### 📦 Producto / Servicio y Contabilidad")
+                prod_sel = st.selectbox(
+                    "Producto / Servicio",
+                    options=_prod_labels,
+                    index=_default_prod_idx,
+                    key=f"prod_g_{uf.name}",
+                    help="Producto de Odoo que se asigna a la línea de factura. "
+                         "Se pre-selecciona según el proveedor.",
+                )
                 _col_cta, _col_cc = st.columns([3, 2])
                 cuenta_sel = _col_cta.selectbox(
                     "Cuenta de gasto / activo",
                     options=_acct_labels,
                     index=_default_acct_idx,
                     key=f"cta_g_{uf.name}",
-                    help="La cuenta se pre-selecciona según el proveedor. Cambiala solo si esta operación usa una cuenta distinta a la habitual.",
+                    help="Cuenta contable pre-seleccionada según el proveedor. "
+                         "Cambiala solo si esta operación usa una cuenta distinta.",
                 )
                 analytic_sel = _col_cc.selectbox(
                     "Centro de Costo",
@@ -2345,14 +2415,35 @@ with tab_bills:
                                     analytic_id_sel = _anid
                                     break
 
+                        # 6. Resolver Producto seleccionado
+                        product_id_sel = None
+                        if prod_sel and prod_sel != "— Sin producto —":
+                            for _epid, _eplbl in _expense_products:
+                                if _eplbl == prod_sel:
+                                    product_id_sel = _epid
+                                    break
+
+                        # 7. l10n_latam_document_number (número sin prefijo de letra)
+                        _latam_num = (ref_i or "").strip()
+                        # Si el número extraído tiene prefijo de letra, quitarlo
+                        if _latam_num and re.match(r"^[A-Za-z]\d", _latam_num):
+                            _latam_num = _latam_num[1:]
+
+                        # 8. Monto neto: usar total si es Monotributo y neto está vacío
+                        _neto_val = extracted.get("neto") or None
+                        if not _neto_val:
+                            _neto_val = extracted.get("total") or None
+
                         move_id = create_vendor_bill(models, uid, api_key,
                             partner_id=partner_id, ref=ref_i,
                             invoice_date=fecha_i or False,
                             invoice_date_due=fecha_vto_i or None,
                             filename=uf.name, file_bytes=file_bytes, mimetype=mimetype,
                             account_id=account_id_sel,
-                            amount_neto=extracted.get("neto") or None,
-                            analytic_account_id=analytic_id_sel)
+                            amount_neto=_neto_val,
+                            analytic_account_id=analytic_id_sel,
+                            product_id=product_id_sel,
+                            l10n_latam_document_number=_latam_num or None)
                         url = odoo_url("account.move", move_id)
                         st.success(f"✅ Factura creada — [Abrir en Odoo]({url})")
                         st.session_state.history.append({"tipo":"Factura proveedor",
@@ -3164,9 +3255,9 @@ if tab_import is not None:
 
                 col_cfg = {
                     "Fecha":        st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
-                    "TC ($/u$s)":   st.column_config.NumberColumn("TC $/u$s", format="$ {:,.0f}"),
-                    "Monto orig.":  st.column_config.NumberColumn("Monto orig.", format="{:,.2f}"),
-                    "ARS equiv.":   st.column_config.NumberColumn("ARS equiv.", format="$ {:,.0f}"),
+                    "TC ($/u$s)":   st.column_config.NumberColumn("TC $/u$s", format="%.0f"),
+                    "Monto orig.":  st.column_config.NumberColumn("Monto orig.", format="%.2f"),
+                    "ARS equiv.":   st.column_config.NumberColumn("ARS equiv.", format="%.0f"),
                     "\U0001f517 Ver": st.column_config.LinkColumn("Ver en Odoo",
                                         display_text="Abrir \U0001f517"),
                 }
@@ -3457,8 +3548,8 @@ with tab_op:
                     "Venc.":     st.column_config.TextColumn("", width="small"),
                     "Fecha FA":  st.column_config.DateColumn("Fecha FA",  format="DD/MM/YYYY"),
                     "Vto. pago": st.column_config.DateColumn("Vto. pago", format="DD/MM/YYYY"),
-                    "Total":     st.column_config.NumberColumn("Total",    format="{:,.2f}"),
-                    "Pendiente": st.column_config.NumberColumn("Pendiente",format="{:,.2f}"),
+                    "Total":     st.column_config.NumberColumn("Total",    format="%.2f"),
+                    "Pendiente": st.column_config.NumberColumn("Pendiente",format="%.2f"),
                     "_id": None, "_partner_id": None, "_currency_id": None,
                 }
                 _display_cols = ["Sel","Venc.","Proveedor","Comprobante","Ref.",
@@ -3715,7 +3806,7 @@ with tab_op:
             _df_sheets = pd.DataFrame(_sheet_rows)
             _col_cfg_sheets = {
                 "Sel":   st.column_config.CheckboxColumn("✓", width="small"),
-                "Total": st.column_config.NumberColumn("Total", format="{:,.2f}"),
+                "Total": st.column_config.NumberColumn("Total", format="%.2f"),
                 "_id":   None,
             }
             _disp_sheets = ["Sel", "Empleado", "Nota", "Moneda", "Total", "Pago"]
@@ -4006,7 +4097,7 @@ with tab_recibos:
                     st.dataframe(
                         pd.DataFrame(_rch_rows),
                         column_config={"Importe ARS": st.column_config.NumberColumn(
-                            "Importe ARS", format="{:,.2f}")},
+                            "Importe ARS", format="%.2f")},
                         use_container_width=True, hide_index=True)
 
                     if not _rcp_data:
@@ -4046,8 +4137,8 @@ with tab_recibos:
                         _rci_df  = pd.DataFrame(_rci_rows)
                         _rci_cfg = {
                             "Sel":     st.column_config.CheckboxColumn("✓", width="small"),
-                            "Total":   st.column_config.NumberColumn("Total", format="{:,.2f}"),
-                            "Saldo":   st.column_config.NumberColumn("Saldo", format="{:,.2f}"),
+                            "Total":   st.column_config.NumberColumn("Total", format="%.2f"),
+                            "Saldo":   st.column_config.NumberColumn("Saldo", format="%.2f"),
                             "_id":     None,
                         }
                         _rci_disp = ["Sel", "Factura", "Fecha", "Vence",
