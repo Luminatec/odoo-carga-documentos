@@ -1985,35 +1985,26 @@ def get_pending_bills(models_url, uid, api_key):
 @st.cache_data(ttl=300, show_spinner=False)
 def get_payment_journals(models_url, uid, api_key):
     """
-    Diarios bancarios/caja en ARS (moneda vacía = ARS de la compañía) + MercadoPago.
-    No requiere bank_account_id para incluir bancos sin CBU configurado (ej: Banco Galicia).
+    Diarios bancarios/caja activos. Muestra todos — los extranjeros se identifican
+    con el código de moneda entre paréntesis. Sin filtros de exclusión.
     """
     try:
         m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
-        # Traer TODOS los bank/cash activos sin filtros extra — el filtrado
-        # de moneda se hace en Python para no depender del contexto de compañía
         rows = m.execute_kw(ODOO_DB, uid, api_key, "account.journal", "search_read",
             [[("type", "in", ["bank", "cash"]), ("active", "=", True)]],
-            {"fields": ["id", "name", "currency_id"], "order": "name asc",
-             "context": {"active_test": True}})
+            {"fields": ["id", "name", "currency_id"], "order": "name asc"})
         result = []
         for r in rows:
             cur      = r.get("currency_id")
             has_cur  = bool(cur and isinstance(cur, (list, tuple)) and cur[0])
-            cur_name = (cur[1] if has_cur else "").upper()
-            name_upper = r["name"].upper()
-            # Excluir solo monedas extranjeras claras (USD, EUR, BRL, etc.)
-            # Sin moneda = ARS de la empresa → incluir
-            # ARS, PESO, pesos → incluir
-            # MercadoPago → incluir siempre
-            is_foreign = has_cur and not any(k in cur_name for k in ("ARS","PESO","PESOS"))
-            is_mp      = "MERCADOPAGO" in name_upper or "MERCADO PAGO" in name_upper
-            if is_foreign and not is_mp:
-                continue
-            label = r["name"] if not has_cur or "ARS" in cur_name else f"{r['name']} ({cur[1]})"
-            result.append((r["id"], label, cur[1] if has_cur else "ARS"))
+            cur_name = cur[1] if has_cur else "ARS"
+            # Agregar moneda al label si es extranjera (facilita identificarlos)
+            cur_upper = cur_name.upper()
+            is_ars = not has_cur or any(k in cur_upper for k in ("ARS", "PESO"))
+            label  = r["name"] if is_ars else f"{r['name']} ({cur_name})"
+            result.append((r["id"], label, cur_name))
         return result   # list of (id, label, currency_name)
-    except Exception:
+    except Exception as e:
         return []
 
 def register_payment_wizard(models, uid, api_key, move_ids, payment_date, journal_id):
