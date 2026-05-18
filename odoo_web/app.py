@@ -276,7 +276,7 @@ def get_expense_products(models_url, uid, api_key):
     try:
         m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
         rows = m.execute_kw(ODOO_DB, uid, api_key, "product.product", "search_read",
-            [[("active", "=", True), ("purchase_ok", "=", True)]],
+            [[("active", "=", True), ("purchase_ok", "=", True), ("type", "=", "service")]],
             {"fields": ["id", "name", "default_code"], "order": "name asc", "limit": 500})
         result = []
         for r in rows:
@@ -694,7 +694,12 @@ def create_sale_order(models, uid, api_key, partner_id, note, lines, filename, f
             "price_unit":     _to_float(ln.get("precio_unit") or ln.get("precio", 0)),
         }
         if ln.get("product_id"):
-            line_vals["product_id"] = ln["product_id"]
+            _pid = ln["product_id"]
+            # product_id puede ser product.template (estrategias 1&2) o product.product (EAN13)
+            # Buscar variante por template_id; si no hay resultado ya es un variant ID correcto
+            _vv = call(models, uid, api_key, "product.product", "search",
+                       [[("product_tmpl_id", "=", _pid), ("active", "=", True)]], {"limit": 1})
+            line_vals["product_id"] = _vv[0] if _vv else _pid
         elif ln.get("producto"):
             prod_ids = call(models, uid, api_key, "product.product", "search",
                             [[("name", "ilike", ln["producto"])]], {"limit": 1})
