@@ -4091,13 +4091,11 @@ with tab_recibos:
                         {"Nro": c["nro"], "Banco": c["banco"],
                          "Fecha cobro": c["fecha_pago"],
                          "Estado": c["estado"],
-                         "Importe ARS": c["importe"]}
+                         "Importe ARS": fmt_ars(c["importe"])}
                         for c in _rchs
                     ]
                     st.dataframe(
                         pd.DataFrame(_rch_rows),
-                        column_config={"Importe ARS": st.column_config.NumberColumn(
-                            "Importe ARS", format="%.2f")},
                         use_container_width=True, hide_index=True)
 
                     if not _rcp_data:
@@ -4179,21 +4177,64 @@ with tab_recibos:
                             help="Pre-completado con el total de cheques. "
                                  "Ajustá si hay retenciones o NC.")
 
-                        _rc_ajuste = st.number_input(
-                            "Retenciones / NC / Ajuste (importe a deducir)",
-                            min_value=0.0, value=0.0,
-                            step=0.01, format="%.2f",
-                            key=f"rc_ajuste_{_rcuit}",
-                            help="Ingresá el total de retenciones, "
-                                 "notas de crédito u otros descuentos.")
+                        # ── Deducciones dinámicas (Retenciones / NC) ────────────
+                        _ded_key     = f"rc_deds_{_rcuit}"
+                        _ded_cnt_key = f"rc_deds_cnt_{_rcuit}"
+                        if _ded_key     not in st.session_state: st.session_state[_ded_key]     = []
+                        if _ded_cnt_key not in st.session_state: st.session_state[_ded_cnt_key] = 0
+
+                        # Cargar cuentas para conceptos (reutiliza cache de facturas)
+                        _rc_accts     = get_all_accounts(models_url, uid, api_key)
+                        _rc_acct_opts = ["— Seleccionar concepto —"] + [lbl for _, lbl in _rc_accts]
+
+                        _deds = st.session_state[_ded_key]
+                        if _deds:
+                            st.markdown("**Deducciones / Retenciones / NC:**")
+                        _to_remove = None
+                        for _ded in _deds:
+                            _uid = _ded["uid"]
+                            _dc1, _dc2, _dc3 = st.columns([5, 2, 1])
+                            _cpt_key = f"rc_ded_cpt_{_rcuit}_{_uid}"
+                            _mnt_key = f"rc_ded_mnt_{_rcuit}_{_uid}"
+                            _cur_idx = _ded.get("concepto_idx", 0)
+                            _new_cpt = _dc1.selectbox(
+                                "", options=_rc_acct_opts, index=_cur_idx,
+                                key=_cpt_key, label_visibility="collapsed")
+                            _new_mnt = _dc2.number_input(
+                                "", value=float(_ded.get("monto", 0.0)),
+                                min_value=0.0, step=0.01, format="%.2f",
+                                key=_mnt_key, label_visibility="collapsed")
+                            if _dc3.button("✕", key=f"rc_rm_{_rcuit}_{_uid}"):
+                                _to_remove = _uid
+                            _cpt_idx = _rc_acct_opts.index(_new_cpt) if _new_cpt in _rc_acct_opts else 0
+                            _acct_id = next((aid for aid, albl in _rc_accts if albl == _new_cpt), None)
+                            _ded.update({"concepto": _new_cpt, "concepto_idx": _cpt_idx,
+                                         "account_id": _acct_id, "monto": _new_mnt})
+
+                        if _to_remove is not None:
+                            st.session_state[_ded_key] = [d for d in _deds if d["uid"] != _to_remove]
+                            st.rerun()
+
+                        if st.button("➕ Agregar retención / NC", key=f"rc_add_ded_{_rcuit}"):
+                            _new_uid = st.session_state[_ded_cnt_key] + 1
+                            st.session_state[_ded_cnt_key] = _new_uid
+                            st.session_state[_ded_key].append(
+                                {"uid": _new_uid, "monto": 0.0, "concepto_idx": 0,
+                                 "concepto": "", "account_id": None})
+                            st.rerun()
+
+                        _rc_ajuste_total = sum(
+                            d.get("monto", 0.0) for d in st.session_state[_ded_key])
 
                         _rc_memo = st.text_input(
                             "Referencia / Memo",
                             value=f"Recibo cheques — {_rchs[0]['nombre']}",
                             key=f"rc_memo_{_rcuit}")
 
-                        _rc_neto = _rc_amount - _rc_ajuste
+                        _rc_neto = _rc_amount - _rc_ajuste_total
                         _rc_info = f"**Importe neto:** ARS {fmt_ars(_rc_neto)}"
+                        if _rc_ajuste_total > 0:
+                            _rc_info += f"  ·  Deducciones: ARS {fmt_ars(_rc_ajuste_total)}"
                         if _rcsel_ids:
                             _rc_info += (
                                 f"  ·  {len(_rcsel_ids)} factura(s) seleccionada(s) "
