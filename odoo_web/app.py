@@ -1985,8 +1985,8 @@ def get_pending_bills(models_url, uid, api_key):
 @st.cache_data(ttl=300, show_spinner=False)
 def get_payment_journals(models_url, uid, api_key):
     """
-    Todos los diarios de tipo bank/cash activos en Odoo.
-    La moneda se muestra entre paréntesis cuando no es ARS.
+    Diarios bancarios/caja en ARS (moneda vacía = ARS de la compañía) + MercadoPago.
+    No requiere bank_account_id para incluir bancos sin CBU configurado (ej: Banco Galicia).
     """
     try:
         m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
@@ -1997,6 +1997,12 @@ def get_payment_journals(models_url, uid, api_key):
         for r in rows:
             cur = r.get("currency_id")
             cur_name = cur[1] if cur and isinstance(cur, (list, tuple)) and len(cur) > 1 else "ARS"
+            name_upper = r["name"].upper()
+            # Incluir solo ARS (moneda vacía = ARS de la empresa) + MercadoPago por nombre
+            is_ars = (cur_name == "ARS")
+            is_mp  = "MERCADOPAGO" in name_upper or "MERCADO PAGO" in name_upper
+            if not (is_ars or is_mp):
+                continue
             label = r["name"] if cur_name == "ARS" else f"{r['name']} ({cur_name})"
             result.append((r["id"], label, cur_name))
         return result   # list of (id, label, currency_name)
@@ -4375,10 +4381,4 @@ with tab_history:
         st.caption("Todavía no se procesó ningún documento en esta sesión.")
     else:
         import pandas as _pd_hist
-        _hdf = _pd_hist.DataFrame(_hist)
-        _hcols = [c for c in ["tipo","archivo","estado","id","url"] if c in _hdf.columns]
-        _hdf_disp = _hdf[_hcols].copy()
-        if "url" in _hdf_disp.columns:
-            _hdf_disp["url"] = _hdf_disp["url"].apply(
-                lambda u: f"[Abrir]({u})" if u else "")
-        st.dataframe(_hdf_disp, use_container_width=True, hide_index=True)
+        _hdf 
