@@ -980,13 +980,17 @@ def extract_pdf_fields(file_bytes):
             break
 
     # ── NETO GRAVADO ──────────────────────────────────────────────────────
-    # NOTA: los patrones requieren ":" después de Subtotal para no matchear
-    # encabezados de columna en tablas (ej: "... Subtotal\n1,00 ...")
     neto_pats = [
+        # 1. Etiquetas explícitas (más seguras)
         r"(?:Subtotal\s+Gravado|Neto\s+Gravado|Base\s+Imponible)[:\s$]*\$?\s*([\d.,]+)",
-        r"(?:SUBTOTAL|Subtotal)\s*:\s*\$?\s*([\d.,]+)",   # "Subtotal: $X" con dos puntos
-        r"(?:SUBTOTAL|Subtotal)\s{2,}\$\s*([\d.,]+)",      # "Subtotal    $X" espacios + $
-        r"(?:Gravado)\s*:\s*\$?\s*([\d.,]+)",              # "Gravado: $X" con dos puntos
+        r"(?:Gravado)\s*:\s*\$?\s*([\d.,]+)",
+        # 2. "Subtotal:" con dos puntos
+        r"(?:SUBTOTAL|Subtotal)\s*:\s*\$?\s*([\d.,]+)",
+        # 3. "Subtotal" + newline opcional + "$" + monto (Odoo/columnas separadas en PDF)
+        r"(?:SUBTOTAL|Subtotal)[^\n]*\n?\s*\$\s*([\d.,]+)",
+        # 4. "Subtotal" + espacios + monto con separadores de miles (sin $)
+        #    Exige X.XXX,XX o X,XXX.XX para no capturar "1,00" de tablas
+        r"(?:SUBTOTAL|Subtotal)\s+([\d]{1,3}(?:[.,][\d]{3})+(?:[.,][\d]{2}))",
     ]
     for pat in neto_pats:
         m = re.search(pat, text, re.IGNORECASE | re.MULTILINE)
