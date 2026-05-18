@@ -217,50 +217,53 @@ def get_all_accounts(models_url, uid, api_key):
 def get_partner_default_account(models_url, uid, api_key, partner_id):
     """Devuelve (account_id, 'CODE  Name') de la cuenta de gasto por defecto del proveedor.
     Estrategia:
-      1. product.supplierinfo donde partner_id = partner_id -> product_tmpl_id
-         -> property_account_expense_id del product.template
-      2. Fallback: ultima factura de proveedor confirmada del partner -> primera linea con cuenta
+      1. product.supplierinfo donde partner_id -> product_tmpl_id
+         -> property_account_expense_id del product.template (pestaña Contabilidad en Odoo)
+      2. Fallback: account de la categoria del producto (product.category)
+    Solo usa cuentas configuradas en el producto — NO recurre a facturas históricas.
     Retorna None si no se puede determinar."""
     try:
         m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
 
-        # --- Estrategia 1: producto configurado para el proveedor ---
+        # --- Estrategia 1: producto del proveedor → cuenta de gasto del producto ---
         sinfo = m.execute_kw(ODOO_DB, uid, api_key, "product.supplierinfo", "search_read",
             [[("partner_id", "=", partner_id)]],
-            {"fields": ["product_tmpl_id"], "limit": 1, "order": "id asc"})
-        if sinfo:
-            tmpl_id = (sinfo[0].get("product_tmpl_id") or [None])[0]
-            if tmpl_id:
-                tmpls = m.execute_kw(ODOO_DB, uid, api_key, "product.template", "read",
-                    [[tmpl_id]],
-                    {"fields": ["property_account_expense_id"]})
-                if tmpls:
-                    acct = tmpls[0].get("property_account_expense_id")
-                    if acct and isinstance(acct, (list, tuple)) and acct[0]:
-                        # Leer codigo y nombre de la cuenta
-                        accts = m.execute_kw(ODOO_DB, uid, api_key, "account.account", "read",
-                            [[acct[0]]], {"fields": ["code", "name"]})
-                        if accts:
-                            return (accts[0]["id"], f"{accts[0]['code']}  {accts[0]['name']}")
+            {"fields": ["product_tmpl_id"], "limit": 5, "order": "id asc"})
 
-        # --- Estrategia 2: ultima factura de proveedor del partner ---
-        bills = m.execute_kw(ODOO_DB, uid, api_key, "account.move", "search_read",
-            [[("move_type", "=", "in_invoice"),
-              ("state", "=", "posted"),
-              ("partner_id", "=", partner_id)]],
-            {"fields": ["id"], "order": "invoice_date desc", "limit": 1})
-        if bills:
-            lines = m.execute_kw(ODOO_DB, uid, api_key, "account.move.line", "search_read",
-                [[("move_id", "=", bills[0]["id"]),
-                  ("display_type", "=", "product")]],
-                {"fields": ["account_id"], "limit": 1})
-            if lines:
-                acct = lines[0].get("account_id")
-                if acct and isinstance(acct, (list, tuple)) and acct[0]:
-                    accts = m.execute_kw(ODOO_DB, uid, api_key, "account.account", "read",
-                        [[acct[0]]], {"fields": ["code", "name"]})
-                    if accts:
-                        return (accts[0]["id"], f"{accts[0]['code']}  {accts[0]['name']}")
+        for si in (sinfo or []):
+            tmpl_id = (si.get("product_tmpl_id") or [None])[0]
+            if not tmpl_id:
+                continue
+            # Leer cuenta de gasto Y categoría (para fallback)
+            tmpls = m.execute_kw(ODOO_DB, uid, api_key, "product.template", "read",
+                [[tmpl_id]],
+                {"fields": ["property_account_expense_id", "categ_id"]})
+            if not tmpls:
+                continue
+            tmpl = tmpls[0]
+
+            # property_account_expense_id (pestaña Contabilidad del producto)
+            acct = tmpl.get("property_account_expense_id")
+            if acct and isinstance(acct, (list, tuple)) and acct[0]:
+                accts = m.execute_kw(ODOO_DB, uid, api_key, "account.account", "read",
+                    [[acct[0]]], {"fields": ["code", "name", "deprecated"]})
+                if accts and not accts[0].get("deprecated"):
+                    return (accts[0]["id"], f"{accts[0]['code']}  {accts[0]['name']}")
+
+            # Fallback: cuenta de gasto de la categoria del producto
+            categ = tmpl.get("categ_id")
+            categ_id = (categ[0] if isinstance(categ, (list, tuple)) else categ) if categ else None
+            if categ_id:
+                cats = m.execute_kw(ODOO_DB, uid, api_key, "product.category", "read",
+                    [[categ_id]],
+                    {"fields": ["property_account_expense_categ_id"]})
+                if cats:
+                    categ_acct = cats[0].get("property_account_expense_categ_id")
+                    if categ_acct and isinstance(categ_acct, (list, tuple)) and categ_acct[0]:
+                        accts = m.execute_kw(ODOO_DB, uid, api_key, "account.account", "read",
+                            [[categ_acct[0]]], {"fields": ["code", "name", "deprecated"]})
+                        if accts and not accts[0].get("deprecated"):
+                            return (accts[0]["id"], f"{accts[0]['code']}  {accts[0]['name']}")
     except Exception:
         pass
     return None
@@ -913,17 +916,26 @@ def extract_pdf_fields(file_bytes):
             break
 
     # ── NETO GRAVADO ──────────────────────────────────────────────────────
+    # NOTA: los patrones requieren ":" después de Subtotal para no matchear
+    # encabezados de columna en tablas (ej: "... Subtotal\n1,00 ...")
     neto_pats = [
         r"(?:Subtotal\s+Gravado|Neto\s+Gravado|Base\s+Imponible)[:\s$]*\$?\s*([\d.,]+)",
-        r"SUBTOTAL\s+\$\s*([\d.,]+)",                      # SUBTOTAL $ amount
-        r"SUBTOTAL\s+([\d.,]+)(?:\s|$)",                   # SUBTOTAL amount
-        r"(?:Gravado|Subtotal)[:\s$]*\$?\s*([\d.,]+)",
+        r"(?:SUBTOTAL|Subtotal)\s*:\s*\$?\s*([\d.,]+)",   # "Subtotal: $X" con dos puntos
+        r"(?:Gravado)\s*:\s*\$?\s*([\d.,]+)",              # "Gravado: $X" con dos puntos
     ]
     for pat in neto_pats:
         m = re.search(pat, text, re.IGNORECASE | re.MULTILINE)
         if m:
             fields["neto"] = normalize_amount(m.group(1).strip())
             break
+
+    # Factura C / Monotributo: sin IVA, neto = importe total
+    if not fields["neto"] and fields["total"]:
+        _is_monotrib = bool(re.search(
+            r"(?:Responsable\s+Monotributo|MONOTRIBUTO|Factura\s+C\b|COD\.?\s*011)",
+            text, re.IGNORECASE))
+        if _is_monotrib:
+            fields["neto"] = fields["total"]
 
     # ── IVA ───────────────────────────────────────────────────────────────
     iva_pats = [
