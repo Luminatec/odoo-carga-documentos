@@ -1890,16 +1890,89 @@ def register_expense_payment(models, uid, api_key, sheet_id, payment_date, journ
     except Exception as e:
         return False, str(e)
 
-_tabs = ["🧾 Facturas de proveedores", "📦 Pedidos de clientes", "🏦 Órdenes de Pago"]
+
+@st.cache_data(ttl=60, show_spinner=False)
+def search_partners_by_cuits(models_url, uid, api_key, cuits_tuple):
+    """Busca socios en Odoo por tupla de CUITs. Retorna dict {cuit: (id, name)}."""
+    try:
+        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        norm = [str(c).replace("-", "").replace(" ", "").strip() for c in cuits_tuple]
+        rows = m.execute_kw(ODOO_DB, uid, api_key, "res.partner", "search_read",
+            [[("vat", "in", norm), ("active", "=", True)]],
+            {"fields": ["id", "name", "vat"], "limit": 300})
+        result = {}
+        for r in rows:
+            vat = (r.get("vat") or "").replace("-", "").replace(" ", "").strip()
+            if vat in norm:
+                result[vat] = (r["id"], r["name"])
+        return result
+    except Exception:
+        return {}
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_customer_unpaid_invoices(models_url, uid, api_key, partner_ids_tuple):
+    """Facturas de cliente sin pagar (posted, not_paid/partial)."""
+    try:
+        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        rows = m.execute_kw(ODOO_DB, uid, api_key, "account.move", "search_read",
+            [[("move_type", "=", "out_invoice"),
+              ("state", "=", "posted"),
+              ("payment_state", "in", ["not_paid", "partial"]),
+              ("partner_id", "in", list(partner_ids_tuple))]],
+            {"fields": ["id", "name", "invoice_date", "invoice_date_due",
+                        "amount_total", "amount_residual", "currency_id", "partner_id"],
+             "order": "invoice_date asc", "limit": 300})
+        return rows
+    except Exception:
+        return []
+
+def register_customer_payment(models, uid, api_key,
+                               partner_id, amount, currency_id,
+                               payment_date, journal_id,
+                               move_ids=None, memo=""):
+    """Registra un recibo de cobro de cliente.
+    Si move_ids, usa wizard (reconcilia con facturas). Sin move_ids, pago a cuenta."""
+    try:
+        if move_ids:
+            ctx = {"active_model": "account.move",
+                   "active_ids": move_ids, "active_id": move_ids[0]}
+            vals = {"payment_date": payment_date, "journal_id": journal_id,
+                    "amount": float(amount)}
+            wiz_id = models.execute_kw(ODOO_DB, uid, api_key,
+                "account.payment.register", "create", [vals], {"context": ctx})
+            result = models.execute_kw(ODOO_DB, uid, api_key,
+                "account.payment.register", "action_create_payments",
+                [[wiz_id]], {"context": ctx})
+            return True, result
+        else:
+            vals = {
+                "payment_type": "inbound",
+                "partner_type": "customer",
+                "partner_id":   partner_id,
+                "amount":       float(amount),
+                "currency_id":  currency_id,
+                "date":         payment_date,
+                "journal_id":   journal_id,
+                "ref":          memo or "",
+            }
+            pay_id = models.execute_kw(ODOO_DB, uid, api_key,
+                "account.payment", "create", [vals])
+            models.execute_kw(ODOO_DB, uid, api_key,
+                "account.payment", "action_post", [[pay_id]])
+            return True, pay_id
+    except Exception as e:
+        return False, str(e)
+
+
+_tabs = ["🧾 Facturas de proveedores", "📦 Pedidos de clientes", "🏦 Órdenes de Pago", "💰 Recibos de Cobro"]
 if is_admin:
     _tabs.append("🛳️ Importaciones")
 _tabs.append("📋 Historial de sesión")
 _tab_objs = st.tabs(_tabs)
 if is_admin:
-    tab_bills, tab_orders, tab_op, tab_import, tab_history = _tab_objs
+    tab_bills, tab_orders, tab_op, tab_recibos, tab_import, tab_history = _tab_objs
 else:
-    tab_bills, tab_orders, tab_op, tab_history = _tab_objs
-    tab_import = None
+    tab_bills, tab_orders, tab_op, tab_recibos, tab_history = _tab_objs
     tab_import = None
 
 
@@ -3594,6 +3667,333 @@ with tab_op:
             f"Para cargar nuevos gastos o aprobar notas pendientes, "
             f"usá el [módulo de Gastos en Odoo]"
             f"({ODOO_URL}/odoo/expenses) directamente.")
+
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB — RECIBOS DE COBRO
+# ─────────────────────────────────────────────────────────────────────────────
+with tab_recibos:
+    from datetime import date as _rc_date_cls
+
+    st.subheader("💰 Recibos de Cobro")
+
+    # ── helpers locales ─────────────────────────────────────────────────────
+    def _rc_parse_monto(val):
+        s = (str(val)
+             .replace("$", "").replace("\xa0", "").replace(" ", "")
+             .replace(".", "").replace(",", "."))
+        try:
+            return float(s)
+        except Exception:
+            return 0.0
+
+    def _rc_parse_cheques(file_bytes, filename):
+        fname = filename.lower()
+        if fname.endswith(".csv"):
+            try:
+                text = file_bytes.decode("latin-1")
+            except Exception:
+                text = file_bytes.decode("utf-8", errors="replace")
+            lines = [l for l in text.splitlines() if l.strip()]
+            if len(lines) < 3:
+                return []
+            rows = []
+            for line in lines[2:]:
+                parts = [p.strip() for p in line.split(";")]
+                while len(parts) < 40:
+                    parts.append("")
+                estado = parts[7].lower()
+                # Col D (idx 3) = CUIT del que nos lo entrego (directo)
+                # Col N (idx 13) = CUIT del beneficiario original (endosado)
+                if "endoso" in estado:
+                    cuit   = parts[13]
+                    nombre = parts[12]
+                else:
+                    cuit   = parts[3]
+                    nombre = parts[2]
+                cuit = str(cuit).replace("-", "").replace(" ", "").strip()
+                if not cuit or len(cuit) < 8:
+                    continue
+                rows.append({
+                    "nro":       parts[0],
+                    "nombre":    nombre.strip(),
+                    "cuit":      cuit,
+                    "fecha_pago": parts[4],
+                    "importe":   _rc_parse_monto(parts[6]),
+                    "estado":    parts[7],
+                    "banco":     parts[8],
+                })
+            return rows
+        elif fname.endswith((".xlsx", ".xls")):
+            try:
+                _dfx = pd.read_excel(BytesIO(file_bytes), header=1, dtype=str).fillna("")
+            except Exception as _xe:
+                st.error(f"No se pudo leer el Excel: {_xe}")
+                return []
+            rows = []
+            for _, _xr in _dfx.iterrows():
+                parts = list(_xr.values)
+                while len(parts) < 40:
+                    parts.append("")
+                estado = str(parts[7]).lower()
+                if "endoso" in estado:
+                    cuit   = str(parts[13])
+                    nombre = str(parts[12])
+                else:
+                    cuit   = str(parts[3])
+                    nombre = str(parts[2])
+                cuit = cuit.replace("-", "").replace(" ", "").strip()
+                if not cuit or len(cuit) < 8:
+                    continue
+                rows.append({
+                    "nro":       str(parts[0]),
+                    "nombre":    nombre.strip(),
+                    "cuit":      cuit,
+                    "fecha_pago": str(parts[4]),
+                    "importe":   _rc_parse_monto(str(parts[6])),
+                    "estado":    str(parts[7]),
+                    "banco":     str(parts[8]),
+                })
+            return rows
+        else:
+            st.error("Formato no soportado. Subí un archivo CSV o XLSX del home banking.")
+            return []
+
+    # ── journals (reutiliza los mismos de Ordenes de Pago) ──────────────────
+    _rc_jours = get_payment_journals(models_url, uid, api_key)
+    if _rc_jours:
+        _rc_jour_opts = {label: jid for jid, label, _ in _rc_jours}
+        _rc_jour_cur  = {label: cur for _,   label, cur in _rc_jours}
+    else:
+        _rc_jour_opts, _rc_jour_cur = {}, {}
+
+    # ── uploader ────────────────────────────────────────────────────────────
+    _rc_file = st.file_uploader(
+        "Subí el archivo de cheques exportado del home banking (CSV o XLSX)",
+        type=["csv", "xlsx", "xls"], key="rc_file_uploader",
+        help="Descargalo desde tu home banking y subilo sin modificar.")
+
+    if _rc_file is None:
+        st.caption(
+            "Subí el archivo del home banking para procesar los cheques recibidos "
+            "y generar los recibos de cobro en Odoo.")
+    else:
+        _rc_bytes   = _rc_file.read()
+        _rc_cheques = _rc_parse_cheques(_rc_bytes, _rc_file.name)
+
+        if not _rc_cheques:
+            st.error(
+                "No se encontraron cheques en el archivo. "
+                "Verificá que sea el export correcto del home banking.")
+        else:
+            # Group by CUIT, preserving order of first appearance
+            _rc_groups = {}
+            for _ch in _rc_cheques:
+                _rc_groups.setdefault(_ch["cuit"], []).append(_ch)
+
+            _rc_total_ars = sum(c["importe"] for c in _rc_cheques)
+            st.info(
+                f"**{len(_rc_cheques)} cheque(s)** de **{len(_rc_groups)} cliente(s)** "
+                f"— Total ARS {fmt_ars(_rc_total_ars)}")
+
+            # ── Cargar datos de Odoo para todos los CUITs a la vez ──────────
+            _rc_all_cuits = tuple(sorted(_rc_groups.keys()))
+            with st.spinner("Buscando clientes en Odoo..."):
+                _rc_partner_map = search_partners_by_cuits(
+                    models_url, uid, api_key, _rc_all_cuits)
+
+            _rc_pids_found = tuple(pid for pid, _ in _rc_partner_map.values())
+            if _rc_pids_found:
+                with st.spinner("Cargando facturas pendientes de cobro..."):
+                    _rc_all_inv = get_customer_unpaid_invoices(
+                        models_url, uid, api_key, _rc_pids_found)
+            else:
+                _rc_all_inv = []
+
+            # Index invoices by partner_id
+            _rc_inv_by_pid = {}
+            for _rci in _rc_all_inv:
+                _rpid = (_rci.get("partner_id") or [0])[0]
+                _rc_inv_by_pid.setdefault(_rpid, []).append(_rci)
+
+            if st.button("🔄 Actualizar desde Odoo", key="rc_refresh"):
+                search_partners_by_cuits.clear()
+                get_customer_unpaid_invoices.clear()
+                st.rerun()
+
+            st.divider()
+
+            # ── Un expander por cliente ──────────────────────────────────────
+            for _rcuit, _rchs in _rc_groups.items():
+                _rcp_data  = _rc_partner_map.get(_rcuit)
+                _rctotal   = sum(c["importe"] for c in _rchs)
+                _rc_tag    = "" if _rcp_data else "  ⚠️ no encontrado en Odoo"
+                _rc_exp_lbl = (
+                    f"👤 {_rchs[0]['nombre']} — CUIT {_rcuit} — "
+                    f"{len(_rchs)} cheque(s) · ARS {fmt_ars(_rctotal)}{_rc_tag}")
+
+                with st.expander(_rc_exp_lbl, expanded=(len(_rc_groups) == 1)):
+
+                    # Tabla de cheques
+                    _rch_rows = [
+                        {"Nro": c["nro"], "Banco": c["banco"],
+                         "Fecha cobro": c["fecha_pago"],
+                         "Estado": c["estado"],
+                         "Importe ARS": c["importe"]}
+                        for c in _rchs
+                    ]
+                    st.dataframe(
+                        pd.DataFrame(_rch_rows),
+                        column_config={"Importe ARS": st.column_config.NumberColumn(
+                            "Importe ARS", format="{:,.2f}")},
+                        use_container_width=True, hide_index=True)
+
+                    if not _rcp_data:
+                        st.warning(
+                            f"CUIT **{_rcuit}** no encontrado en Odoo. "
+                            "Verificá que el cliente esté registrado con ese CUIT en el campo VAT.")
+                        continue
+
+                    _rc_pid, _rc_pname = _rcp_data
+                    _rc_invs = _rc_inv_by_pid.get(_rc_pid, [])
+                    st.markdown(f"**Cliente Odoo:** {_rc_pname} (ID {_rc_pid})")
+
+                    # ── Selector de facturas ─────────────────────────────────
+                    _rcsel_ids  = []
+                    _rcsel_saldo = 0.0
+                    if not _rc_invs:
+                        st.info(
+                            "No hay facturas pendientes para este cliente. "
+                            "El cobro se registrará como pago a cuenta.")
+                    else:
+                        st.markdown("**Seleccioná las facturas a cobrar:**")
+                        _rci_rows = []
+                        for _rci in _rc_invs:
+                            _rcic  = (_rci.get("currency_id") or [0, "ARS"])[1]
+                            _rcres = float(_rci.get("amount_residual") or 0)
+                            _rcto  = float(_rci.get("amount_total") or 0)
+                            _rci_rows.append({
+                                "Sel":     False,
+                                "Factura": _rci.get("name") or f"ID {_rci['id']}",
+                                "Fecha":   str(_rci.get("invoice_date") or ""),
+                                "Vence":   str(_rci.get("invoice_date_due") or ""),
+                                "Moneda":  _rcic,
+                                "Total":   _rcto,
+                                "Saldo":   _rcres,
+                                "_id":     _rci["id"],
+                            })
+                        _rci_df  = pd.DataFrame(_rci_rows)
+                        _rci_cfg = {
+                            "Sel":     st.column_config.CheckboxColumn("✓", width="small"),
+                            "Total":   st.column_config.NumberColumn("Total", format="{:,.2f}"),
+                            "Saldo":   st.column_config.NumberColumn("Saldo", format="{:,.2f}"),
+                            "_id":     None,
+                        }
+                        _rci_disp = ["Sel", "Factura", "Fecha", "Vence",
+                                     "Moneda", "Total", "Saldo"]
+                        _rci_edited = st.data_editor(
+                            _rci_df[_rci_disp + ["_id"]],
+                            column_config=_rci_cfg,
+                            column_order=_rci_disp,
+                            use_container_width=True, hide_index=True,
+                            key=f"rc_inv_{_rcuit}",
+                            disabled=[c for c in _rci_disp if c != "Sel"],
+                        )
+                        _rcsel      = _rci_edited[_rci_edited["Sel"] == True]
+                        _rcsel_ids  = [int(r) for r in _rcsel["_id"].tolist()]
+                        _rcsel_saldo = float(_rcsel["Saldo"].sum())
+
+                    # ── Formulario de pago ────────────────────────────────────
+                    st.markdown("#### Datos del recibo")
+                    if not _rc_jour_opts:
+                        st.error("No se encontraron diarios de pago en Odoo.")
+                    else:
+                        _rcc1, _rcc2, _rcc3 = st.columns([2, 1, 1])
+                        _rc_journal = _rcc1.selectbox(
+                            "Cuenta destino", list(_rc_jour_opts.keys()),
+                            key=f"rc_jour_{_rcuit}")
+                        _rc_date = _rcc2.date_input(
+                            "Fecha de cobro",
+                            value=_rc_date_cls.today(),
+                            key=f"rc_date_{_rcuit}")
+                        _rc_jour_id = _rc_jour_opts[_rc_journal]
+
+                        _rc_amount = _rcc3.number_input(
+                            "Importe cobrado (ARS)",
+                            min_value=0.0,
+                            value=float(_rctotal),
+                            step=0.01, format="%.2f",
+                            key=f"rc_amt_{_rcuit}",
+                            help="Pre-completado con el total de cheques. "
+                                 "Ajustá si hay retenciones o NC.")
+
+                        _rc_ajuste = st.number_input(
+                            "Retenciones / NC / Ajuste (importe a deducir)",
+                            min_value=0.0, value=0.0,
+                            step=0.01, format="%.2f",
+                            key=f"rc_ajuste_{_rcuit}",
+                            help="Ingresá el total de retenciones, "
+                                 "notas de crédito u otros descuentos.")
+
+                        _rc_memo = st.text_input(
+                            "Referencia / Memo",
+                            value=f"Recibo cheques — {_rchs[0]['nombre']}",
+                            key=f"rc_memo_{_rcuit}")
+
+                        _rc_neto = _rc_amount - _rc_ajuste
+                        _rc_info = f"**Importe neto:** ARS {fmt_ars(_rc_neto)}"
+                        if _rcsel_ids:
+                            _rc_info += (
+                                f"  ·  {len(_rcsel_ids)} factura(s) seleccionada(s) "
+                                f"(saldo ARS {fmt_ars(_rcsel_saldo)})")
+                        else:
+                            _rc_info += "  ·  Sin facturas → se registra como pago a cuenta"
+                        st.info(_rc_info)
+
+                        _rc_reg_btn = st.button(
+                            f"💵 Registrar Recibo en Odoo",
+                            type="primary", key=f"rc_btn_{_rcuit}")
+
+                        if _rc_reg_btn:
+                            if _rc_neto <= 0:
+                                st.error("El importe neto debe ser mayor a cero.")
+                            else:
+                                _rc_date_str = _rc_date.strftime("%Y-%m-%d")
+                                # Obtener currency_id de la primera factura seleccionada
+                                _rc_cur_id = 1  # ARS por defecto
+                                if _rcsel_ids and _rc_invs:
+                                    _rci_first = next(
+                                        (i for i in _rc_invs
+                                         if i["id"] == _rcsel_ids[0]), None)
+                                    if _rci_first:
+                                        _rcurr = _rci_first.get("currency_id")
+                                        if _rcurr and isinstance(_rcurr, (list, tuple)):
+                                            _rc_cur_id = _rcurr[0]
+                                with st.spinner("Registrando cobro en Odoo..."):
+                                    _rc_ok, _rc_res = register_customer_payment(
+                                        models, uid, api_key,
+                                        _rc_pid, _rc_neto, _rc_cur_id,
+                                        _rc_date_str, _rc_jour_id,
+                                        move_ids=_rcsel_ids if _rcsel_ids else None,
+                                        memo=_rc_memo)
+                                if _rc_ok:
+                                    st.success(
+                                        f"Recibo registrado para **{_rc_pname}** "
+                                        f"— ARS {fmt_ars(_rc_neto)}")
+                                    search_partners_by_cuits.clear()
+                                    get_customer_unpaid_invoices.clear()
+                                    st.info(
+                                        "Presioná 🔄 Actualizar para ver "
+                                        "el estado actualizado.")
+                                else:
+                                    st.error(f"Error al registrar en Odoo: {_rc_res}")
+
+    st.divider()
+    st.caption(
+        f"Para emitir facturas de venta o gestionar cobros manualmente, "
+        f"usá [Odoo Ventas]({ODOO_URL}/odoo/accounting/customers/invoices) directamente.")
 
 
 
