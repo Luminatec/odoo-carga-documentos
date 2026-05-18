@@ -1985,15 +1985,13 @@ def get_pending_bills(models_url, uid, api_key):
 @st.cache_data(ttl=300, show_spinner=False)
 def get_payment_journals(models_url, uid, api_key):
     """
-    Solo diarios bancarios con cuenta bancaria real (bank_account_id != False).
-    Filtra cajas chicas, wallets virtuales y procesadores de pago extranjeros.
+    Todos los diarios de tipo bank/cash activos en Odoo.
     La moneda se muestra entre paréntesis cuando no es ARS.
     """
     try:
         m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
         rows = m.execute_kw(ODOO_DB, uid, api_key, "account.journal", "search_read",
-            [[("type", "=", "bank"),
-              ("bank_account_id", "!=", False)]],
+            [[("type", "in", ["bank", "cash"])]],
             {"fields": ["id", "name", "currency_id"], "order": "name asc"})
         result = []
         for r in rows:
