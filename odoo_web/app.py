@@ -2230,12 +2230,23 @@ with tab_bills:
             _bill_accounts = get_all_accounts(models_url, uid, api_key)
             _acct_labels   = ["— Sin cuenta —"] + [lbl for _, lbl in _bill_accounts]
 
-            # ── Pre-lookup de proveedor por CUIT (fuera del form, en tiempo real) ─
+            # ── CUIT editable en tiempo real (fuera del form) ────────────────────
             _cuit_raw    = extracted.get("cuit", "")
             _cond_venta  = extracted.get("condiciones_venta", "")
             _dias_pago   = extracted.get("dias_pago")
             _vto_auto    = extracted.get("fecha_vencimiento", "")
 
+            _cuit_edit_key = f"bill_cuit_edit_{uf.name}"
+            if _cuit_edit_key not in st.session_state:
+                st.session_state[_cuit_edit_key] = _cuit_raw
+
+            _cuit_effective = st.text_input(
+                "CUIT del proveedor",
+                key=_cuit_edit_key,
+                placeholder="30-12345678-9",
+                help="Detectado automáticamente del PDF. Corregilo si es necesario.",
+            )
+            _cuit_raw  = _cuit_effective.strip() if _cuit_effective else ""
             _cuit_norm = _cuit_raw.replace("-","").replace(" ","").strip()
             _ss_vendor_key = f"vendor_created_{_cuit_norm}"
 
@@ -2272,11 +2283,19 @@ with tab_bills:
             _analytic_accounts = get_analytic_accounts(models_url, uid, api_key)
             _analytic_labels   = ["— Sin centro de costo —"] + [lbl for _, lbl in _analytic_accounts]
 
+            # ── Estado del proveedor + opción de crear nuevo ──────────────────────
+            _create_new_vend_key = f"bill_create_new_vend_{uf.name}"
             if _partner_preloaded:
                 st.info(f"🏢 Proveedor detectado por CUIT: **{_partner_preloaded[1]}**")
             elif _cuit_raw:
                 st.warning(f"⚠️ CUIT **{_cuit_raw}** no encontrado en Odoo.")
-                with st.expander("➕ Crear proveedor en Odoo", expanded=True):
+
+            # Checkbox para crear nuevo proveedor (aparece si no hay proveedor detectado)
+            if not _partner_preloaded:
+                st.checkbox("➕ Crear nuevo proveedor en Odoo", key=_create_new_vend_key)
+
+            if st.session_state.get(_create_new_vend_key):
+                with st.expander("📝 Datos del nuevo proveedor", expanded=True):
                     with st.form(key=f"new_vendor_form_{uf.name}"):
                         st.markdown("Completá los datos mínimos para dar de alta el proveedor:")
                         _nv_c1, _nv_c2 = st.columns(2)
@@ -2302,7 +2321,9 @@ with tab_bills:
                                     street=_nv_street.strip(),
                                     phone=_nv_phone.strip(),
                                     email_addr=_nv_email.strip())
-                                st.session_state[_ss_vendor_key] = (_nv_pid, _nv_name.strip())
+                                _cuit_for_key = _nv_cuit.strip().replace("-","")
+                                st.session_state[f"vendor_created_{_cuit_for_key}"] = (_nv_pid, _nv_name.strip())
+                                st.session_state[_create_new_vend_key] = False
                                 st.success(f"✅ Proveedor **{_nv_name}** creado (ID {_nv_pid}). Recargando...")
                                 st.rerun()
                             except Exception as _nv_e:
@@ -2327,11 +2348,9 @@ with tab_bills:
                 )
 
             with st.form(key=f"bill_form_{uf.name}"):
+                # CUIT ya está fuera del form para lookup en tiempo real
+                cuit_i = _cuit_raw
                 c1, c2 = st.columns(2)
-                cuit_i  = c1.text_input("CUIT del proveedor",
-                            value=_cuit_raw,
-                            placeholder="30-12345678-9",
-                            help="El sistema buscará al proveedor por CUIT en Odoo")
                 ref_i   = c2.text_input("N° de factura",
                             value=extracted.get("numero",""))
                 fecha_i = c1.text_input("Fecha emisión (AAAA-MM-DD)",
@@ -2562,6 +2581,31 @@ with tab_orders:
                                 st.warning("Razón social y CUIT son obligatorios.")
             else:
                 st.info("📌 Ingresá el CUIT del cliente para continuar.")
+                # Checkbox para crear cliente sin CUIT previo
+                _xl_create_no_cuit_key = f"xl_create_no_cuit_{uf.name}"
+                st.checkbox("➕ Crear nuevo cliente sin buscar por CUIT", key=_xl_create_no_cuit_key)
+                if st.session_state.get(_xl_create_no_cuit_key):
+                    with st.expander("📝 Datos del nuevo cliente", expanded=True):
+                        _xnc1b, _xnc2b = st.columns(2)
+                        _xnc_name_b   = _xnc1b.text_input("Razón social *", key=f"xl_ncb_name_{uf.name}")
+                        _xnc_cuit_b   = _xnc2b.text_input("CUIT *", key=f"xl_ncb_cuit_{uf.name}", placeholder="30-12345678-9")
+                        _xnc_street_b = _xnc1b.text_input("Dirección", key=f"xl_ncb_st_{uf.name}")
+                        _xnc_phone_b  = _xnc2b.text_input("Teléfono", key=f"xl_ncb_ph_{uf.name}")
+                        _xnc_email_b  = st.text_input("Email", key=f"xl_ncb_em_{uf.name}")
+                        if st.button("Crear cliente", key=f"xl_btn_ncb_{uf.name}"):
+                            if _xnc_name_b and _xnc_cuit_b:
+                                try:
+                                    _new_pid_b = create_partner(models, uid, api_key,
+                                        _xnc_name_b, _xnc_cuit_b, _xnc_street_b, _xnc_phone_b, _xnc_email_b)
+                                    st.session_state[_pid_key_xl] = _new_pid_b
+                                    st.session_state[_pnm_key_xl] = _xnc_name_b
+                                    st.session_state[_xl_create_no_cuit_key] = False
+                                    st.success(f"✅ Cliente creado (ID {_new_pid_b})")
+                                    st.rerun()
+                                except Exception as _xeb:
+                                    st.error(f"❌ {_xeb}")
+                            else:
+                                st.warning("Razón social y CUIT son obligatorios.")
 
             # ── Plazo de pago (siempre visible, opciones del sistema) ─────
             st.markdown("##### 📅 Plazo de pago")
