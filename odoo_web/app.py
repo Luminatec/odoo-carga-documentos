@@ -1990,25 +1990,28 @@ def get_payment_journals(models_url, uid, api_key):
     """
     try:
         m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        # Traer TODOS los bank/cash activos sin filtros extra — el filtrado
+        # de moneda se hace en Python para no depender del contexto de compañía
         rows = m.execute_kw(ODOO_DB, uid, api_key, "account.journal", "search_read",
-            [[("type", "in", ["bank", "cash"])]],
-            {"fields": ["id", "name", "currency_id"], "order": "name asc"})
+            [[("type", "in", ["bank", "cash"]), ("active", "=", True)]],
+            {"fields": ["id", "name", "currency_id"], "order": "name asc",
+             "context": {"active_test": True}})
         result = []
         for r in rows:
             cur      = r.get("currency_id")
             has_cur  = bool(cur and isinstance(cur, (list, tuple)) and cur[0])
-            cur_name = cur[1] if has_cur else ""
+            cur_name = (cur[1] if has_cur else "").upper()
             name_upper = r["name"].upper()
-            # Incluir si:
-            #   • sin moneda asignada (hereda ARS de la empresa), o
-            #   • moneda contiene "ARS" o "PESO" (cualquier formato), o
-            #   • nombre contiene "MercadoPago"
-            is_ars = (not has_cur) or ("ARS" in cur_name.upper()) or ("PESO" in cur_name.upper())
-            is_mp  = "MERCADOPAGO" in name_upper or "MERCADO PAGO" in name_upper
-            if not (is_ars or is_mp):
+            # Excluir solo monedas extranjeras claras (USD, EUR, BRL, etc.)
+            # Sin moneda = ARS de la empresa → incluir
+            # ARS, PESO, pesos → incluir
+            # MercadoPago → incluir siempre
+            is_foreign = has_cur and not any(k in cur_name for k in ("ARS","PESO","PESOS"))
+            is_mp      = "MERCADOPAGO" in name_upper or "MERCADO PAGO" in name_upper
+            if is_foreign and not is_mp:
                 continue
-            label = r["name"] if not has_cur or "ARS" in cur_name.upper() else f"{r['name']} ({cur_name})"
-            result.append((r["id"], label, cur_name or "ARS"))
+            label = r["name"] if not has_cur or "ARS" in cur_name else f"{r['name']} ({cur[1]})"
+            result.append((r["id"], label, cur[1] if has_cur else "ARS"))
         return result   # list of (id, label, currency_name)
     except Exception:
         return []
@@ -4375,8 +4378,4 @@ with tab_recibos:
         f"usá [Odoo Ventas]({ODOO_URL}/odoo/accounting/customers/invoices) directamente.")
 
 
-# ═══════════════════════════════════════════════════
-# TAB HISTORIAL
-# ═══════════════════════════════════════════════════
-with tab_history:
-    s
+# ═══════════════════════════════════
