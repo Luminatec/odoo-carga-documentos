@@ -1964,10 +1964,10 @@ def register_customer_payment(models, uid, api_key,
         return False, str(e)
 
 
-_tabs = ["🧾 Facturas de proveedores", "📦 Pedidos de clientes", "🏦 Órdenes de Pago", "💰 Recibos de Cobro"]
+_tabs = ["🧾 Facturas prov.", "📦 Pedidos", "🏦 Órdenes de Pago", "💰 Recibos de Cobro"]
 if is_admin:
     _tabs.append("🛳️ Importaciones")
-_tabs.append("📋 Historial de sesión")
+_tabs.append("📋 Historial")
 _tab_objs = st.tabs(_tabs)
 if is_admin:
     tab_bills, tab_orders, tab_op, tab_recibos, tab_import, tab_history = _tab_objs
