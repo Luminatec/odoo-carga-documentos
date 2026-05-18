@@ -213,6 +213,58 @@ def get_all_accounts(models_url, uid, api_key):
     except Exception:
         return []
 
+@st.cache_data(ttl=120, show_spinner=False)
+def get_partner_default_account(models_url, uid, api_key, partner_id):
+    """Devuelve (account_id, 'CODE  Name') de la cuenta de gasto por defecto del proveedor.
+    Estrategia:
+      1. product.supplierinfo donde partner_id = partner_id -> product_tmpl_id
+         -> property_account_expense_id del product.template
+      2. Fallback: ultima factura de proveedor confirmada del partner -> primera linea con cuenta
+    Retorna None si no se puede determinar."""
+    try:
+        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+
+        # --- Estrategia 1: producto configurado para el proveedor ---
+        sinfo = m.execute_kw(ODOO_DB, uid, api_key, "product.supplierinfo", "search_read",
+            [[("partner_id", "=", partner_id)]],
+            {"fields": ["product_tmpl_id"], "limit": 1, "order": "id asc"})
+        if sinfo:
+            tmpl_id = (sinfo[0].get("product_tmpl_id") or [None])[0]
+            if tmpl_id:
+                tmpls = m.execute_kw(ODOO_DB, uid, api_key, "product.template", "read",
+                    [[tmpl_id]],
+                    {"fields": ["property_account_expense_id"]})
+                if tmpls:
+                    acct = tmpls[0].get("property_account_expense_id")
+                    if acct and isinstance(acct, (list, tuple)) and acct[0]:
+                        # Leer codigo y nombre de la cuenta
+                        accts = m.execute_kw(ODOO_DB, uid, api_key, "account.account", "read",
+                            [[acct[0]]], {"fields": ["code", "name"]})
+                        if accts:
+                            return (accts[0]["id"], f"{accts[0]['code']}  {accts[0]['name']}")
+
+        # --- Estrategia 2: ultima factura de proveedor del partner ---
+        bills = m.execute_kw(ODOO_DB, uid, api_key, "account.move", "search_read",
+            [[("move_type", "=", "in_invoice"),
+              ("state", "=", "posted"),
+              ("partner_id", "=", partner_id)]],
+            {"fields": ["id"], "order": "invoice_date desc", "limit": 1})
+        if bills:
+            lines = m.execute_kw(ODOO_DB, uid, api_key, "account.move.line", "search_read",
+                [[("move_id", "=", bills[0]["id"]),
+                  ("display_type", "=", "product")]],
+                {"fields": ["account_id"], "limit": 1})
+            if lines:
+                acct = lines[0].get("account_id")
+                if acct and isinstance(acct, (list, tuple)) and acct[0]:
+                    accts = m.execute_kw(ODOO_DB, uid, api_key, "account.account", "read",
+                        [[acct[0]]], {"fields": ["code", "name"]})
+                    if accts:
+                        return (accts[0]["id"], f"{accts[0]['code']}  {accts[0]['name']}")
+    except Exception:
+        pass
+    return None
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_currency_id(models_url, uid, api_key, name):
     """Retorna el ID de la moneda por nombre (ej: 'USD', 'ARS')."""
@@ -2057,6 +2109,17 @@ with tab_bills:
             if _cuit_raw:
                 _partner_preloaded = search_partner_by_cuit(models_url, uid, api_key, _cuit_raw)
 
+            # Pre-selección de cuenta contable según proveedor
+            _default_acct_idx = 0
+            if _partner_preloaded:
+                _def_acct = get_partner_default_account(models_url, uid, api_key, _partner_preloaded[0])
+                if _def_acct:
+                    _def_acct_label = _def_acct[1]
+                    for _i, _lbl in enumerate(_acct_labels):
+                        if _lbl == _def_acct_label:
+                            _default_acct_idx = _i
+                            break
+
             if _partner_preloaded:
                 st.info(f"🏢 Proveedor detectado por CUIT: **{_partner_preloaded[1]}**")
             elif _cuit_raw:
@@ -2125,7 +2188,7 @@ with tab_bills:
                 cuenta_sel = st.selectbox(
                     "Cuenta de gasto / activo",
                     options=_acct_labels,
-                    index=0,
+                    index=_default_acct_idx,
                     key=f"cta_g_{uf.name}",
                     help="La cuenta se pre-selecciona según el proveedor. Cambiala solo si esta operación usa una cuenta distinta a la habitual.",
                 )
