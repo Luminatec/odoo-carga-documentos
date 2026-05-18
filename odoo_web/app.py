@@ -3227,194 +3227,194 @@ with tab_op:
 
         if not _all_pending:
             st.info("No hay facturas de proveedor pendientes de pago.")
-            st.stop()
 
-        _today = _date_cls.today().isoformat()
-        _filtered = _all_pending
-        if _op_partner_filter:
-            _pf = _op_partner_filter.lower()
-            _filtered = [b for b in _filtered
-                         if _pf in (b.get("partner_id") or [0, ""])[1].lower()]
-        if _op_cur_filter != "Todas":
-            _filtered = [b for b in _filtered
-                         if (b.get("currency_id") or [0, "ARS"])[1] == _op_cur_filter]
-        if _op_only_vencidas:
-            _filtered = [b for b in _filtered
-                         if b.get("invoice_date_due") and b["invoice_date_due"] < _today]
+        if _all_pending:
+            _today = _date_cls.today().isoformat()
+            _filtered = _all_pending
+            if _op_partner_filter:
+                _pf = _op_partner_filter.lower()
+                _filtered = [b for b in _filtered
+                             if _pf in (b.get("partner_id") or [0, ""])[1].lower()]
+            if _op_cur_filter != "Todas":
+                _filtered = [b for b in _filtered
+                             if (b.get("currency_id") or [0, "ARS"])[1] == _op_cur_filter]
+            if _op_only_vencidas:
+                _filtered = [b for b in _filtered
+                             if b.get("invoice_date_due") and b["invoice_date_due"] < _today]
 
-        _tot_ars_filt = sum(float(b.get("amount_residual") or 0) for b in _filtered
-                            if (b.get("currency_id") or [0,"ARS"])[1] == "ARS")
-        _tot_usd_filt = sum(float(b.get("amount_residual") or 0) for b in _filtered
-                            if (b.get("currency_id") or [0,"ARS"])[1] == "USD")
-        _tot_ars_all  = sum(float(b.get("amount_residual") or 0) for b in _all_pending
-                            if (b.get("currency_id") or [0,"ARS"])[1] == "ARS")
-        _tot_usd_all  = sum(float(b.get("amount_residual") or 0) for b in _all_pending
-                            if (b.get("currency_id") or [0,"ARS"])[1] == "USD")
+            _tot_ars_filt = sum(float(b.get("amount_residual") or 0) for b in _filtered
+                                if (b.get("currency_id") or [0,"ARS"])[1] == "ARS")
+            _tot_usd_filt = sum(float(b.get("amount_residual") or 0) for b in _filtered
+                                if (b.get("currency_id") or [0,"ARS"])[1] == "USD")
+            _tot_ars_all  = sum(float(b.get("amount_residual") or 0) for b in _all_pending
+                                if (b.get("currency_id") or [0,"ARS"])[1] == "ARS")
+            _tot_usd_all  = sum(float(b.get("amount_residual") or 0) for b in _all_pending
+                                if (b.get("currency_id") or [0,"ARS"])[1] == "USD")
 
-        _hay_filtro = len(_filtered) != len(_all_pending)
-        _res_parts = []
-        if _tot_ars_filt > 0: _res_parts.append(f"**ARS:** {fmt_ars(_tot_ars_filt)}")
-        if _tot_usd_filt > 0: _res_parts.append(f"**USD:** {fmt_usd(_tot_usd_filt)}")
-        _res_parts.append(
-            f"**{len(_filtered)}** factura(s)"
-            + (f" de {len(_all_pending)} totales" if _hay_filtro else ""))
-        st.info("  ·  ".join(_res_parts) if _res_parts else "Sin deuda pendiente.")
-        if _hay_filtro and (_tot_ars_all != _tot_ars_filt or _tot_usd_all != _tot_usd_filt):
-            _sf = []
-            if _tot_ars_all > 0: _sf.append(f"ARS {fmt_ars(_tot_ars_all)}")
-            if _tot_usd_all > 0: _sf.append(f"USD {fmt_usd(_tot_usd_all)}")
-            st.caption("Sin filtro: " + "  ·  ".join(_sf))
+            _hay_filtro = len(_filtered) != len(_all_pending)
+            _res_parts = []
+            if _tot_ars_filt > 0: _res_parts.append(f"**ARS:** {fmt_ars(_tot_ars_filt)}")
+            if _tot_usd_filt > 0: _res_parts.append(f"**USD:** {fmt_usd(_tot_usd_filt)}")
+            _res_parts.append(
+                f"**{len(_filtered)}** factura(s)"
+                + (f" de {len(_all_pending)} totales" if _hay_filtro else ""))
+            st.info("  ·  ".join(_res_parts) if _res_parts else "Sin deuda pendiente.")
+            if _hay_filtro and (_tot_ars_all != _tot_ars_filt or _tot_usd_all != _tot_usd_filt):
+                _sf = []
+                if _tot_ars_all > 0: _sf.append(f"ARS {fmt_ars(_tot_ars_all)}")
+                if _tot_usd_all > 0: _sf.append(f"USD {fmt_usd(_tot_usd_all)}")
+                st.caption("Sin filtro: " + "  ·  ".join(_sf))
 
-        if not _filtered:
-            st.warning("Ninguna factura cumple los filtros aplicados.")
-            st.stop()
+            if not _filtered:
+                st.warning("Ninguna factura cumple los filtros aplicados.")
 
-        _op_rows = []
-        for _b in _filtered:
-            _cur   = (_b.get("currency_id") or [0,"ARS"])[1]
-            _resid = float(_b.get("amount_residual") or 0)
-            _total = float(_b.get("amount_total") or 0)
-            _due   = _b.get("invoice_date_due") or ""
-            _venc_flag = "⚠️" if (_due and _due < _today) else ""
-            _pstate_map = {"not_paid": "Sin pagar", "partial": "Parcial"}
-            _op_rows.append({
-                "Sel": False, "Venc.": _venc_flag,
-                "Proveedor":   (_b.get("partner_id") or [0, "—"])[1],
-                "Comprobante": _b.get("name") or f"ID {_b['id']}",
-                "Ref.":        (_b.get("ref") or "")[:30],
-                "Fecha FA":    _b.get("invoice_date") or None,
-                "Vto. pago":   _due or None,
-                "Moneda": _cur, "Total": _total, "Pendiente": _resid,
-                "Estado pago": _pstate_map.get(_b.get("payment_state",""),
-                                               _b.get("payment_state","")),
-                "_id": _b["id"],
-                "_partner_id":  (_b.get("partner_id") or [0])[0],
-                "_currency_id": (_b.get("currency_id") or [0])[0],
-            })
+            if _filtered:
+                _op_rows = []
+                for _b in _filtered:
+                    _cur   = (_b.get("currency_id") or [0,"ARS"])[1]
+                    _resid = float(_b.get("amount_residual") or 0)
+                    _total = float(_b.get("amount_total") or 0)
+                    _due   = _b.get("invoice_date_due") or ""
+                    _venc_flag = "⚠️" if (_due and _due < _today) else ""
+                    _pstate_map = {"not_paid": "Sin pagar", "partial": "Parcial"}
+                    _op_rows.append({
+                        "Sel": False, "Venc.": _venc_flag,
+                        "Proveedor":   (_b.get("partner_id") or [0, "—"])[1],
+                        "Comprobante": _b.get("name") or f"ID {_b['id']}",
+                        "Ref.":        (_b.get("ref") or "")[:30],
+                        "Fecha FA":    _b.get("invoice_date") or None,
+                        "Vto. pago":   _due or None,
+                        "Moneda": _cur, "Total": _total, "Pendiente": _resid,
+                        "Estado pago": _pstate_map.get(_b.get("payment_state",""),
+                                                       _b.get("payment_state","")),
+                        "_id": _b["id"],
+                        "_partner_id":  (_b.get("partner_id") or [0])[0],
+                        "_currency_id": (_b.get("currency_id") or [0])[0],
+                    })
 
-        _df_op = pd.DataFrame(_op_rows)
-        _col_cfg_op = {
-            "Sel":       st.column_config.CheckboxColumn("✓", width="small"),
-            "Venc.":     st.column_config.TextColumn("", width="small"),
-            "Fecha FA":  st.column_config.DateColumn("Fecha FA",  format="DD/MM/YYYY"),
-            "Vto. pago": st.column_config.DateColumn("Vto. pago", format="DD/MM/YYYY"),
-            "Total":     st.column_config.NumberColumn("Total",    format="{:,.2f}"),
-            "Pendiente": st.column_config.NumberColumn("Pendiente",format="{:,.2f}"),
-            "_id": None, "_partner_id": None, "_currency_id": None,
-        }
-        _display_cols = ["Sel","Venc.","Proveedor","Comprobante","Ref.",
-                         "Fecha FA","Vto. pago","Moneda","Total","Pendiente","Estado pago"]
+                _df_op = pd.DataFrame(_op_rows)
+                _col_cfg_op = {
+                    "Sel":       st.column_config.CheckboxColumn("✓", width="small"),
+                    "Venc.":     st.column_config.TextColumn("", width="small"),
+                    "Fecha FA":  st.column_config.DateColumn("Fecha FA",  format="DD/MM/YYYY"),
+                    "Vto. pago": st.column_config.DateColumn("Vto. pago", format="DD/MM/YYYY"),
+                    "Total":     st.column_config.NumberColumn("Total",    format="{:,.2f}"),
+                    "Pendiente": st.column_config.NumberColumn("Pendiente",format="{:,.2f}"),
+                    "_id": None, "_partner_id": None, "_currency_id": None,
+                }
+                _display_cols = ["Sel","Venc.","Proveedor","Comprobante","Ref.",
+                                 "Fecha FA","Vto. pago","Moneda","Total","Pendiente","Estado pago"]
 
-        st.markdown("**Seleccioná las facturas a pagar:**")
-        _edited_op = st.data_editor(
-            _df_op[_display_cols + ["_id","_partner_id","_currency_id"]],
-            column_config=_col_cfg_op, column_order=_display_cols,
-            use_container_width=True, hide_index=True, key="op_data_editor",
-            disabled=[c for c in _display_cols if c != "Sel"],
-        )
+                st.markdown("**Seleccioná las facturas a pagar:**")
+                _edited_op = st.data_editor(
+                    _df_op[_display_cols + ["_id","_partner_id","_currency_id"]],
+                    column_config=_col_cfg_op, column_order=_display_cols,
+                    use_container_width=True, hide_index=True, key="op_data_editor",
+                    disabled=[c for c in _display_cols if c != "Sel"],
+                )
 
-        _selected_op = _edited_op[_edited_op["Sel"] == True]
-        n_sel = len(_selected_op)
+                _selected_op = _edited_op[_edited_op["Sel"] == True]
+                n_sel = len(_selected_op)
 
-        if n_sel > 0:
-            st.divider()
-            _total_ars_sel = _selected_op[_selected_op["Moneda"]=="ARS"]["Pendiente"].sum()
-            _total_usd_sel = _selected_op[_selected_op["Moneda"]=="USD"]["Pendiente"].sum()
-            _rs_parts = [f"{n_sel} factura(s) seleccionada(s)"]
-            if _total_ars_sel > 0: _rs_parts.append(f"ARS {fmt_ars(_total_ars_sel)}")
-            if _total_usd_sel > 0: _rs_parts.append(f"USD {fmt_usd(_total_usd_sel)}")
-            st.info("  ·  ".join(_rs_parts))
+                if n_sel > 0:
+                    st.divider()
+                    _total_ars_sel = _selected_op[_selected_op["Moneda"]=="ARS"]["Pendiente"].sum()
+                    _total_usd_sel = _selected_op[_selected_op["Moneda"]=="USD"]["Pendiente"].sum()
+                    _rs_parts = [f"{n_sel} factura(s) seleccionada(s)"]
+                    if _total_ars_sel > 0: _rs_parts.append(f"ARS {fmt_ars(_total_ars_sel)}")
+                    if _total_usd_sel > 0: _rs_parts.append(f"USD {fmt_usd(_total_usd_sel)}")
+                    st.info("  ·  ".join(_rs_parts))
 
-            with st.expander("Ver detalle de seleccionadas", expanded=False):
-                for _, _sr in _selected_op.iterrows():
-                    st.caption(
-                        f"• **{_sr['Proveedor']}** — {_sr['Comprobante']}"
-                        f" — {_sr['Moneda']} {_sr['Pendiente']:,.2f}"
-                        + (f" (venc. {_sr['Vto. pago']})" if _sr.get("Vto. pago") else ""))
+                    with st.expander("Ver detalle de seleccionadas", expanded=False):
+                        for _, _sr in _selected_op.iterrows():
+                            st.caption(
+                                f"• **{_sr['Proveedor']}** — {_sr['Comprobante']}"
+                                f" — {_sr['Moneda']} {_sr['Pendiente']:,.2f}"
+                                + (f" (venc. {_sr['Vto. pago']})" if _sr.get("Vto. pago") else ""))
 
-            st.markdown("#### Datos del pago")
-            if not _jour_opts:
-                st.error("No se encontraron diarios de pago en Odoo.")
-            else:
-                _fp_c1, _fp_c2 = st.columns(2)
-                _pay_journal    = _fp_c1.selectbox(
-                    "Diario de pago", list(_jour_opts.keys()), key="op_journal")
-                _pay_date       = _fp_c2.date_input(
-                    "Fecha de pago", value=_date_cls.today(), key="op_pay_date")
-                _pay_journal_id  = _jour_opts[_pay_journal]
-                _pay_journal_cur = _jour_cur[_pay_journal]
+                    st.markdown("#### Datos del pago")
+                    if not _jour_opts:
+                        st.error("No se encontraron diarios de pago en Odoo.")
+                    else:
+                        _fp_c1, _fp_c2 = st.columns(2)
+                        _pay_journal    = _fp_c1.selectbox(
+                            "Diario de pago", list(_jour_opts.keys()), key="op_journal")
+                        _pay_date       = _fp_c2.date_input(
+                            "Fecha de pago", value=_date_cls.today(), key="op_pay_date")
+                        _pay_journal_id  = _jour_opts[_pay_journal]
+                        _pay_journal_cur = _jour_cur[_pay_journal]
 
-                with st.expander("📒 Asientos que generará cada pago", expanded=True):
-                    _ae_rows = []
-                    for _, _sr in _selected_op.iterrows():
-                        _cur_op   = _sr["Moneda"]
-                        _monto_op = _sr["Pendiente"]
-                        _fmt_m    = (fmt_usd(_monto_op) if _cur_op == "USD"
-                                     else fmt_ars(_monto_op))
-                        _ae_rows.append({
-                            "Tipo": "DR", "Cuenta": "Proveedores",
-                            "Descripción": (f"{_sr['Proveedor']}"
-                                            f" · {_sr['Comprobante']}"),
-                            "Moneda": _cur_op, "Monto": _fmt_m,
-                        })
-                        _ae_rows.append({
-                            "Tipo": "  CR", "Cuenta": _pay_journal,
-                            "Descripción": (f"Pago {_sr['Comprobante']}"
-                                            f" — {_pay_date}"),
-                            "Moneda": _pay_journal_cur, "Monto": _fmt_m,
-                        })
-                    if _ae_rows:
-                        st.dataframe(pd.DataFrame(_ae_rows),
-                                     use_container_width=True, hide_index=True)
+                        with st.expander("📒 Asientos que generará cada pago", expanded=True):
+                            _ae_rows = []
+                            for _, _sr in _selected_op.iterrows():
+                                _cur_op   = _sr["Moneda"]
+                                _monto_op = _sr["Pendiente"]
+                                _fmt_m    = (fmt_usd(_monto_op) if _cur_op == "USD"
+                                             else fmt_ars(_monto_op))
+                                _ae_rows.append({
+                                    "Tipo": "DR", "Cuenta": "Proveedores",
+                                    "Descripción": (f"{_sr['Proveedor']}"
+                                                    f" · {_sr['Comprobante']}"),
+                                    "Moneda": _cur_op, "Monto": _fmt_m,
+                                })
+                                _ae_rows.append({
+                                    "Tipo": "  CR", "Cuenta": _pay_journal,
+                                    "Descripción": (f"Pago {_sr['Comprobante']}"
+                                                    f" — {_pay_date}"),
+                                    "Moneda": _pay_journal_cur, "Monto": _fmt_m,
+                                })
+                            if _ae_rows:
+                                st.dataframe(pd.DataFrame(_ae_rows),
+                                             use_container_width=True, hide_index=True)
+                                st.caption(
+                                    "Estimado. Odoo calcula los importes exactos al confirmar.")
+
                         st.caption(
-                            "Estimado. Odoo calcula los importes exactos al confirmar.")
+                            f"Se generará **una OP por factura** ({n_sel} OP en total).")
 
-                st.caption(
-                    f"Se generará **una OP por factura** ({n_sel} OP en total).")
+                        _op_btn = st.button(
+                            f"💸 Generar {n_sel} Orden(es) de Pago en Odoo",
+                            type="primary", key="btn_gen_op")
 
-                _op_btn = st.button(
-                    f"💸 Generar {n_sel} Orden(es) de Pago en Odoo",
-                    type="primary", key="btn_gen_op")
+                        if _op_btn:
+                            _op_ok, _op_errs = 0, []
+                            _pay_date_str = _pay_date.strftime("%Y-%m-%d")
+                            _prog_op = st.progress(0)
+                            for _op_i, (_, _sr) in enumerate(_selected_op.iterrows()):
+                                _mid   = int(_sr["_id"])
+                                _cname = _sr["Comprobante"]
+                                _pname = _sr["Proveedor"]
+                                _curx  = _sr["Moneda"]
+                                _mont  = _sr["Pendiente"]
+                                try:
+                                    _ok, _res = register_payment_wizard(
+                                        models, uid, api_key,
+                                        [_mid], _pay_date_str, _pay_journal_id)
+                                    if _ok:
+                                        st.success(
+                                            f"✅ OP generada — **{_pname}** · "
+                                            f"{_cname} · {_curx} {_mont:,.2f}")
+                                        _op_ok += 1
+                                    else:
+                                        _op_errs.append(f"❌ {_cname} ({_pname}): {_res}")
+                                except Exception as _ope:
+                                    _op_errs.append(
+                                        f"❌ {_cname} ({_pname}): {str(_ope)[:150]}")
+                                _prog_op.progress((_op_i + 1) / n_sel)
+                            for _oe in _op_errs:
+                                st.error(_oe)
+                            if _op_ok:
+                                st.success(f"✅ {_op_ok} OP(s) generada(s) correctamente.")
+                                get_pending_bills.clear()
+                                st.info(
+                                    "Presioná 🔄 Actualizar para ver el nuevo estado.")
+                else:
+                    st.info(
+                        "Marcá el ✓ en la columna izquierda para seleccionar facturas.")
 
-                if _op_btn:
-                    _op_ok, _op_errs = 0, []
-                    _pay_date_str = _pay_date.strftime("%Y-%m-%d")
-                    _prog_op = st.progress(0)
-                    for _op_i, (_, _sr) in enumerate(_selected_op.iterrows()):
-                        _mid   = int(_sr["_id"])
-                        _cname = _sr["Comprobante"]
-                        _pname = _sr["Proveedor"]
-                        _curx  = _sr["Moneda"]
-                        _mont  = _sr["Pendiente"]
-                        try:
-                            _ok, _res = register_payment_wizard(
-                                models, uid, api_key,
-                                [_mid], _pay_date_str, _pay_journal_id)
-                            if _ok:
-                                st.success(
-                                    f"✅ OP generada — **{_pname}** · "
-                                    f"{_cname} · {_curx} {_mont:,.2f}")
-                                _op_ok += 1
-                            else:
-                                _op_errs.append(f"❌ {_cname} ({_pname}): {_res}")
-                        except Exception as _ope:
-                            _op_errs.append(
-                                f"❌ {_cname} ({_pname}): {str(_ope)[:150]}")
-                        _prog_op.progress((_op_i + 1) / n_sel)
-                    for _oe in _op_errs:
-                        st.error(_oe)
-                    if _op_ok:
-                        st.success(f"✅ {_op_ok} OP(s) generada(s) correctamente.")
-                        get_pending_bills.clear()
-                        st.info(
-                            "Presioná 🔄 Actualizar para ver el nuevo estado.")
-        else:
-            st.info(
-                "Marcá el ✓ en la columna izquierda para seleccionar facturas.")
-
-    # =========================================================================
-    # MODO 2 — PAGO A CUENTA (sin factura previa)
-    # =========================================================================
+            # =========================================================================
+            # MODO 2 — PAGO A CUENTA (sin factura previa)
+            # =========================================================================
     elif _op_tipo == "📤 Pago a cuenta":
         st.info(
             "📤 **Pago a cuenta:** el pago se registra sin vincularlo a ninguna "
