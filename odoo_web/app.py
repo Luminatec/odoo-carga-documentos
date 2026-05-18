@@ -272,10 +272,10 @@ def get_partner_default_account(models_url, uid, api_key, partner_id):
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_expense_products(models_url, uid, api_key):
-    """Carga productos activos y aptos para compra de Odoo (ordenados por nombre)."""
+    """Carga variantes de productos activos y aptos para compra (product.product → IDs válidos para lineas de factura)."""
     try:
         m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
-        rows = m.execute_kw(ODOO_DB, uid, api_key, "product.template", "search_read",
+        rows = m.execute_kw(ODOO_DB, uid, api_key, "product.product", "search_read",
             [[("active", "=", True), ("purchase_ok", "=", True)]],
             {"fields": ["id", "name", "default_code"], "order": "name asc", "limit": 500})
         result = []
@@ -289,16 +289,27 @@ def get_expense_products(models_url, uid, api_key):
 
 @st.cache_data(ttl=120, show_spinner=False)
 def get_partner_default_product(models_url, uid, api_key, partner_id):
-    """Devuelve (product_tmpl_id, label) del primer producto configurado para el proveedor."""
+    """Devuelve (product_product_id, label) del primer producto configurado para el proveedor."""
     try:
         m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        # Intentar campo product_id (variante específica) primero
         sinfo = m.execute_kw(ODOO_DB, uid, api_key, "product.supplierinfo", "search_read",
             [[("partner_id", "=", partner_id)]],
-            {"fields": ["product_tmpl_id"], "limit": 1, "order": "id asc"})
+            {"fields": ["product_tmpl_id", "product_id"], "limit": 1, "order": "id asc"})
         if sinfo:
-            tmpl = sinfo[0].get("product_tmpl_id")
+            row = sinfo[0]
+            # product_id en supplierinfo es Many2one a product.product (puede ser False)
+            prod_var = row.get("product_id")
+            if prod_var and isinstance(prod_var, (list, tuple)) and prod_var[0]:
+                return (prod_var[0], prod_var[1])
+            # Sino buscar primera variante activa del template
+            tmpl = row.get("product_tmpl_id")
             if tmpl and isinstance(tmpl, (list, tuple)) and tmpl[0]:
-                return (tmpl[0], tmpl[1])
+                variants = m.execute_kw(ODOO_DB, uid, api_key, "product.product", "search_read",
+                    [[("product_tmpl_id", "=", tmpl[0]), ("active", "=", True)]],
+                    {"fields": ["id", "name"], "limit": 1})
+                if variants:
+                    return (variants[0]["id"], variants[0]["name"])
     except Exception:
         pass
     return None
@@ -648,11 +659,7 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
             "quantity": 1,
         }
         if account_id:   line_vals["account_id"]  = account_id
-        if product_id:
-            # product_id viene de product.template; invoice line necesita product.product
-            _pv = call(models, uid, api_key, "product.product", "search",
-                       [[("product_tmpl_id", "=", product_id), ("active", "=", True)]], {"limit": 1})
-            line_vals["product_id"] = _pv[0] if _pv else product_id
+        if product_id:   line_vals["product_id"]  = product_id  # ya es product.product ID
         if analytic_account_id:
             line_vals["analytic_distribution"] = {str(analytic_account_id): 100}
         vals["invoice_line_ids"] = [(0, 0, line_vals)]
