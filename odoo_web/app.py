@@ -985,6 +985,7 @@ def extract_pdf_fields(file_bytes):
     neto_pats = [
         r"(?:Subtotal\s+Gravado|Neto\s+Gravado|Base\s+Imponible)[:\s$]*\$?\s*([\d.,]+)",
         r"(?:SUBTOTAL|Subtotal)\s*:\s*\$?\s*([\d.,]+)",   # "Subtotal: $X" con dos puntos
+        r"(?:SUBTOTAL|Subtotal)\s{2,}\$\s*([\d.,]+)",      # "Subtotal    $X" espacios + $
         r"(?:Gravado)\s*:\s*\$?\s*([\d.,]+)",              # "Gravado: $X" con dos puntos
     ]
     for pat in neto_pats:
@@ -1009,9 +1010,11 @@ def extract_pdf_fields(file_bytes):
         r"(?:Impuesto\s+)?IVA[:\s$]*\$?\s*([\d.,]+)",
     ]
     for pat in iva_pats:
-        m = re.search(pat, text, re.IGNORECASE)
-        if m:
-            fields["iva"] = normalize_amount(m.group(1).strip())
+        # Usar findall y tomar el ÚLTIMO match: las filas de tabla dan el IVA por línea
+        # (primer match), el resumen al final da el IVA total (último match)
+        matches = re.findall(pat, text, re.IGNORECASE)
+        if matches:
+            fields["iva"] = normalize_amount(matches[-1].strip())
             break
 
     # ── RAZÓN SOCIAL / PROVEEDOR EMISOR ──────────────────────────────────
@@ -1918,6 +1921,23 @@ if not st.session_state.logged_in:
     st.info("👈 Iniciá sesión desde el panel lateral para empezar.")
     st.stop()
 
+# ── Keepalive: evita que Streamlit cierre la sesión por inactividad ───────────
+import streamlit.components.v1 as _stc
+_stc.html("""
+<script>
+(function() {
+    // Cada 4 minutos simula actividad para mantener el WebSocket vivo
+    setInterval(function() {
+        try {
+            // Dispara un mousemove en el documento padre (ventana Streamlit)
+            var evt = new MouseEvent('mousemove', {bubbles: true, cancelable: true});
+            window.parent.document.dispatchEvent(evt);
+        } catch(e) {}
+    }, 240000);
+})();
+</script>
+""", height=0, scrolling=False)
+
 # Conexión de servicio (API key central)
 try:
     svc_uid, svc_models, svc_api_key = get_service_connection()
@@ -2346,16 +2366,10 @@ with tab_bills:
                     help="Producto de Odoo que se asigna a la línea de factura. "
                          "Se pre-selecciona según el proveedor.",
                 )
-                _col_cta, _col_cc = st.columns([3, 2])
-                cuenta_sel = _col_cta.selectbox(
-                    "Cuenta de gasto / activo",
-                    options=_acct_labels,
-                    index=_default_acct_idx,
-                    key=f"cta_g_{uf.name}",
-                    help="Cuenta contable pre-seleccionada según el proveedor. "
-                         "Cambiala solo si esta operación usa una cuenta distinta.",
-                )
-                analytic_sel = _col_cc.selectbox(
+                # Cuenta contable: auto-detectada en background (no se muestra en UI)
+                # cuenta_sel sigue disponible para el asiento estimado y fallback
+                cuenta_sel = _acct_labels[_default_acct_idx] if _acct_labels and _default_acct_idx < len(_acct_labels) else None
+                analytic_sel = st.selectbox(
                     "Centro de Costo",
                     options=_analytic_labels,
                     index=0,
