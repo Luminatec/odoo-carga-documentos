@@ -4370,4 +4370,24 @@ with tab_recibos:
 
     st.divider()
     st.caption(
-        f"Para emitir fa
+        f"Para emitir facturas de venta o gestionar cobros manualmente, "
+        f"usá [Odoo Ventas]({ODOO_URL}/odoo/accounting/customers/invoices) directamente.")
+
+
+# ═══════════════════════════════════════════════════
+# TAB HISTORIAL
+# ═══════════════════════════════════════════════════
+with tab_history:
+    st.subheader("📋 Historial de esta sesión")
+    _hist = st.session_state.get("history", [])
+    if not _hist:
+        st.caption("Todavía no se procesó ningún documento en esta sesión.")
+    else:
+        import pandas as _pd_hist
+        _hdf = _pd_hist.DataFrame(_hist)
+        _hcols = [c for c in ["tipo","archivo","estado","id","url"] if c in _hdf.columns]
+        _hdf_disp = _hdf[_hcols].copy()
+        if "url" in _hdf_disp.columns:
+            _hdf_disp["url"] = _hdf_disp["url"].apply(
+                lambda u: f"[Abrir]({u})" if u else "")
+        st.dataframe(_hdf_disp, use_container_width=True, hide_index=True)
