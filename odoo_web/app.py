@@ -648,7 +648,11 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
             "quantity": 1,
         }
         if account_id:   line_vals["account_id"]  = account_id
-        if product_id:   line_vals["product_id"]  = product_id
+        if product_id:
+            # product_id viene de product.template; invoice line necesita product.product
+            _pv = call(models, uid, api_key, "product.product", "search",
+                       [[("product_tmpl_id", "=", product_id), ("active", "=", True)]], {"limit": 1})
+            line_vals["product_id"] = _pv[0] if _pv else product_id
         if analytic_account_id:
             line_vals["analytic_distribution"] = {str(analytic_account_id): 100}
         vals["invoice_line_ids"] = [(0, 0, line_vals)]
