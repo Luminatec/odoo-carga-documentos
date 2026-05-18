@@ -1985,29 +1985,32 @@ def get_pending_bills(models_url, uid, api_key):
 @st.cache_data(ttl=300, show_spinner=False)
 def get_payment_journals(models_url, uid, api_key):
     """
-    Todos los diarios (sin filtro de tipo ni activo) — diagnóstico _fix65.
-    Los extranjeros se identifican con el código de moneda entre paréntesis.
+    Diarios banco/caja activos en ARS + MercadoPago.
+    Excluye diarios con moneda extranjera explícita (USD, EUR, etc.).
+    Incluye diarios sin moneda (= ARS de la empresa) y los que dicen ARS/PESO.
     """
     try:
         m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
-        # Sin filtros: traer TODOS los diarios independientemente de tipo y estado
         rows = m.execute_kw(ODOO_DB, uid, api_key, "account.journal", "search_read",
             [[]],
             {"fields": ["id", "name", "currency_id", "type", "active"], "order": "name asc",
              "context": {"active_test": False}})
         result = []
         for r in rows:
-            # Solo bank/cash — pero logueamos todos para debug
             if r.get("type") not in ("bank", "cash"):
                 continue
-            cur      = r.get("currency_id")
-            has_cur  = bool(cur and isinstance(cur, (list, tuple)) and cur[0])
-            cur_name = cur[1] if has_cur else "ARS"
+            if not r.get("active", True):
+                continue
+            cur       = r.get("currency_id")
+            has_cur   = bool(cur and isinstance(cur, (list, tuple)) and cur[0])
+            cur_name  = cur[1] if has_cur else "ARS"
             cur_upper = cur_name.upper()
-            is_ars = not has_cur or any(k in cur_upper for k in ("ARS", "PESO"))
-            active_tag = "" if r.get("active", True) else " [inactivo]"
-            label  = r["name"] + active_tag if is_ars else f"{r['name']} ({cur_name}){active_tag}"
-            result.append((r["id"], label, cur_name))
+            name_upper = r["name"].upper()
+            is_mp      = "MERCADOPAGO" in name_upper or "MERCADO PAGO" in name_upper
+            is_foreign = has_cur and not any(k in cur_upper for k in ("ARS", "PESO"))
+            if is_foreign and not is_mp:
+                continue
+            result.append((r["id"], r["name"], cur_name))
         return result   # list of (id, label, currency_name)
     except Exception as e:
         return []
