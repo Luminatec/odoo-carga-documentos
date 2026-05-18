@@ -265,6 +265,23 @@ def get_partner_default_account(models_url, uid, api_key, partner_id):
         pass
     return None
 
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_analytic_accounts(models_url, uid, api_key):
+    """Carga cuentas analíticas activas (Centros de Costo) de Odoo."""
+    try:
+        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        rows = m.execute_kw(ODOO_DB, uid, api_key, "account.analytic.account", "search_read",
+            [[("active", "=", True)]],
+            {"fields": ["id", "name", "code"], "order": "name asc"})
+        result = []
+        for r in rows:
+            label = f"{r['code']}  {r['name']}" if r.get("code") else r["name"]
+            result.append((r["id"], label))
+        return result
+    except Exception:
+        return []
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_currency_id(models_url, uid, api_key, name):
     """Retorna el ID de la moneda por nombre (ej: 'USD', 'ARS')."""
@@ -574,7 +591,7 @@ def _calc_cost_breakdown(po_lines, bills, tc_usd):
 def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                        filename, file_bytes, mimetype, journal_id=None, doc_type_id=None,
                        invoice_date_due=None, account_id=None, amount_neto=None,
-                       currency_id=None):
+                       currency_id=None, analytic_account_id=None):
     vals = {"move_type": "in_invoice"}
     if partner_id:       vals["partner_id"]   = partner_id
     if ref:              vals["ref"]          = ref
@@ -584,12 +601,15 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
     if doc_type_id:      vals["l10n_latam_document_type_id"] = doc_type_id
     if currency_id:      vals["currency_id"]  = currency_id
     if account_id and amount_neto:
-        vals["invoice_line_ids"] = [(0, 0, {
+        line_vals = {
             "account_id": account_id,
             "name": ref or "Factura proveedor",
             "price_unit": float(amount_neto),
             "quantity": 1,
-        })]
+        }
+        if analytic_account_id:
+            line_vals["analytic_distribution"] = {str(analytic_account_id): 100}
+        vals["invoice_line_ids"] = [(0, 0, line_vals)]
     move_id = call(models, uid, api_key, "account.move", "create", [vals])
     if file_bytes:
         attach_file(models, uid, api_key, "account.move", move_id, filename, file_bytes, mimetype)
@@ -1083,6 +1103,15 @@ def search_product_by_code_or_name(models_url, uid, api_key,
 def create_partner(models, uid, api_key, name, vat, street="", phone="", email_addr=""):
     """Crea un nuevo cliente en Odoo y retorna su ID."""
     vals = {"name": name, "customer_rank": 1, "is_company": True}
+    if vat:        vals["vat"]    = vat
+    if street:     vals["street"] = street
+    if phone:      vals["phone"]  = phone
+    if email_addr: vals["email"]  = email_addr
+    return call(models, uid, api_key, "res.partner", "create", [vals])
+
+def create_vendor_partner(models, uid, api_key, name, vat, street="", phone="", email_addr=""):
+    """Crea un nuevo proveedor en Odoo y retorna su ID."""
+    vals = {"name": name, "supplier_rank": 1, "is_company": True}
     if vat:        vals["vat"]    = vat
     if street:     vals["street"] = street
     if phone:      vals["phone"]  = phone
@@ -2105,8 +2134,12 @@ with tab_bills:
             _dias_pago   = extracted.get("dias_pago")
             _vto_auto    = extracted.get("fecha_vencimiento", "")
 
-            _partner_preloaded = None
-            if _cuit_raw:
+            _cuit_norm = _cuit_raw.replace("-","").replace(" ","").strip()
+            _ss_vendor_key = f"vendor_created_{_cuit_norm}"
+
+            # Buscar primero en session state (recién creado), luego en Odoo
+            _partner_preloaded = st.session_state.get(_ss_vendor_key)
+            if not _partner_preloaded and _cuit_raw:
                 _partner_preloaded = search_partner_by_cuit(models_url, uid, api_key, _cuit_raw)
 
             # Pre-selección de cuenta contable según proveedor
@@ -2120,14 +2153,45 @@ with tab_bills:
                             _default_acct_idx = _i
                             break
 
+            # Cargar cuentas analíticas (Centros de Costo)
+            _analytic_accounts = get_analytic_accounts(models_url, uid, api_key)
+            _analytic_labels   = ["— Sin centro de costo —"] + [lbl for _, lbl in _analytic_accounts]
+
             if _partner_preloaded:
                 st.info(f"🏢 Proveedor detectado por CUIT: **{_partner_preloaded[1]}**")
             elif _cuit_raw:
-                odoo_new_url = f"{ODOO_URL}/web#action=base.action_res_partner_form&view_type=form"
-                st.warning(
-                    f"⚠️ CUIT **{_cuit_raw}** no encontrado en Odoo. "
-                    f"[Crear proveedor manualmente]({odoo_new_url}) antes de cargar."
-                )
+                st.warning(f"⚠️ CUIT **{_cuit_raw}** no encontrado en Odoo.")
+                with st.expander("➕ Crear proveedor en Odoo", expanded=True):
+                    with st.form(key=f"new_vendor_form_{uf.name}"):
+                        st.markdown("Completá los datos mínimos para dar de alta el proveedor:")
+                        _nv_c1, _nv_c2 = st.columns(2)
+                        _nv_name  = _nv_c1.text_input("Razón social *",
+                            value=extracted.get("proveedor","")[:80],
+                            placeholder="Nombre en Odoo")
+                        _nv_cuit  = _nv_c2.text_input("CUIT *",
+                            value=_cuit_raw,
+                            placeholder="30-12345678-9")
+                        _nv_street = _nv_c1.text_input("Dirección", placeholder="Av. Corrientes 1234")
+                        _nv_phone  = _nv_c2.text_input("Teléfono", placeholder="+54 11 4xxx-xxxx")
+                        _nv_email  = st.text_input("E-mail", placeholder="proveedor@empresa.com")
+                        _nv_go = st.form_submit_button("Crear proveedor en Odoo", use_container_width=True)
+                    if _nv_go:
+                        if not _nv_name.strip() or not _nv_cuit.strip():
+                            st.error("Razón social y CUIT son obligatorios.")
+                        else:
+                            try:
+                                _nv_pid = create_vendor_partner(
+                                    models, uid, api_key,
+                                    name=_nv_name.strip(),
+                                    vat=_nv_cuit.strip().replace("-",""),
+                                    street=_nv_street.strip(),
+                                    phone=_nv_phone.strip(),
+                                    email_addr=_nv_email.strip())
+                                st.session_state[_ss_vendor_key] = (_nv_pid, _nv_name.strip())
+                                st.success(f"✅ Proveedor **{_nv_name}** creado (ID {_nv_pid}). Recargando...")
+                                st.rerun()
+                            except Exception as _nv_e:
+                                st.error(f"Error al crear proveedor: {_nv_e}")
 
             if _cond_venta:
                 if _dias_pago:
@@ -2183,14 +2247,22 @@ with tab_bills:
 
                 st.text_area("Notas internas", height=55, key=f"notas_{uf.name}")
 
-                # Cuentas contables
-                st.markdown("##### 📒 Cuenta contable")
-                cuenta_sel = st.selectbox(
+                # Cuentas contables y Centro de Costo
+                st.markdown("##### 📒 Cuenta contable y Centro de Costo")
+                _col_cta, _col_cc = st.columns([3, 2])
+                cuenta_sel = _col_cta.selectbox(
                     "Cuenta de gasto / activo",
                     options=_acct_labels,
                     index=_default_acct_idx,
                     key=f"cta_g_{uf.name}",
                     help="La cuenta se pre-selecciona según el proveedor. Cambiala solo si esta operación usa una cuenta distinta a la habitual.",
+                )
+                analytic_sel = _col_cc.selectbox(
+                    "Centro de Costo",
+                    options=_analytic_labels,
+                    index=0,
+                    key=f"cc_g_{uf.name}",
+                    help="Centro de costo (cuenta analítica) que absorbe el gasto. Opcional.",
                 )
 
                 _btn_label = "⬆️ Cargar en Odoo"
@@ -2252,13 +2324,23 @@ with tab_bills:
                                 if _albl == cuenta_sel:
                                     account_id_sel = _aid
                                     break
+
+                        # 5. Resolver Centro de Costo
+                        analytic_id_sel = None
+                        if analytic_sel and analytic_sel != "— Sin centro de costo —":
+                            for _anid, _anlbl in _analytic_accounts:
+                                if _anlbl == analytic_sel:
+                                    analytic_id_sel = _anid
+                                    break
+
                         move_id = create_vendor_bill(models, uid, api_key,
                             partner_id=partner_id, ref=ref_i,
                             invoice_date=fecha_i or False,
                             invoice_date_due=fecha_vto_i or None,
                             filename=uf.name, file_bytes=file_bytes, mimetype=mimetype,
                             account_id=account_id_sel,
-                            amount_neto=extracted.get("neto") or None)
+                            amount_neto=extracted.get("neto") or None,
+                            analytic_account_id=analytic_id_sel)
                         url = odoo_url("account.move", move_id)
                         st.success(f"✅ Factura creada — [Abrir en Odoo]({url})")
                         st.session_state.history.append({"tipo":"Factura proveedor",
@@ -4061,29 +4143,20 @@ with tab_recibos:
         f"usá [Odoo Ventas]({ODOO_URL}/odoo/accounting/customers/invoices) directamente.")
 
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TAB — HISTORIAL DE SESIÓN
-# ─────────────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════
+# TAB HISTORIAL
+# ═══════════════════════════════════════════════════
 with tab_history:
-    st.subheader("📋 Historial de sesión")
-    if not st.session_state.history:
-        st.info("Todavía no se creó ningún registro en esta sesión.")
+    st.subheader("📋 Historial de esta sesión")
+    _hist = st.session_state.get("history", [])
+    if not _hist:
+        st.caption("Todavía no se procesó ningún documento en esta sesión.")
     else:
-        for _h in reversed(st.session_state.history):
-            _h_icon = _h.get("estado", "✅")
-            _h_tipo = _h.get("tipo", "")
-            _h_arch = _h.get("archivo", "")
-            _h_id   = _h.get("id", "")
-            _h_url  = _h.get("url", "")
-            if _h_url:
-                st.markdown(
-                    f"{_h_icon} **{_h_tipo}** — {_h_arch} "
-                    f"— ID {_h_id} — [🔗 Ver en Odoo]({_h_url})"
-                )
-            else:
-                st.markdown(
-                    f"{_h_icon} **{_h_tipo}** — {_h_arch} — ID {_h_id}")
-        if st.button("🗑️ Limpiar historial", key="btn_clear_hist"):
-            st.session_state.history = []
-            st.rerun()
+        import pandas as _pd_hist
+        _hdf = _pd_hist.DataFrame(_hist)
+        _hcols = [c for c in ["tipo","archivo","estado","id","url"] if c in _hdf.columns]
+        _hdf_disp = _hdf[_hcols].copy()
+        if "url" in _hdf_disp.columns:
+            _hdf_disp["url"] = _hdf_disp["url"].apply(
+                lambda u: f"[Abrir]({u})" if u else "")
+        st.dataframe(_hdf_disp, use_container_width=True, hide_index=True)
