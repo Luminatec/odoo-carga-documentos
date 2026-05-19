@@ -4625,25 +4625,71 @@ with tab_recibos:
                             "Verificá que el cliente esté registrado con ese CUIT en el campo VAT.")
                         continue
 
-                    _rc_pid, _rc_pname = _rcp_data
-                    _rc_invs = _rc_inv_by_pid.get(_rc_pid, [])
+                    _rc_pid_cuit, _rc_pname_cuit = _rcp_data
 
-                    # Advertencia si el nombre del cheque difiere significativamente del Odoo
+                    # ── Detectar mismatch de nombre ───────────────────────────
                     _rc_nombre_excel = _rchs[0].get("nombre", "").strip().upper()
-                    _rc_nombre_odoo  = _rc_pname.strip().upper()
-                    # Comparación simple: ninguna palabra clave del nombre del cheque
-                    # (≥5 chars) aparece en el nombre Odoo → probable mismatch
+                    _rc_nombre_odoo  = _rc_pname_cuit.strip().upper()
                     _rc_kws = [w for w in _rc_nombre_excel.split() if len(w) >= 5]
                     _rc_match_ok = not _rc_kws or any(
                         kw in _rc_nombre_odoo for kw in _rc_kws)
+
                     if not _rc_match_ok:
+                        # Hay mismatch: dejar elegir entre el partner del CUIT y buscar por nombre
                         st.warning(
                             f"⚠️ El CUIT **{_rcuit}** está asignado en Odoo a "
-                            f"**{_rc_pname}** (ID {_rc_pid}), pero el cheque fue emitido por "
-                            f"**{_rchs[0].get('nombre','')}**. "
-                            f"Verificá que el CUIT en Odoo sea correcto antes de registrar.")
+                            f"**{_rc_pname_cuit}** (ID {_rc_pid_cuit}), "
+                            f"pero el cheque fue emitido por **{_rchs[0].get('nombre','')}**.")
+
+                        _rc_sel_key  = f"rc_who_{_rcuit}"
+                        _rc_srch_key = f"rc_srch_{_rcuit}"
+                        _rc_choice = st.radio(
+                            "¿A qué cliente asignar este cobro?",
+                            options=["cuit", "nombre"],
+                            format_func=lambda x: (
+                                f"Usar {_rc_pname_cuit} (CUIT coincide en Odoo)"
+                                if x == "cuit"
+                                else f"Buscar {_rchs[0].get('nombre','')} por nombre"
+                            ),
+                            key=_rc_sel_key, horizontal=True)
+
+                        if _rc_choice == "cuit":
+                            _rc_pid   = _rc_pid_cuit
+                            _rc_pname = _rc_pname_cuit
+                        else:
+                            # Buscar por nombre en Odoo
+                            _rc_name_q = st.text_input(
+                                "Nombre a buscar en Odoo",
+                                value=_rchs[0].get("nombre", ""),
+                                key=_rc_srch_key)
+                            _rc_name_results = []
+                            if _rc_name_q and len(_rc_name_q) >= 3:
+                                try:
+                                    _rc_name_results = models.execute_kw(
+                                        ODOO_DB, uid, api_key, "res.partner", "search_read",
+                                        [[("name", "ilike", _rc_name_q),
+                                          ("customer_rank", ">", 0),
+                                          ("active", "=", True)]],
+                                        {"fields": ["id", "name", "vat"], "limit": 10})
+                                except Exception:
+                                    pass
+                            if not _rc_name_results:
+                                st.info("Ingresá al menos 3 caracteres para buscar.")
+                                continue
+                            _rc_name_opts = {
+                                f"{r['name']} (CUIT {r.get('vat','?')})": (r["id"], r["name"])
+                                for r in _rc_name_results}
+                            _rc_name_sel = st.selectbox(
+                                "Seleccioná el cliente correcto",
+                                list(_rc_name_opts.keys()),
+                                key=f"rc_namesel_{_rcuit}")
+                            _rc_pid, _rc_pname = _rc_name_opts[_rc_name_sel]
                     else:
+                        _rc_pid   = _rc_pid_cuit
+                        _rc_pname = _rc_pname_cuit
                         st.markdown(f"**Cliente Odoo:** {_rc_pname} (ID {_rc_pid})")
+
+                    _rc_invs = _rc_inv_by_pid.get(_rc_pid, [])
 
                     # ── Selector de facturas ─────────────────────────────────
                     _rcsel_ids  = []
