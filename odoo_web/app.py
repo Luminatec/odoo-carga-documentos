@@ -118,21 +118,26 @@ DECALOGO = [
 
 
 # ───────────────────────────────────────────────────
-# CONEXIÓN DE SERVICIO (API key central, cacheada)
+# PROXY DE MODELOS (stateless, compartido entre usuarios)
 # ───────────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
-def get_service_connection():
-    """Raises on error so @st.cache_resource never caches a failed attempt."""
-    api_key   = st.secrets.get("ODOO_API_KEY", "")
-    svc_email = st.secrets.get("ODOO_SERVICE_EMAIL", "")
-    if not api_key or not svc_email:
-        raise RuntimeError("Faltan ODOO_API_KEY o ODOO_SERVICE_EMAIL en los secrets.")
-    common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common", allow_none=True)
-    uid    = common.authenticate(ODOO_DB, svc_email, api_key, {})
-    if not uid:
-        raise RuntimeError(f"authenticate() devolvió uid=0. Verificá que la API key corresponde a {svc_email} en {ODOO_DB}.")
-    models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object", allow_none=True)
-    return uid, models, api_key
+def get_models_proxy():
+    """ServerProxy para account.move, etc. Es stateless — uid y password van por llamada."""
+    return xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object", allow_none=True)
+
+def odoo_authenticate(email: str, password: str):
+    """
+    Autentica al usuario contra Odoo XML-RPC.
+    Devuelve (uid, "") si OK, (None, mensaje_error) si falla.
+    """
+    try:
+        common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common", allow_none=True)
+        uid = common.authenticate(ODOO_DB, email.strip().lower(), password, {})
+        if uid:
+            return uid, ""
+        return None, "Email o contraseña incorrectos."
+    except Exception as e:
+        return None, f"No se pudo conectar a Odoo: {e}"
 
 def verify_user(email, password):
     """
@@ -1845,8 +1850,10 @@ def classify_document(text, carpeta_id=""):
 # SESSION STATE
 # ───────────────────────────────────────────────────
 DEFAULTS = {
-    "logged_in": False,
-    "user_email": "",
+    "logged_in":    False,
+    "user_email":   "",
+    "odoo_uid":     None,   # uid personal del usuario logueado en Odoo
+    "odoo_password": "",    # contraseña Odoo (usada en cada llamada XML-RPC)
     "history": [],
     "carpeta_id": "", "carpeta_po": None, "carpeta_bills": [], "carpeta_lc_id": None,
     "etapas": {k: False for k, *_ in ETAPAS_DEF},
@@ -1879,14 +1886,16 @@ with st.sidebar:
             login_btn = st.form_submit_button("Ingresar", use_container_width=True)
         if login_btn:
             if email_in and pass_in:
-                with st.spinner("Verificando..."):
-                    ok, err_msg = verify_user(email_in, pass_in)
-                if ok:
-                    st.session_state.logged_in  = True
-                    st.session_state.user_email = email_in.strip().lower()
+                with st.spinner("Verificando en Odoo..."):
+                    _uid, _err = odoo_authenticate(email_in, pass_in)
+                if _uid:
+                    st.session_state.logged_in    = True
+                    st.session_state.user_email   = email_in.strip().lower()
+                    st.session_state.odoo_uid      = _uid
+                    st.session_state.odoo_password = pass_in
                     st.rerun()
                 else:
-                    st.error(err_msg or "Email o contraseña incorrectos.")
+                    st.error(_err or "Email o contraseña incorrectos.")
             else:
                 st.warning("Completá email y contraseña.")
     else:
@@ -1901,11 +1910,13 @@ with st.sidebar:
                         unsafe_allow_html=True)
             st.caption(f"Carpeta: **{st.session_state.carpeta_id or 'sin selección'}**")
         if st.button("🔓 Cerrar sesión", use_container_width=True):
-            st.session_state.logged_in  = False
-            st.session_state.user_email = ""
-            st.session_state.history    = []
-            st.session_state.carpeta_id = ""
-            st.session_state.carpeta_po = None
+            st.session_state.logged_in    = False
+            st.session_state.user_email   = ""
+            st.session_state.odoo_uid      = None
+            st.session_state.odoo_password = ""
+            st.session_state.history       = []
+            st.session_state.carpeta_id    = ""
+            st.session_state.carpeta_po    = None
             st.session_state.carpeta_bills = []
             st.session_state.carpeta_lc_id = None
             st.session_state.etapas = {k: False for k, *_ in ETAPAS_DEF}
@@ -1946,17 +1957,15 @@ _stc.html("""
 </script>
 """, height=0, scrolling=False)
 
-# Conexión de servicio (API key central)
-try:
-    svc_uid, svc_models, svc_api_key = get_service_connection()
-except Exception as _conn_err:
-    st.error(f"⚠️ No se pudo conectar a Odoo: {_conn_err}")
-    st.stop()
-
-uid        = svc_uid
-models     = svc_models
-api_key    = svc_api_key
+# Conexión usando las credenciales del usuario logueado
+uid        = st.session_state.odoo_uid
+api_key    = st.session_state.odoo_password   # en XML-RPC, password == api_key
+models     = get_models_proxy()
 models_url = f"{ODOO_URL}/xmlrpc/2/object"
+
+if not uid or not api_key:
+    st.error("⚠️ Sesión inválida. Por favor cerrá sesión y volvé a ingresar.")
+    st.stop()
 
 is_admin = st.session_state.user_email in ADMIN_EMAILS
 
