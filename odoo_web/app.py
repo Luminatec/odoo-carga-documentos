@@ -1307,26 +1307,34 @@ def create_vendor_partner(models, uid, api_key, name, vat, street="", phone="", 
     if email_addr: vals["email"]  = email_addr
     return call(models, uid, api_key, "res.partner", "create", [vals])
 
-def extract_image_fields(file_bytes):
-    """
-    OCR de imagen (PNG/JPG/JPEG) → PDF buscable → mismo pipeline que extract_pdf_fields.
-    Usa pytesseract + Pillow. Devuelve (extracted, raw_text) igual que extract_pdf_fields.
-    """
+def _image_to_ocr_pdf(file_bytes):
+    """Convierte imagen a PDF buscable usando pytesseract. Devuelve bytes o None."""
     try:
         import pytesseract
         from PIL import Image as _PILImage
         img = _PILImage.open(BytesIO(file_bytes))
-        # Convertir a RGB si tiene canal alpha (PNG con transparencia)
         if img.mode in ("RGBA", "LA", "P"):
             img = img.convert("RGB")
-        # Generar PDF buscable con tesseract (lang: español + inglés)
         try:
-            pdf_bytes = pytesseract.image_to_pdf_or_hocr(img, lang="spa+eng", extension="pdf")
+            return pytesseract.image_to_pdf_or_hocr(img, lang="spa+eng", extension="pdf")
         except Exception:
-            pdf_bytes = pytesseract.image_to_pdf_or_hocr(img, lang="eng", extension="pdf")
-        return extract_pdf_fields(pdf_bytes)
+            return pytesseract.image_to_pdf_or_hocr(img, lang="eng", extension="pdf")
     except Exception:
-        return {}, ""
+        return None
+
+def extract_image_fields(file_bytes):
+    """OCR imagen → pipeline de facturas de proveedor (extract_pdf_fields)."""
+    pdf = _image_to_ocr_pdf(file_bytes)
+    if pdf:
+        return extract_pdf_fields(pdf)
+    return {}, ""
+
+def extract_image_oc_fields(file_bytes):
+    """OCR imagen → pipeline de órdenes de compra (extract_oc_fields)."""
+    pdf = _image_to_ocr_pdf(file_bytes)
+    if pdf:
+        return extract_oc_fields(pdf)
+    return {}, {}, ""
 
 
 def extract_oc_fields(file_bytes):
@@ -2864,8 +2872,7 @@ with tab_orders:
             elif ext in ("jpg","jpeg","png"):
                 st.image(file_bytes, caption="Vista previa", width=420)
                 with st.spinner("Leyendo imagen con OCR..."):
-                    oc_fields, _oc_raw = extract_image_fields(file_bytes)
-                    _oc_tables = {}
+                    oc_fields, _oc_tables, _oc_raw = extract_image_oc_fields(file_bytes)
                 st.caption("🤖 Datos detectados por OCR — revisá antes de confirmar." if oc_fields.get("cuit")
                            else "ℹ️ OCR no detectó datos. Completá los campos a mano.")
 
