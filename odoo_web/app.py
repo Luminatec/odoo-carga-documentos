@@ -1307,6 +1307,28 @@ def create_vendor_partner(models, uid, api_key, name, vat, street="", phone="", 
     if email_addr: vals["email"]  = email_addr
     return call(models, uid, api_key, "res.partner", "create", [vals])
 
+def extract_image_fields(file_bytes):
+    """
+    OCR de imagen (PNG/JPG/JPEG) → PDF buscable → mismo pipeline que extract_pdf_fields.
+    Usa pytesseract + Pillow. Devuelve (extracted, raw_text) igual que extract_pdf_fields.
+    """
+    try:
+        import pytesseract
+        from PIL import Image as _PILImage
+        img = _PILImage.open(BytesIO(file_bytes))
+        # Convertir a RGB si tiene canal alpha (PNG con transparencia)
+        if img.mode in ("RGBA", "LA", "P"):
+            img = img.convert("RGB")
+        # Generar PDF buscable con tesseract (lang: español + inglés)
+        try:
+            pdf_bytes = pytesseract.image_to_pdf_or_hocr(img, lang="spa+eng", extension="pdf")
+        except Exception:
+            pdf_bytes = pytesseract.image_to_pdf_or_hocr(img, lang="eng", extension="pdf")
+        return extract_pdf_fields(pdf_bytes)
+    except Exception:
+        return {}, ""
+
+
 def extract_oc_fields(file_bytes):
     """
     Parser para Órdenes de Compra de clientes (formato heterogéneo).
@@ -2288,8 +2310,8 @@ else:
 # ═══════════════════════════════════════════════════
 with tab_bills:
     st.subheader("Facturas de proveedores")
-    files = st.file_uploader("Arrastrá o elegí archivos (PDF, XLSX)",
-        type=["pdf","xlsx","xls"], accept_multiple_files=True, key="bills_upload")
+    files = st.file_uploader("Arrastrá o elegí archivos (PDF, JPG, PNG, XLSX)",
+        type=["pdf","jpg","jpeg","png","xlsx","xls"], accept_multiple_files=True, key="bills_upload")
     if not files:
         st.caption("Subí uno o más archivos para empezar.")
     for uf in (files or []):
@@ -2347,7 +2369,10 @@ with tab_bills:
                            else "ℹ️ PDF sin texto extraíble. Completá los datos a mano.")
             elif ext in ("jpg","jpeg","png"):
                 st.image(file_bytes, caption="Vista previa", width=420)
-                st.warning("📷 Las imágenes no tienen extracción automática — completá el formulario a mano. Para mejor detección subí el archivo como **PDF**.")
+                with st.spinner("Leyendo imagen con OCR..."):
+                    extracted, raw_text = extract_image_fields(file_bytes)
+                st.caption("🤖 Datos detectados por OCR — revisá antes de confirmar." if extracted.get("proveedor")
+                           else "ℹ️ OCR no detectó datos. Completá los campos a mano.")
 
             # Cargar cuentas contables (cacheado)
             _bill_accounts = get_all_accounts(models_url, uid, api_key)
@@ -2638,8 +2663,8 @@ with tab_bills:
 # ═══════════════════════════════════════════════════
 with tab_orders:
     st.subheader("Pedidos de clientes")
-    files_o = st.file_uploader("Arrastrá o elegí archivos (PDF, XLSX)",
-        type=["pdf","xlsx","xls"], accept_multiple_files=True, key="orders_upload")
+    files_o = st.file_uploader("Arrastrá o elegí archivos (PDF, JPG, PNG, XLSX)",
+        type=["pdf","jpg","jpeg","png","xlsx","xls"], accept_multiple_files=True, key="orders_upload")
     if not files_o:
         st.caption("Subí uno o más archivos para empezar.")
     for uf in (files_o or []):
@@ -2838,7 +2863,11 @@ with tab_orders:
                     oc_fields, _oc_tables, _oc_raw = extract_oc_fields(file_bytes)
             elif ext in ("jpg","jpeg","png"):
                 st.image(file_bytes, caption="Vista previa", width=420)
-                st.warning("📷 Las imágenes no tienen extracción automática — completá el formulario a mano. Para mejor detección subí el archivo como **PDF**.")
+                with st.spinner("Leyendo imagen con OCR..."):
+                    oc_fields, _oc_raw = extract_image_fields(file_bytes)
+                    _oc_tables = {}
+                st.caption("🤖 Datos detectados por OCR — revisá antes de confirmar." if oc_fields.get("cuit")
+                           else "ℹ️ OCR no detectó datos. Completá los campos a mano.")
 
             # ── Session state para partner de esta OC ─────────────────────
             _ss_pid   = f"oc_pid_{uf.name}"
