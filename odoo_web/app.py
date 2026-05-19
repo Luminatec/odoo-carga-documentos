@@ -1254,20 +1254,34 @@ def search_product_by_code_or_name(models_url, uid, api_key,
             if r: return r
 
         # ── 1b. CÓDIGO como fragmento de nombre ────────────────────────────────
-        # Útil para códigos de fabricante (GI-16, BH-1, LiDE 300) que aparecen
-        # en el nombre del producto aunque el default_code sea interno (LCANO000XX)
-        if code.strip() and len(code.strip()) >= 2:
+        # Útil para códigos de fabricante (GI-16, BH-1) que aparecen en el nombre.
+        # NO generamos variante con espacio ("GI 16") porque es demasiado amplia.
+        _code_s = code.strip()
+        if _code_s and len(_code_s) >= 2:
             _code_variants = dict.fromkeys([
-                code.strip(),                              # "GI-16"
-                re.sub(r"[-_/]", " ", code.strip()),       # "GI 16"
-                re.sub(r"[-_/ ]", "", code.strip()),       # "GI16"
-                code.strip().lstrip("0"),                  # "300" → "300"
+                _code_s,                                   # "GI-16" (con guión: específico)
+                re.sub(r"[-_/ ]", "", _code_s),            # "GI16" (sin separadores)
             ])
             for cv in _code_variants:
                 if not cv or len(cv) < 2:
                     continue
-                r = _best(_tmpl([("active", "=", True), ("name", "ilike", cv)], 10))
-                if r: return r
+                # Código puramente numérico: demasiado genérico solo → combinarlo con
+                # palabras significativas de la descripción (≥5 chars, no stopwords)
+                if cv.isdigit():
+                    _stops = {"para", "con", "por", "original", "canon", "pack",
+                              "color", "negro", "plano", "escaner", "formato"}
+                    _desc_words = [
+                        w for w in re.sub(r"[^\w\s]", " ", name_keywords).split()
+                        if len(w) >= 4 and w.lower() not in _stops
+                    ]
+                    for dw in _desc_words[:3]:
+                        r = _best(_tmpl([("active", "=", True),
+                                         ("name", "ilike", cv),
+                                         ("name", "ilike", dw)], 10))
+                        if r: return r
+                else:
+                    r = _best(_tmpl([("active", "=", True), ("name", "ilike", cv)], 10))
+                    if r: return r
 
         # ── 2. NOMBRE por keywords ──────────────────────────────────────────────
         if name_keywords and name_keywords.strip():
