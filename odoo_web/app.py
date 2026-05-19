@@ -1307,8 +1307,34 @@ def create_vendor_partner(models, uid, api_key, name, vat, street="", phone="", 
     if email_addr: vals["email"]  = email_addr
     return call(models, uid, api_key, "res.partner", "create", [vals])
 
-def _image_to_ocr_pdf(file_bytes):
-    """Convierte imagen a PDF buscable usando pytesseract. Devuelve bytes o None."""
+def _image_to_ocr_text(file_bytes):
+    """
+    OCR de imagen con pytesseract.
+    Devuelve (text, error_msg). Si tesseract no está instalado, error_msg != "".
+    """
+    try:
+        import pytesseract
+        from PIL import Image as _PILImage
+        img = _PILImage.open(BytesIO(file_bytes))
+        if img.mode in ("RGBA", "LA", "P"):
+            img = img.convert("RGB")
+        # Mejorar resolución para OCR (mínimo 300 DPI recomendado)
+        w, h = img.size
+        if w < 1000:
+            factor = max(2, 1200 // w)
+            img = img.resize((w * factor, h * factor), _PILImage.LANCZOS)
+        try:
+            text = pytesseract.image_to_string(img, lang="spa+eng",
+                                               config="--psm 6 --oem 3")
+        except Exception:
+            text = pytesseract.image_to_string(img, lang="eng",
+                                               config="--psm 6 --oem 3")
+        return text, ""
+    except Exception as e:
+        return "", str(e)
+
+def extract_image_fields(file_bytes):
+    """OCR imagen → pipeline de facturas (texto directo a extract_pdf_fields via PDF)."""
     try:
         import pytesseract
         from PIL import Image as _PILImage
@@ -1316,25 +1342,67 @@ def _image_to_ocr_pdf(file_bytes):
         if img.mode in ("RGBA", "LA", "P"):
             img = img.convert("RGB")
         try:
-            return pytesseract.image_to_pdf_or_hocr(img, lang="spa+eng", extension="pdf")
+            pdf = pytesseract.image_to_pdf_or_hocr(img, lang="spa+eng", extension="pdf")
         except Exception:
-            return pytesseract.image_to_pdf_or_hocr(img, lang="eng", extension="pdf")
-    except Exception:
-        return None
-
-def extract_image_fields(file_bytes):
-    """OCR imagen → pipeline de facturas de proveedor (extract_pdf_fields)."""
-    pdf = _image_to_ocr_pdf(file_bytes)
-    if pdf:
+            pdf = pytesseract.image_to_pdf_or_hocr(img, lang="eng", extension="pdf")
         return extract_pdf_fields(pdf)
-    return {}, ""
+    except Exception:
+        return {}, ""
 
 def extract_image_oc_fields(file_bytes):
-    """OCR imagen → pipeline de órdenes de compra (extract_oc_fields)."""
-    pdf = _image_to_ocr_pdf(file_bytes)
-    if pdf:
-        return extract_oc_fields(pdf)
-    return {}, {}, ""
+    """
+    OCR imagen → extrae líneas de productos directamente del texto.
+    Usa image_to_string (no tablas pdfplumber) para funcionar con imágenes.
+    """
+    text, err = _image_to_ocr_text(file_bytes)
+    if err or not text.strip():
+        return {}, {}, err or ""
+
+    # Reutilizar patrones de extract_oc_fields sobre el texto OCR
+    # Construir resultado base
+    result = {
+        "cuit": "", "numero_oc": "", "fecha": "", "fecha_iso": "",
+        "condiciones_pago": "", "dias_pago": None,
+        "neto": "", "iva21": "", "iva105": "", "total": "",
+        "lineas": [],
+    }
+
+    # CUIT
+    _cuit_m = re.search(r"(?:CUIT|C\.U\.I\.T\.?)[:\s]*(\d{2}[-\s]?\d{8}[-\s]?\d{1})", text, re.I)
+    if _cuit_m:
+        result["cuit"] = _cuit_m.group(1).strip()
+
+    # Número OC
+    _oc_m = re.search(r"(?:OC|O\.C\.|Orden\s+de\s+Compra|N[°º#])[:\s]*([A-Z0-9\-]+)", text, re.I)
+    if _oc_m:
+        result["numero_oc"] = _oc_m.group(1).strip()
+
+    # Total
+    _tot_m = re.search(r"(?:TOTAL|Total)[^\d]*(\d[\d.,]+)", text, re.I)
+    if _tot_m:
+        result["total"] = _tot_m.group(1).strip()
+
+    # Líneas de productos: buscar filas con precio al final
+    # Patrón: (número opcional) texto ... $ precio
+    # Ej: "1  GI-16 (Set x4)  Tinta Original Canon  $40.229,00"
+    _price_pat = re.compile(
+        r"(?:^|\n)\s*(\d{1,3})\s+(.{3,60}?)\s+\$?\s*([\d]{1,3}(?:[.,]\d{3})*(?:[.,]\d{2}))\s*$",
+        re.MULTILINE
+    )
+    for m in _price_pat.finditer(text):
+        num, desc, precio = m.group(1), m.group(2).strip(), m.group(3).strip()
+        if len(desc) >= 3 and any(c.isalpha() for c in desc):
+            # Separar código de descripción si el campo desc empieza con un código corto
+            parts = desc.split(None, 1)
+            code = parts[0] if len(parts) > 1 and len(parts[0]) <= 20 else ""
+            descr = parts[1] if code else desc
+            result["lineas"].append({
+                "codigo": code, "descripcion": descr,
+                "cantidad": 1, "precio_unit": precio,
+                "subtotal": precio, "iva_pct": 21,
+            })
+
+    return result, {}, text
 
 
 def extract_oc_fields(file_bytes):
@@ -2873,8 +2941,15 @@ with tab_orders:
                 st.image(file_bytes, caption="Vista previa", width=420)
                 with st.spinner("Leyendo imagen con OCR..."):
                     oc_fields, _oc_tables, _oc_raw = extract_image_oc_fields(file_bytes)
-                st.caption("🤖 Datos detectados por OCR — revisá antes de confirmar." if oc_fields.get("cuit")
-                           else "ℹ️ OCR no detectó datos. Completá los campos a mano.")
+                _n_lineas = len(oc_fields.get("lineas", []))
+                if _oc_raw and not oc_fields.get("cuit") and _n_lineas == 0:
+                    st.warning("ℹ️ OCR leyó el texto pero no detectó patrones estructurados. Completá a mano.")
+                    with st.expander("🔍 Texto detectado por OCR (para diagnóstico)"):
+                        st.code(_oc_raw[:2000] if _oc_raw else "(vacío)")
+                elif not _oc_raw:
+                    st.error("❌ OCR falló — Tesseract puede no estar instalado aún. Intentá en 2 minutos o subí un PDF.")
+                else:
+                    st.caption(f"🤖 OCR detectó {_n_lineas} línea(s). Revisá antes de confirmar.")
 
             # ── Session state para partner de esta OC ─────────────────────
             _ss_pid   = f"oc_pid_{uf.name}"
