@@ -2288,8 +2288,8 @@ else:
 # ═══════════════════════════════════════════════════
 with tab_bills:
     st.subheader("Facturas de proveedores")
-    files = st.file_uploader("Arrastrá o elegí archivos (PDF, JPG, PNG, XLSX)",
-        type=["pdf","jpg","jpeg","png","xlsx","xls"], accept_multiple_files=True, key="bills_upload")
+    files = st.file_uploader("Arrastrá o elegí archivos (PDF, XLSX)",
+        type=["pdf","xlsx","xls"], accept_multiple_files=True, key="bills_upload")
     if not files:
         st.caption("Subí uno o más archivos para empezar.")
     for uf in (files or []):
@@ -2638,8 +2638,8 @@ with tab_bills:
 # ═══════════════════════════════════════════════════
 with tab_orders:
     st.subheader("Pedidos de clientes")
-    files_o = st.file_uploader("Arrastrá o elegí archivos (PDF, JPG, PNG, XLSX)",
-        type=["pdf","jpg","jpeg","png","xlsx","xls"], accept_multiple_files=True, key="orders_upload")
+    files_o = st.file_uploader("Arrastrá o elegí archivos (PDF, XLSX)",
+        type=["pdf","xlsx","xls"], accept_multiple_files=True, key="orders_upload")
     if not files_o:
         st.caption("Subí uno o más archivos para empezar.")
     for uf in (files_o or []):
