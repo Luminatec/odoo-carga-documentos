@@ -874,6 +874,24 @@ def odoo_url(model, record_id):
     # fallback hash-URL por si el modelo no está mapeado
     return odoo_url("{model}", record_id)
 
+def safe_float(v, default=0.0):
+    """Convierte a float tolerando formato ARS (1.234,56), strings vacíos y None."""
+    if v is None or v == "":
+        return default
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip().replace("$", "").replace(" ", "")
+    if "," in s and "." in s:
+        # 1.234,56 → quitar punto de miles, coma como decimal
+        s = s.replace(".", "").replace(",", ".")
+    elif "," in s:
+        s = s.replace(",", ".")
+    try:
+        return float(s)
+    except ValueError:
+        return default
+
+
 def fmt_ars(v):
     """Formatea número como moneda ARS: $ 1.234,56"""
     if not v:
@@ -1351,15 +1369,13 @@ def extract_image_fields(file_bytes):
 
 def extract_image_oc_fields(file_bytes):
     """
-    OCR imagen → extrae líneas de productos directamente del texto.
-    Usa image_to_string (no tablas pdfplumber) para funcionar con imágenes.
+    OCR imagen → extrae campos de Orden de Compra directamente del texto.
+    Usa image_to_string con múltiples estrategias de parsing.
     """
     text, err = _image_to_ocr_text(file_bytes)
     if err or not text.strip():
         return {}, {}, err or ""
 
-    # Reutilizar patrones de extract_oc_fields sobre el texto OCR
-    # Construir resultado base
     result = {
         "cuit": "", "numero_oc": "", "fecha": "", "fecha_iso": "",
         "condiciones_pago": "", "dias_pago": None,
@@ -1367,37 +1383,120 @@ def extract_image_oc_fields(file_bytes):
         "lineas": [],
     }
 
-    # CUIT
-    _cuit_m = re.search(r"(?:CUIT|C\.U\.I\.T\.?)[:\s]*(\d{2}[-\s]?\d{8}[-\s]?\d{1})", text, re.I)
-    if _cuit_m:
-        result["cuit"] = _cuit_m.group(1).strip()
+    lines = text.split("\n")
 
-    # Número OC
-    _oc_m = re.search(r"(?:OC|O\.C\.|Orden\s+de\s+Compra|N[°º#])[:\s]*([A-Z0-9\-]+)", text, re.I)
+    # ── CUIT ──────────────────────────────────────────────────────────────
+    _cuit_m = re.search(r"(?:CUIT|C\.U\.I\.T\.?)[:\s#]*(\d{2}[-\.\s]?\d{8}[-\.\s]?\d)", text, re.I)
+    if _cuit_m:
+        result["cuit"] = re.sub(r"[\s\.]", "-", _cuit_m.group(1).strip())
+
+    # ── Número OC ─────────────────────────────────────────────────────────
+    _oc_m = re.search(
+        r"(?:orden\s+de\s+compra|N[°º#.]*\s*OC|OC\s*N[°º#.]?|OC)[:\s#]*([A-Z0-9][\-A-Z0-9]{1,20})",
+        text, re.I)
     if _oc_m:
         result["numero_oc"] = _oc_m.group(1).strip()
 
-    # Total
-    _tot_m = re.search(r"(?:TOTAL|Total)[^\d]*(\d[\d.,]+)", text, re.I)
+    # ── Fecha ─────────────────────────────────────────────────────────────
+    _fecha_m = re.search(r"(\d{1,2})[/\-\.](\d{1,2})[/\-\.](\d{2,4})", text)
+    if _fecha_m:
+        d, m2, y = _fecha_m.group(1), _fecha_m.group(2), _fecha_m.group(3)
+        y = "20" + y if len(y) == 2 else y
+        result["fecha"] = f"{d}/{m2}/{y}"
+        try:
+            result["fecha_iso"] = f"{y}-{int(m2):02d}-{int(d):02d}"
+        except Exception:
+            pass
+
+    # ── Total ─────────────────────────────────────────────────────────────
+    _tot_m = re.search(r"(?:total\s+(?:general|orden|a\s+pagar)?)[:\s$]*(\d[\d.,]+)", text, re.I)
+    if not _tot_m:
+        _tot_m = re.search(r"(?:^|\n)\s*TOTAL[:\s$]*(\d[\d.,]+)", text, re.I | re.MULTILINE)
     if _tot_m:
         result["total"] = _tot_m.group(1).strip()
 
-    # Líneas de productos: buscar filas con precio al final
-    # Patrón: (número opcional) texto ... $ precio
-    # Ej: "1  GI-16 (Set x4)  Tinta Original Canon  $40.229,00"
-    _price_pat = re.compile(
-        r"(?:^|\n)\s*(\d{1,3})\s+(.{3,60}?)\s+\$?\s*([\d]{1,3}(?:[.,]\d{3})*(?:[.,]\d{2}))\s*$",
-        re.MULTILINE
+    # ── Líneas de productos ───────────────────────────────────────────────
+    # Palabras que indican que una línea NO es un producto sino una especificación
+    _spec_words = re.compile(
+        r"\b(dpi|usb|formato|resoluc|conect|inalamb|wifi|bluetooth|ppm|iso|"
+        r"garantia|incluye|compatible|dimensi|peso|voltaje|frecuencia|"
+        r"capacidad|velocidad|interfaz|color|negro|cian|magenta|amarillo)\b",
+        re.I)
+
+    # Patrón 1 (más estricto): cantidad (1-999) + código alfanumérico + desc + precio
+    # cantidad debe ser pequeño (1-99), precio al final con separador de miles
+    _pat1 = re.compile(
+        r"^\s*(\d{1,2})\s+"                         # cantidad 1-99
+        r"([A-Z][A-Z0-9\-/]{1,20})\s+"              # código (empieza con letra)
+        r"(.{3,80}?)\s+"                             # descripción
+        r"\$?\s*(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{2}))\s*$",  # precio con miles
+        re.MULTILINE | re.I
     )
-    for m in _price_pat.finditer(text):
-        num, desc, precio = m.group(1), m.group(2).strip(), m.group(3).strip()
-        if len(desc) >= 3 and any(c.isalpha() for c in desc):
-            # Separar código de descripción si el campo desc empieza con un código corto
-            parts = desc.split(None, 1)
-            code = parts[0] if len(parts) > 1 and len(parts[0]) <= 20 else ""
-            descr = parts[1] if code else desc
+
+    # Patrón 2: líneas que terminan en precio grande (≥ 4 dígitos con separadores)
+    # y tienen contenido alfanumérico significativo
+    _pat2 = re.compile(
+        r"^\s*([A-Z][A-Z0-9\-/\.]{1,25})\s+"        # código (empieza con letra)
+        r"(.{5,80}?)\s+"                             # descripción
+        r"\$?\s*(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{2}))\s*$",  # precio con miles
+        re.MULTILINE | re.I
+    )
+
+    # Patrón 3: línea entera con precio al final (fallback)
+    _pat3 = re.compile(
+        r"^\s*(.{5,80}?)\s+"
+        r"\$?\s*(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{2}))\s*$",
+        re.MULTILINE | re.I
+    )
+
+    seen_prices = set()
+
+    def _add_line(codigo, descripcion, cantidad, precio_str):
+        precio_str = precio_str.strip()
+        if precio_str in seen_prices:
+            return
+        # Excluir si precio < 1000 (separadores de miles implica >= 1.000)
+        precio_val = safe_float(precio_str)
+        if precio_val < 100:
+            return
+        # Excluir si la descripción parece una especificación técnica
+        if _spec_words.search(descripcion):
+            return
+        seen_prices.add(precio_str)
+        result["lineas"].append({
+            "codigo": codigo.strip(),
+            "descripcion": descripcion.strip(),
+            "cantidad": cantidad,
+            "precio_unit": precio_str,
+            "subtotal": precio_str,
+            "iva_pct": 21,
+        })
+
+    for m in _pat1.finditer(text):
+        qty_s, code, desc, precio = m.group(1), m.group(2), m.group(3), m.group(4)
+        _add_line(code, desc, int(qty_s), precio)
+
+    if not result["lineas"]:
+        for m in _pat2.finditer(text):
+            code, desc, precio = m.group(1), m.group(2), m.group(3)
+            _add_line(code, desc, 1, precio)
+
+    if not result["lineas"]:
+        for m in _pat3.finditer(text):
+            desc, precio = m.group(1), m.group(2)
+            precio_val = safe_float(precio)
+            if precio_val < 1000:
+                continue
+            if _spec_words.search(desc):
+                continue
+            if not any(c.isalpha() for c in desc):
+                continue
+            seen_prices_key = precio
+            if seen_prices_key in seen_prices:
+                continue
+            seen_prices.add(seen_prices_key)
             result["lineas"].append({
-                "codigo": code, "descripcion": descr,
+                "codigo": "", "descripcion": desc.strip(),
                 "cantidad": 1, "precio_unit": precio,
                 "subtotal": precio, "iva_pct": 21,
             })
@@ -2864,15 +2963,7 @@ with tab_orders:
                         limit=1)
                     _op    = _prods[0] if _prods else None
                     _cost  = float(_op["standard_price"]) if _op else 0.0
-                    _raw_pu = str(_ln.get("precio_unit") or "0").strip().replace("$","").replace(" ","")
-                    if "," in _raw_pu and "." in _raw_pu:
-                        _raw_pu = _raw_pu.replace(".","").replace(",",".")
-                    elif "," in _raw_pu:
-                        _raw_pu = _raw_pu.replace(",",".")
-                    try:
-                        _price = float(_raw_pu)
-                    except ValueError:
-                        _price = 0.0
+                    _price = safe_float(_ln.get("precio_unit", 0))
                     _margin = ((_price - _cost) / _price * 100) if _price > 0 else 0.0
                     _xl_enriched.append({**_ln, "odoo_product": _op,
                                           "cost": _cost, "margin_pct": _margin})
@@ -2896,9 +2987,9 @@ with tab_orders:
                 st.info("No se detectaron productos con cantidad pedida.")
 
             # ── Resumen financiero ─────────────────────────────────────────
-            _xl_neto  = sum(float(_el.get("subtotal",0)) for _el in _xl_enriched)
+            _xl_neto  = sum(safe_float(_el.get("subtotal",0)) for _el in _xl_enriched)
             _xl_iva   = sum(
-                float(_el.get("subtotal",0)) * float(_el.get("iva_pct",21)) / 100
+                safe_float(_el.get("subtotal",0)) * safe_float(_el.get("iva_pct",21)) / 100
                 for _el in _xl_enriched)
             _xl_total = _xl_neto + _xl_iva
             if _xl_enriched:
@@ -2950,14 +3041,15 @@ with tab_orders:
                 with st.spinner("Leyendo imagen con OCR..."):
                     oc_fields, _oc_tables, _oc_raw = extract_image_oc_fields(file_bytes)
                 _n_lineas = len(oc_fields.get("lineas", []))
-                if _oc_raw and not oc_fields.get("cuit") and _n_lineas == 0:
-                    st.warning("ℹ️ OCR leyó el texto pero no detectó patrones estructurados. Completá a mano.")
-                    with st.expander("🔍 Texto detectado por OCR (para diagnóstico)"):
-                        st.code(_oc_raw[:2000] if _oc_raw else "(vacío)")
-                elif not _oc_raw:
+                if not _oc_raw:
                     st.error("❌ OCR falló — Tesseract puede no estar instalado aún. Intentá en 2 minutos o subí un PDF.")
                 else:
-                    st.caption(f"🤖 OCR detectó {_n_lineas} línea(s). Revisá antes de confirmar.")
+                    if _n_lineas == 0:
+                        st.warning("⚠️ OCR leyó el texto pero no detectó líneas de productos. Revisá el texto crudo y completá a mano si es necesario.")
+                    else:
+                        st.caption(f"🤖 OCR detectó {_n_lineas} línea(s). Revisá antes de confirmar.")
+                    with st.expander("🔍 Ver texto bruto detectado por OCR"):
+                        st.code(_oc_raw if _oc_raw else "(vacío)")
 
             # ── Session state para partner de esta OC ─────────────────────
             _ss_pid   = f"oc_pid_{uf.name}"
@@ -3069,15 +3161,7 @@ with tab_orders:
                         )
                         _op = _prods[0] if _prods else None
                     _cost  = float(_op["standard_price"]) if _op else 0.0
-                    _raw_pu = str(_ln.get("precio_unit") or "0").strip().replace("$","").replace(" ","")
-                    if "," in _raw_pu and "." in _raw_pu:
-                        _raw_pu = _raw_pu.replace(".","").replace(",",".")
-                    elif "," in _raw_pu:
-                        _raw_pu = _raw_pu.replace(",",".")
-                    try:
-                        _price = float(_raw_pu)
-                    except ValueError:
-                        _price = 0.0
+                    _price = safe_float(_ln.get("precio_unit", 0))
                     _margin = ((_price - _cost) / _price * 100) if _price > 0 else 0.0
                     _enriched.append({**_ln,
                         "odoo_product": _op,
@@ -3164,16 +3248,16 @@ with tab_orders:
                 st.info("No se detectaron líneas de productos automáticamente.")
 
             # Cálculo de totales desde líneas enriquecidas
-            _calc_neto = sum(float(_el.get("subtotal",0)) for _el in _enriched)
+            _calc_neto = sum(safe_float(_el.get("subtotal",0)) for _el in _enriched)
             _calc_iva21 = sum(
-                float(_el.get("subtotal",0)) * 0.21
-                for _el in _enriched if abs(float(_el.get("iva_pct",21)) - 21) < 1)
+                safe_float(_el.get("subtotal",0)) * 0.21
+                for _el in _enriched if abs(safe_float(_el.get("iva_pct",21)) - 21) < 1)
             _calc_iva105 = sum(
-                float(_el.get("subtotal",0)) * 0.105
-                for _el in _enriched if abs(float(_el.get("iva_pct",21)) - 10.5) < 1)
+                safe_float(_el.get("subtotal",0)) * 0.105
+                for _el in _enriched if abs(safe_float(_el.get("iva_pct",21)) - 10.5) < 1)
             _calc_iva   = _calc_iva21 + _calc_iva105
             _calc_total = _calc_neto + _calc_iva
-            _calc_costo = sum(float(_el.get("cost",0)) * float(_el.get("cantidad",1))
+            _calc_costo = sum(safe_float(_el.get("cost",0)) * safe_float(_el.get("cantidad",1))
                               for _el in _enriched)
             _margin_total = ((_calc_neto - _calc_costo) / _calc_neto * 100
                              if _calc_neto > 0 else 0.0)
