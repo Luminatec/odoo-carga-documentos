@@ -72,13 +72,10 @@ st.markdown("""
     padding: 8px 0 14px 0;
   }
   .lumi-logo-text {
-    font-size: 1.55rem; font-weight: 900;
-    color: #ffffff !important; letter-spacing: -1px;
+    font-size: 1.6rem; font-weight: 900;
+    color: var(--lumi-red) !important; letter-spacing: -1px;
   }
-  .lumi-logo-text em {
-    color: var(--lumi-red) !important; font-style: normal;
-  }
-  .lumi-logo-dot { color: var(--lumi-gold) !important; font-size: 1.7rem; }
+  .lumi-logo-dot { color: var(--lumi-gold) !important; font-size: 1.8rem; }
 
   /* ── Título principal ─────────────────────────────────────── */
   .main-title {
@@ -1976,8 +1973,8 @@ with st.sidebar:
         st.image("logo.png", width=180)
     else:
         st.markdown("""<div class="lumi-sidebar-logo">
-  <span class="lumi-logo-dot">📦</span>
-  <span class="lumi-logo-text">LUMINA<em>TEC</em></span>
+  <span class="lumi-logo-dot">🛒</span>
+  <span class="lumi-logo-text">LUMINATEC</span>
 </div>""", unsafe_allow_html=True)
     st.markdown("---")
 
