@@ -2886,7 +2886,19 @@ with tab_orders:
 
             # ── SECCIÓN 1: CLIENTE ────────────────────────────────────────
             st.markdown("##### 🏢 Cliente")
-            _oc_cuit = oc_fields.get("cuit","")
+
+            # CUIT editable en tiempo real (fuera del form), igual que en Facturas
+            _oc_cuit_key = f"oc_cuit_edit_{uf.name}"
+            _oc_cuit_detected = oc_fields.get("cuit", "")
+            if _oc_cuit_key not in st.session_state:
+                st.session_state[_oc_cuit_key] = _oc_cuit_detected
+            _oc_cuit = st.text_input(
+                "CUIT del cliente",
+                key=_oc_cuit_key,
+                placeholder="30-12345678-9",
+                help="Detectado del documento. Corregilo si es necesario.",
+            ).strip()
+            _oc_cuit_norm = _oc_cuit.replace("-","").replace(" ","")
 
             # Lookup por CUIT si todavía no tenemos partner resuelto
             if _oc_cuit and not st.session_state[_ss_pid]:
@@ -2898,17 +2910,24 @@ with tab_orders:
             _partner_id_oc   = st.session_state[_ss_pid]
             _partner_name_oc = st.session_state[_ss_pname]
 
+            # Checkbox crear nuevo (solo aparece cuando CUIT ingresado y no encontrado)
+            _oc_create_key = f"oc_create_new_{uf.name}"
+            if _oc_create_key not in st.session_state:
+                st.session_state[_oc_create_key] = False
+
             if _partner_id_oc:
-                st.success(f"✅ Cliente identificado por CUIT **{_oc_cuit}**: **{_partner_name_oc}**")
+                st.success(f"✅ Cliente: **{_partner_name_oc}** (CUIT {_oc_cuit})")
                 _pt_id, _pt_name = get_customer_payment_terms(models_url, uid, api_key, _partner_id_oc)
+            elif _oc_cuit:
+                st.warning(f"⚠️ CUIT **{_oc_cuit}** no encontrado en Odoo.")
+                st.checkbox("➕ Crear nuevo cliente en Odoo", key=_oc_create_key)
+                _pt_id, _pt_name = None, None
             else:
-                if _oc_cuit:
-                    st.warning(f"⚠️ CUIT **{_oc_cuit}** no encontrado en Odoo.")
-                else:
-                    st.warning("⚠️ No se detectó CUIT en el documento. Completá los datos del cliente.")
+                st.info("ℹ️ Ingresá el CUIT del cliente para buscarlo en Odoo.")
                 _pt_id, _pt_name = None, None
 
-                with st.expander("➕ Crear nuevo cliente en Odoo", expanded=True):
+            if st.session_state.get(_oc_create_key):
+                with st.expander("📝 Datos del nuevo cliente", expanded=True):
                     _nc1, _nc2 = st.columns(2)
                     nc_name   = _nc1.text_input("Razón social *", key=f"nc_name_{uf.name}")
                     nc_cuit   = _nc2.text_input("CUIT *", value=_oc_cuit,
@@ -2923,6 +2942,7 @@ with tab_orders:
                                     nc_name, nc_cuit, nc_street, nc_phone, nc_email)
                                 st.session_state[_ss_pid]   = _new_pid
                                 st.session_state[_ss_pname] = nc_name
+                                st.session_state[_oc_create_key] = False
                                 st.success(f"✅ Cliente **{nc_name}** creado en Odoo (ID {_new_pid})")
                                 st.rerun()
                             except Exception as _e:
