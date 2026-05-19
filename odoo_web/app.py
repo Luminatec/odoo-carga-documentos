@@ -1370,7 +1370,11 @@ def extract_image_fields(file_bytes):
 def extract_image_oc_fields(file_bytes):
     """
     OCR imagen → extrae campos de Orden de Compra directamente del texto.
-    Usa image_to_string con múltiples estrategias de parsing.
+
+    Formato observado en OCs Canon:
+      Línea N-1: descripción completa del producto (viene antes de la línea del precio)
+      Línea N  : [ítem#] [código] [desc parcial] $ [precio]
+      Línea N+1: especificación técnica (a ignorar)
     """
     text, err = _image_to_ocr_text(file_bytes)
     if err or not text.strip():
@@ -1383,7 +1387,7 @@ def extract_image_oc_fields(file_bytes):
         "lineas": [],
     }
 
-    lines = text.split("\n")
+    lines = [ln for ln in text.split("\n")]  # conservar índices
 
     # ── CUIT ──────────────────────────────────────────────────────────────
     _cuit_m = re.search(r"(?:CUIT|C\.U\.I\.T\.?)[:\s#]*(\d{2}[-\.\s]?\d{8}[-\.\s]?\d)", text, re.I)
@@ -1409,97 +1413,76 @@ def extract_image_oc_fields(file_bytes):
             pass
 
     # ── Total ─────────────────────────────────────────────────────────────
-    _tot_m = re.search(r"(?:total\s+(?:general|orden|a\s+pagar)?)[:\s$]*(\d[\d.,]+)", text, re.I)
-    if not _tot_m:
-        _tot_m = re.search(r"(?:^|\n)\s*TOTAL[:\s$]*(\d[\d.,]+)", text, re.I | re.MULTILINE)
-    if _tot_m:
-        result["total"] = _tot_m.group(1).strip()
+    for _tp in [
+        r"(?:total\s+(?:general|orden|a\s+pagar)?)[:\s$]*(\d[\d.,]+)",
+        r"(?:^|\n)\s*TOTAL[:\s$]*(\d[\d.,]+)",
+    ]:
+        _tot_m = re.search(_tp, text, re.I | re.MULTILINE)
+        if _tot_m:
+            result["total"] = _tot_m.group(1).strip()
+            break
 
     # ── Líneas de productos ───────────────────────────────────────────────
-    # Palabras que indican que una línea NO es un producto sino una especificación
-    _spec_words = re.compile(
-        r"\b(dpi|usb|formato|resoluc|conect|inalamb|wifi|bluetooth|ppm|iso|"
-        r"garantia|incluye|compatible|dimensi|peso|voltaje|frecuencia|"
-        r"capacidad|velocidad|interfaz|color|negro|cian|magenta|amarillo)\b",
-        re.I)
-
-    # Patrón 1 (más estricto): cantidad (1-999) + código alfanumérico + desc + precio
-    # cantidad debe ser pequeño (1-99), precio al final con separador de miles
-    _pat1 = re.compile(
-        r"^\s*(\d{1,2})\s+"                         # cantidad 1-99
-        r"([A-Z][A-Z0-9\-/]{1,20})\s+"              # código (empieza con letra)
-        r"(.{3,80}?)\s+"                             # descripción
-        r"\$?\s*(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{2}))\s*$",  # precio con miles
-        re.MULTILINE | re.I
-    )
-
-    # Patrón 2: líneas que terminan en precio grande (≥ 4 dígitos con separadores)
-    # y tienen contenido alfanumérico significativo
-    _pat2 = re.compile(
-        r"^\s*([A-Z][A-Z0-9\-/\.]{1,25})\s+"        # código (empieza con letra)
-        r"(.{5,80}?)\s+"                             # descripción
-        r"\$?\s*(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{2}))\s*$",  # precio con miles
-        re.MULTILINE | re.I
-    )
-
-    # Patrón 3: línea entera con precio al final (fallback)
-    _pat3 = re.compile(
-        r"^\s*(.{5,80}?)\s+"
-        r"\$?\s*(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{2}))\s*$",
-        re.MULTILINE | re.I
+    # Patrón principal: línea que tiene $ seguido de número
+    # Maneja OCR artifacts: ; en vez de , en precios (77.896; → 77.896,00)
+    # Formato: [ítem] [código] [desc parcial] $ [precio]
+    _price_line_pat = re.compile(
+        r"^\s*(?:(\d{1,2})\s+)?(.+?)\s*\$\s*([\d][\d.,;:]+[\d])\s*$"
     )
 
     seen_prices = set()
 
-    def _add_line(codigo, descripcion, cantidad, precio_str):
-        precio_str = precio_str.strip()
-        if precio_str in seen_prices:
-            return
-        # Excluir si precio < 1000 (separadores de miles implica >= 1.000)
-        precio_val = safe_float(precio_str)
-        if precio_val < 100:
-            return
-        # Excluir si la descripción parece una especificación técnica
-        if _spec_words.search(descripcion):
-            return
-        seen_prices.add(precio_str)
+    for i, line in enumerate(lines):
+        m = _price_line_pat.match(line)
+        if not m:
+            continue
+
+        item_s   = m.group(1)   # número de ítem (puede ser None)
+        code_frag = m.group(2).strip()
+        price_raw = m.group(3).strip()
+
+        # Limpiar artefactos OCR en el precio: ; o : → ,
+        price_clean = re.sub(r"[;:]", ",", price_raw)
+
+        # Validar que es un precio razonable (> 100 ARS)
+        price_val = safe_float(price_clean)
+        if price_val < 100:
+            continue
+
+        # Evitar duplicados
+        if price_clean in seen_prices:
+            continue
+        seen_prices.add(price_clean)
+
+        # ── Extraer código: primer token del fragmento en la línea del precio
+        parts = code_frag.split(None, 1)
+        codigo    = parts[0] if parts else ""
+        desc_frag = parts[1] if len(parts) > 1 else ""
+
+        # ── Buscar descripción completa en la línea ANTERIOR (no vacía)
+        desc_prev = ""
+        for j in range(i - 1, max(i - 4, -1), -1):
+            prev = lines[j].strip()
+            # Ignorar líneas vacías o que son solo números/encabezados
+            if prev and not re.match(r"^\d+$", prev) and len(prev) > 3:
+                desc_prev = prev
+                break
+
+        # Usar descripción previa como descripción principal; si no hay, usar fragmento
+        descripcion = desc_prev if desc_prev else desc_frag or code_frag
+
+        # Limpiar artefactos OCR comunes en la descripción
+        descripcion = re.sub(r"^[A-Z]\s+", "", descripcion)  # letra suelta al inicio (ej: "E Cabezal...")
+        descripcion = descripcion.strip(" ,-—")
+
         result["lineas"].append({
-            "codigo": codigo.strip(),
-            "descripcion": descripcion.strip(),
-            "cantidad": cantidad,
-            "precio_unit": precio_str,
-            "subtotal": precio_str,
-            "iva_pct": 21,
+            "codigo":      codigo,
+            "descripcion": descripcion,
+            "cantidad":    1,
+            "precio_unit": price_clean,
+            "subtotal":    price_clean,
+            "iva_pct":     21,
         })
-
-    for m in _pat1.finditer(text):
-        qty_s, code, desc, precio = m.group(1), m.group(2), m.group(3), m.group(4)
-        _add_line(code, desc, int(qty_s), precio)
-
-    if not result["lineas"]:
-        for m in _pat2.finditer(text):
-            code, desc, precio = m.group(1), m.group(2), m.group(3)
-            _add_line(code, desc, 1, precio)
-
-    if not result["lineas"]:
-        for m in _pat3.finditer(text):
-            desc, precio = m.group(1), m.group(2)
-            precio_val = safe_float(precio)
-            if precio_val < 1000:
-                continue
-            if _spec_words.search(desc):
-                continue
-            if not any(c.isalpha() for c in desc):
-                continue
-            seen_prices_key = precio
-            if seen_prices_key in seen_prices:
-                continue
-            seen_prices.add(seen_prices_key)
-            result["lineas"].append({
-                "codigo": "", "descripcion": desc.strip(),
-                "cantidad": 1, "precio_unit": precio,
-                "subtotal": precio, "iva_pct": 21,
-            })
 
     return result, {}, text
 
