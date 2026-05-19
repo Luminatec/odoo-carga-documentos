@@ -1244,7 +1244,7 @@ def search_product_by_code_or_name(models_url, uid, api_key,
                                 "product.template", "search_read",
                                 [domain], {"fields": F, "limit": lim})
 
-        # ── 1. CÓDIGO ──────────────────────────────────────────────────────────
+        # ── 1. CÓDIGO exacto / ilike en default_code ──────────────────────────
         for c in dict.fromkeys([code.strip(), code.strip().lstrip("0")]):
             if not c:
                 continue
@@ -1253,15 +1253,42 @@ def search_product_by_code_or_name(models_url, uid, api_key,
             r = _best(_tmpl([("default_code", "ilike", c), ("active", "=", True)], 10))
             if r: return r
 
-        # ── 2. NOMBRE ──────────────────────────────────────────────────────────
+        # ── 1b. CÓDIGO como fragmento de nombre ────────────────────────────────
+        # Útil para códigos de fabricante (GI-16, BH-1, LiDE 300) que aparecen
+        # en el nombre del producto aunque el default_code sea interno (LCANO000XX)
+        if code.strip() and len(code.strip()) >= 2:
+            _code_variants = dict.fromkeys([
+                code.strip(),                              # "GI-16"
+                re.sub(r"[-_/]", " ", code.strip()),       # "GI 16"
+                re.sub(r"[-_/ ]", "", code.strip()),       # "GI16"
+                code.strip().lstrip("0"),                  # "300" → "300"
+            ])
+            for cv in _code_variants:
+                if not cv or len(cv) < 2:
+                    continue
+                r = _best(_tmpl([("active", "=", True), ("name", "ilike", cv)], 10))
+                if r: return r
+
+        # ── 2. NOMBRE por keywords ──────────────────────────────────────────────
         if name_keywords and name_keywords.strip():
-            kw     = re.sub(r"[^\w\s]", " ", name_keywords)
-            words  = kw.split()
-            # Tokens con letras Y dígitos (números de modelo: G1110, 190C, 190BK…)
+            # Preservar guiones para capturar códigos como "GI-16", "BH-1", "LiDE-300"
+            kw_hyphens = re.sub(r"[^\w\s\-]", " ", name_keywords)
+            kw         = re.sub(r"[^\w\s]",   " ", name_keywords)
+            words_hyph = kw_hyphens.split()
+            words      = kw.split()
+            # Tokens con guión Y dígitos: "GI-16", "BH-1", "LiDE-300" → tratar como modelo
+            hyphen_model = [w for w in words_hyph
+                            if "-" in w and re.search(r"\d", w) and len(w) >= 3]
+            # Tokens con letras Y dígitos (sin guión): G1110, 190C, 190BK…
             model  = [w for w in words
                       if re.search(r"[A-Za-z]", w) and re.search(r"\d", w) and len(w) >= 4]
             # Tokens solo letras, cortos (contexto tipo "GI")
             short  = [w for w in words if w.isalpha() and len(w) == 2]
+
+            # 2-extra: buscar por código con guión directamente en el nombre
+            for hm in hyphen_model[:2]:
+                r = _best(_tmpl([("active", "=", True), ("name", "ilike", hm)], 10))
+                if r: return r
 
             # 2a. Número de modelo literal ("G1110" → "PIXMA G1110")
             # Con contexto corto (ej: "GI") para evitar falsos positivos:
