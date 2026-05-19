@@ -4712,9 +4712,18 @@ with tab_recibos:
                             _rc_info += "  ·  Sin facturas → se registra como pago a cuenta"
                         st.info(_rc_info)
 
-                        _rc_reg_btn = st.button(
-                            f"💵 Registrar Recibo en Odoo",
-                            type="primary", key=f"rc_btn_{_rcuit}")
+                        _dup_pending = st.session_state.get(f"rc_confirm_dup_{_rcuit}", False)
+                        if _dup_pending:
+                            st.button("↩️ Cancelar", key=f"rc_cancel_dup_{_rcuit}",
+                                      on_click=lambda: st.session_state.pop(
+                                          f"rc_confirm_dup_{_rcuit}", None))
+                            _rc_reg_btn = st.button(
+                                "⚠️ Registrar igual (puede ser duplicado)",
+                                type="secondary", key=f"rc_btn_{_rcuit}")
+                        else:
+                            _rc_reg_btn = st.button(
+                                f"💵 Registrar Recibo en Odoo",
+                                type="primary", key=f"rc_btn_{_rcuit}")
 
                         if _rc_reg_btn:
                             if _rc_neto <= 0:
@@ -4731,24 +4740,58 @@ with tab_recibos:
                                         _rcurr = _rci_first.get("currency_id")
                                         if _rcurr and isinstance(_rcurr, (list, tuple)):
                                             _rc_cur_id = _rcurr[0]
-                                with st.spinner("Registrando cobro en Odoo..."):
-                                    _rc_ok, _rc_res = register_customer_payment(
-                                        models, uid, api_key,
-                                        _rc_pid, _rc_neto, _rc_cur_id,
-                                        _rc_date_str, _rc_jour_id,
-                                        move_ids=_rcsel_ids if _rcsel_ids else None,
-                                        memo=_rc_memo)
-                                if _rc_ok:
-                                    st.success(
-                                        f"Recibo registrado para **{_rc_pname}** "
-                                        f"— ARS {fmt_ars(_rc_neto)}")
-                                    search_partners_by_cuits.clear()
-                                    get_customer_unpaid_invoices.clear()
-                                    st.info(
-                                        "Presioná 🔄 Actualizar para ver "
-                                        "el estado actualizado.")
+
+                                # ── Validación de duplicados ──────────────────
+                                # Busca pagos ya registrados con mismo cliente,
+                                # monto, fecha y journal en estado confirmado.
+                                _dup_key = f"rc_confirm_dup_{_rcuit}"
+                                _dup_existing = []
+                                try:
+                                    _dup_existing = models.execute_kw(
+                                        ODOO_DB, uid, api_key,
+                                        "account.payment", "search_read",
+                                        [[
+                                            ("partner_id",   "=",  _rc_pid),
+                                            ("amount",       "=",  _rc_neto),
+                                            ("date",         "=",  _rc_date_str),
+                                            ("journal_id",   "=",  _rc_jour_id),
+                                            ("payment_type", "=",  "inbound"),
+                                            ("state",        "in", ["posted", "reconciled"]),
+                                        ]],
+                                        {"fields": ["id", "name", "amount", "date"], "limit": 3})
+                                except Exception:
+                                    pass
+
+                                if _dup_existing and not st.session_state.get(_dup_key):
+                                    _dup_names = ", ".join(
+                                        d.get("name","?") for d in _dup_existing)
+                                    st.warning(
+                                        f"⚠️ Ya existe un cobro registrado con el mismo cliente, "
+                                        f"monto y fecha: **{_dup_names}**. "
+                                        f"Si es un cobro diferente, confirmá para continuar.")
+                                    st.session_state[_dup_key] = True
+                                    st.rerun()
                                 else:
-                                    st.error(f"Error al registrar en Odoo: {_rc_res}")
+                                    # Limpiar flag de confirmación para próxima vez
+                                    st.session_state.pop(_dup_key, None)
+                                    with st.spinner("Registrando cobro en Odoo..."):
+                                        _rc_ok, _rc_res = register_customer_payment(
+                                            models, uid, api_key,
+                                            _rc_pid, _rc_neto, _rc_cur_id,
+                                            _rc_date_str, _rc_jour_id,
+                                            move_ids=_rcsel_ids if _rcsel_ids else None,
+                                            memo=_rc_memo)
+                                    if _rc_ok:
+                                        st.success(
+                                            f"✅ Recibo registrado para **{_rc_pname}** "
+                                            f"— ARS {fmt_ars(_rc_neto)}")
+                                        search_partners_by_cuits.clear()
+                                        get_customer_unpaid_invoices.clear()
+                                        st.info(
+                                            "Presioná 🔄 Actualizar para ver "
+                                            "el estado actualizado.")
+                                    else:
+                                        st.error(f"Error al registrar en Odoo: {_rc_res}")
 
     st.divider()
     st.caption(
