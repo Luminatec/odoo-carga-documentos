@@ -2864,7 +2864,15 @@ with tab_orders:
                         limit=1)
                     _op    = _prods[0] if _prods else None
                     _cost  = float(_op["standard_price"]) if _op else 0.0
-                    _price = float(_ln.get("precio_unit") or 0)
+                    _raw_pu = str(_ln.get("precio_unit") or "0").strip().replace("$","").replace(" ","")
+                    if "," in _raw_pu and "." in _raw_pu:
+                        _raw_pu = _raw_pu.replace(".","").replace(",",".")
+                    elif "," in _raw_pu:
+                        _raw_pu = _raw_pu.replace(",",".")
+                    try:
+                        _price = float(_raw_pu)
+                    except ValueError:
+                        _price = 0.0
                     _margin = ((_price - _cost) / _price * 100) if _price > 0 else 0.0
                     _xl_enriched.append({**_ln, "odoo_product": _op,
                                           "cost": _cost, "margin_pct": _margin})
@@ -3061,7 +3069,15 @@ with tab_orders:
                         )
                         _op = _prods[0] if _prods else None
                     _cost  = float(_op["standard_price"]) if _op else 0.0
-                    _price = float(_ln.get("precio_unit") or 0)
+                    _raw_pu = str(_ln.get("precio_unit") or "0").strip().replace("$","").replace(" ","")
+                    if "," in _raw_pu and "." in _raw_pu:
+                        _raw_pu = _raw_pu.replace(".","").replace(",",".")
+                    elif "," in _raw_pu:
+                        _raw_pu = _raw_pu.replace(",",".")
+                    try:
+                        _price = float(_raw_pu)
+                    except ValueError:
+                        _price = 0.0
                     _margin = ((_price - _cost) / _price * 100) if _price > 0 else 0.0
                     _enriched.append({**_ln,
                         "odoo_product": _op,
