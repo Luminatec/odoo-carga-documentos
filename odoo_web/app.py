@@ -2346,7 +2346,8 @@ with tab_bills:
                 st.caption("🤖 Datos detectados — revisá antes de confirmar." if extracted.get("proveedor")
                            else "ℹ️ PDF sin texto extraíble. Completá los datos a mano.")
             elif ext in ("jpg","jpeg","png"):
-                st.image(file_bytes, caption="Vista previa", width=380)
+                st.image(file_bytes, caption="Vista previa", width=420)
+                st.warning("📷 Las imágenes no tienen extracción automática — completá el formulario a mano. Para mejor detección subí el archivo como **PDF**.")
 
             # Cargar cuentas contables (cacheado)
             _bill_accounts = get_all_accounts(models_url, uid, api_key)
@@ -2407,14 +2408,19 @@ with tab_bills:
 
             # ── Estado del proveedor + opción de crear nuevo ──────────────────────
             _create_new_vend_key = f"bill_create_new_vend_{uf.name}"
+            # Inicializar siempre en False para evitar que quede marcado de sesiones anteriores
+            if _create_new_vend_key not in st.session_state:
+                st.session_state[_create_new_vend_key] = False
+
             if _partner_preloaded:
                 st.info(f"🏢 Proveedor detectado por CUIT: **{_partner_preloaded[1]}**")
             elif _cuit_raw:
+                # CUIT ingresado pero no encontrado → ofrecer crear
                 st.warning(f"⚠️ CUIT **{_cuit_raw}** no encontrado en Odoo.")
-
-            # Checkbox para crear nuevo proveedor (aparece si no hay proveedor detectado)
-            if not _partner_preloaded:
                 st.checkbox("➕ Crear nuevo proveedor en Odoo", key=_create_new_vend_key)
+            else:
+                # Sin CUIT todavía → guiar al usuario, no mostrar form de creación
+                st.info("ℹ️ Ingresá el CUIT del proveedor para buscarlo en Odoo.")
 
             if st.session_state.get(_create_new_vend_key):
                 with st.expander("📝 Datos del nuevo proveedor", expanded=True):
@@ -2831,7 +2837,8 @@ with tab_orders:
                 with st.spinner("Leyendo OC..."):
                     oc_fields, _oc_tables, _oc_raw = extract_oc_fields(file_bytes)
             elif ext in ("jpg","jpeg","png"):
-                st.image(file_bytes, caption="Vista previa", width=380)
+                st.image(file_bytes, caption="Vista previa", width=420)
+                st.warning("📷 Las imágenes no tienen extracción automática — completá el formulario a mano. Para mejor detección subí el archivo como **PDF**.")
 
             # ── Session state para partner de esta OC ─────────────────────
             _ss_pid   = f"oc_pid_{uf.name}"
