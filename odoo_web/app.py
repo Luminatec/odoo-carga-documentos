@@ -21,37 +21,141 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-  [data-testid="stSidebar"] { background: #111111 !important; }
+  /* ── Variables de marca Luminatec ─────────────────────────── */
+  :root {
+    --lumi-red:    #FD0029;
+    --lumi-red-dk: #C21F34;
+    --lumi-gold:   #F2C800;
+    --lumi-dark:   #111111;
+    --lumi-gray:   #F7F7F7;
+    --lumi-border: #E0E0E0;
+  }
+
+  /* ── Sidebar ──────────────────────────────────────────────── */
+  [data-testid="stSidebar"] {
+    background: var(--lumi-dark) !important;
+    border-right: 3px solid var(--lumi-red) !important;
+  }
   [data-testid="stSidebar"] label,
   [data-testid="stSidebar"] .stMarkdown,
   [data-testid="stSidebar"] p,
   [data-testid="stSidebar"] small,
-  [data-testid="stSidebar"] span { color: #eeeeee !important; }
+  [data-testid="stSidebar"] span,
+  [data-testid="stSidebar"] .stCaption { color: #dddddd !important; }
+  [data-testid="stSidebar"] h1,
+  [data-testid="stSidebar"] h2,
+  [data-testid="stSidebar"] h3 { color: #ffffff !important; }
   [data-testid="stSidebar"] .stTextInput input {
-    background: #222 !important; color: #eee !important; border-color: #444 !important;
+    background: #1e1e1e !important; color: #eee !important;
+    border-color: #444 !important; border-radius: 6px !important;
+  }
+  [data-testid="stSidebar"] .stTextInput input:focus {
+    border-color: var(--lumi-red) !important;
+    box-shadow: 0 0 0 2px rgba(253,0,41,0.25) !important;
   }
   [data-testid="stSidebar"] .stButton button,
   [data-testid="stSidebar"] .stFormSubmitButton button {
-    background: #CC0000 !important; color: white !important;
+    background: var(--lumi-red) !important; color: white !important;
     border: none !important; font-weight: 700 !important;
+    border-radius: 6px !important; letter-spacing: 0.3px;
+    transition: background 0.15s ease !important;
   }
   [data-testid="stSidebar"] .stButton button:hover,
-  [data-testid="stSidebar"] .stFormSubmitButton button:hover { background: #AA0000 !important; }
-  .lumi-sidebar-logo { display:flex; align-items:center; gap:8px; padding:6px 0 12px 0; }
-  .lumi-logo-text { font-size:1.6rem; font-weight:900; color:#CC0000 !important; letter-spacing:-1px; }
-  .lumi-logo-dot  { color:#F5C200 !important; font-size:1.8rem; }
-  .main-title { font-size:1.9rem; font-weight:900; color:#CC0000; letter-spacing:-1px; }
-  .main-title span { color:#F5C200; }
-  [data-testid="stFileUploader"] { border:2px dashed #CC000033; border-radius:10px; padding:8px; }
+  [data-testid="stSidebar"] .stFormSubmitButton button:hover {
+    background: var(--lumi-red-dk) !important;
+  }
+  [data-testid="stSidebar"] hr { border-color: #333 !important; }
+
+  /* ── Logo / branding sidebar ──────────────────────────────── */
+  .lumi-sidebar-logo {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 0 14px 0;
+  }
+  .lumi-logo-text {
+    font-size: 1.55rem; font-weight: 900;
+    color: #ffffff !important; letter-spacing: -1px;
+  }
+  .lumi-logo-text em {
+    color: var(--lumi-red) !important; font-style: normal;
+  }
+  .lumi-logo-dot { color: var(--lumi-gold) !important; font-size: 1.7rem; }
+
+  /* ── Título principal ─────────────────────────────────────── */
+  .main-title {
+    font-size: 1.85rem; font-weight: 900;
+    color: var(--lumi-red); letter-spacing: -1px;
+    border-bottom: 3px solid var(--lumi-gold);
+    padding-bottom: 6px; margin-bottom: 4px;
+  }
+  .main-title span { color: var(--lumi-gold); }
+
+  /* ── Tabs ─────────────────────────────────────────────────── */
+  .stTabs [data-baseweb="tab-list"] {
+    gap: 4px;
+    border-bottom: 2px solid var(--lumi-border) !important;
+  }
+  .stTabs [data-baseweb="tab"] {
+    font-weight: 600; font-size: 0.88rem;
+    border-radius: 6px 6px 0 0 !important;
+    padding: 8px 16px !important;
+    color: #555 !important;
+  }
+  .stTabs [aria-selected="true"] {
+    background: var(--lumi-red) !important;
+    color: white !important;
+    border-bottom: 2px solid var(--lumi-red) !important;
+  }
+
+  /* ── File uploader ────────────────────────────────────────── */
+  [data-testid="stFileUploader"] {
+    border: 2px dashed rgba(253,0,41,0.3) !important;
+    border-radius: 10px !important;
+    padding: 8px !important;
+    background: rgba(253,0,41,0.02) !important;
+  }
+  [data-testid="stFileUploader"]:hover {
+    border-color: var(--lumi-red) !important;
+  }
+
+  /* ── Chips / badges ───────────────────────────────────────── */
   .admin-badge {
-    display:inline-block; background:#F5C200; color:#111;
-    font-size:0.7rem; font-weight:800; padding:3px 10px;
-    border-radius:10px; text-transform:uppercase; letter-spacing:0.5px;
+    display: inline-block;
+    background: var(--lumi-gold); color: #111;
+    font-size: 0.68rem; font-weight: 800;
+    padding: 3px 10px; border-radius: 10px;
+    text-transform: uppercase; letter-spacing: 0.6px;
   }
   .user-chip {
-    display:inline-block; background:#1a1a1a; color:#eee;
-    font-size:0.78rem; padding:4px 12px; border-radius:20px;
-    border:1px solid #444; margin-bottom:4px;
+    display: inline-block;
+    background: #1e1e1e; color: #eee;
+    font-size: 0.78rem; padding: 4px 12px;
+    border-radius: 20px; border: 1px solid #444;
+    margin-bottom: 4px;
+  }
+
+  /* ── Métricas ─────────────────────────────────────────────── */
+  [data-testid="stMetric"] {
+    background: var(--lumi-gray);
+    border-radius: 8px; padding: 10px 14px;
+    border-left: 4px solid var(--lumi-red);
+  }
+  [data-testid="stMetricValue"] { color: var(--lumi-red) !important; font-weight: 800 !important; }
+
+  /* ── Botones primarios (fuera del sidebar) ────────────────── */
+  .stButton > button[kind="primary"],
+  .stFormSubmitButton > button {
+    background: var(--lumi-red) !important;
+    color: white !important; font-weight: 700 !important;
+    border: none !important; border-radius: 6px !important;
+  }
+  .stButton > button[kind="primary"]:hover,
+  .stFormSubmitButton > button:hover {
+    background: var(--lumi-red-dk) !important;
+  }
+
+  /* ── Expanders ────────────────────────────────────────────── */
+  [data-testid="stExpander"] summary {
+    font-weight: 600; color: var(--lumi-red);
   }
 </style>
 """, unsafe_allow_html=True)
@@ -1872,8 +1976,8 @@ with st.sidebar:
         st.image("logo.png", width=180)
     else:
         st.markdown("""<div class="lumi-sidebar-logo">
-  <span class="lumi-logo-dot">🛒</span>
-  <span class="lumi-logo-text">LUMINATEC</span>
+  <span class="lumi-logo-dot">📦</span>
+  <span class="lumi-logo-text">LUMINA<em>TEC</em></span>
 </div>""", unsafe_allow_html=True)
     st.markdown("---")
 
