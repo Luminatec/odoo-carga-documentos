@@ -886,6 +886,9 @@ def safe_float(v, default=0.0):
         s = s.replace(".", "").replace(",", ".")
     elif "," in s:
         s = s.replace(",", ".")
+    elif re.match(r"^\d+\.\d{3}$", s):
+        # "77.896" → punto con exactamente 3 dígitos = separador de miles ARS → 77896
+        s = s.replace(".", "")
     try:
         return float(s)
     except ValueError:
@@ -1426,8 +1429,9 @@ def extract_image_oc_fields(file_bytes):
     # Patrón principal: línea que tiene $ seguido de número
     # Maneja OCR artifacts: ; en vez de , en precios (77.896; → 77.896,00)
     # Formato: [ítem] [código] [desc parcial] $ [precio]
+    # IMPORTANTE: precio puede terminar en ; (OCR artifact) → no requerir dígito final
     _price_line_pat = re.compile(
-        r"^\s*(?:(\d{1,2})\s+)?(.+?)\s*\$\s*([\d][\d.,;:]+[\d])\s*$"
+        r"^\s*(?:(\d{1,2})\s+)?(.+?)\s*\$\s*([\d][\d.,;:]*)\s*$"
     )
 
     seen_prices = set()
@@ -1441,8 +1445,11 @@ def extract_image_oc_fields(file_bytes):
         code_frag = m.group(2).strip()
         price_raw = m.group(3).strip()
 
-        # Limpiar artefactos OCR en el precio: ; o : → ,
-        price_clean = re.sub(r"[;:]", ",", price_raw)
+        # Limpiar artefactos OCR en el precio
+        # 1. Quitar trailing ; : , . (OCR los agrega al final cuando corta la línea)
+        price_clean = price_raw.rstrip(";:., ")
+        # 2. Reemplazar ; y : internos por , (OCR confunde coma con punto y coma)
+        price_clean = re.sub(r"[;:]", ",", price_clean)
 
         # Validar que es un precio razonable (> 100 ARS)
         price_val = safe_float(price_clean)
