@@ -2446,14 +2446,15 @@ def search_partners_by_cuits(models_url, uid, api_key, cuits_tuple):
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_customer_unpaid_invoices(models_url, uid, api_key, partner_ids_tuple):
-    """Facturas de cliente sin pagar (posted, not_paid/partial)."""
+    """Facturas de cliente sin pagar (posted, not_paid/partial).
+    Usa child_of para incluir contactos secundarios del mismo socio."""
     try:
         m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
         rows = m.execute_kw(ODOO_DB, uid, api_key, "account.move", "search_read",
             [[("move_type", "=", "out_invoice"),
               ("state", "=", "posted"),
               ("payment_state", "in", ["not_paid", "partial"]),
-              ("partner_id", "in", list(partner_ids_tuple))]],
+              ("partner_id", "child_of", list(partner_ids_tuple))]],
             {"fields": ["id", "name", "invoice_date", "invoice_date_due",
                         "amount_total", "amount_residual", "currency_id", "partner_id"],
              "order": "invoice_date asc", "limit": 300})
@@ -4531,11 +4532,29 @@ with tab_recibos:
             else:
                 _rc_all_inv = []
 
-            # Index invoices by partner_id
+            # Construir mapa inverso: id_hijo → id_padre (para agrupar facturas de contactos)
+            # Una factura puede estar a nombre de un contacto (hijo) del socio principal
+            _rc_child_to_parent = {}
+            if _rc_pids_found:
+                try:
+                    _all_contacts = models.execute_kw(
+                        ODOO_DB, uid, api_key, "res.partner", "search_read",
+                        [[("parent_id", "in", list(_rc_pids_found))]],
+                        {"fields": ["id", "parent_id"], "limit": 500})
+                    for _ct in _all_contacts:
+                        _parent = (_ct.get("parent_id") or [0])[0]
+                        if _parent:
+                            _rc_child_to_parent[_ct["id"]] = _parent
+                except Exception:
+                    pass
+
+            # Index invoices by partner_id (normalizando hijos al padre)
             _rc_inv_by_pid = {}
             for _rci in _rc_all_inv:
                 _rpid = (_rci.get("partner_id") or [0])[0]
-                _rc_inv_by_pid.setdefault(_rpid, []).append(_rci)
+                # Si es un contacto hijo, agrupar bajo el padre
+                _rpid_norm = _rc_child_to_parent.get(_rpid, _rpid)
+                _rc_inv_by_pid.setdefault(_rpid_norm, []).append(_rci)
 
             if st.button("🔄 Actualizar desde Odoo", key="rc_refresh"):
                 search_partners_by_cuits.clear()
@@ -4575,7 +4594,23 @@ with tab_recibos:
 
                     _rc_pid, _rc_pname = _rcp_data
                     _rc_invs = _rc_inv_by_pid.get(_rc_pid, [])
-                    st.markdown(f"**Cliente Odoo:** {_rc_pname} (ID {_rc_pid})")
+
+                    # Advertencia si el nombre del cheque difiere significativamente del Odoo
+                    _rc_nombre_excel = _rchs[0].get("nombre", "").strip().upper()
+                    _rc_nombre_odoo  = _rc_pname.strip().upper()
+                    # Comparación simple: ninguna palabra clave del nombre del cheque
+                    # (≥5 chars) aparece en el nombre Odoo → probable mismatch
+                    _rc_kws = [w for w in _rc_nombre_excel.split() if len(w) >= 5]
+                    _rc_match_ok = not _rc_kws or any(
+                        kw in _rc_nombre_odoo for kw in _rc_kws)
+                    if not _rc_match_ok:
+                        st.warning(
+                            f"⚠️ El CUIT **{_rcuit}** está asignado en Odoo a "
+                            f"**{_rc_pname}** (ID {_rc_pid}), pero el cheque fue emitido por "
+                            f"**{_rchs[0].get('nombre','')}**. "
+                            f"Verificá que el CUIT en Odoo sea correcto antes de registrar.")
+                    else:
+                        st.markdown(f"**Cliente Odoo:** {_rc_pname} (ID {_rc_pid})")
 
                     # ── Selector de facturas ─────────────────────────────────
                     _rcsel_ids  = []
