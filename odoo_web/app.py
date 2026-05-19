@@ -2428,18 +2428,51 @@ def register_expense_payment(models, uid, api_key, sheet_id, payment_date, journ
 
 @st.cache_data(ttl=60, show_spinner=False)
 def search_partners_by_cuits(models_url, uid, api_key, cuits_tuple):
-    """Busca socios en Odoo por tupla de CUITs. Retorna dict {cuit: (id, name)}."""
+    """Busca socios en Odoo por tupla de CUITs. Retorna dict {cuit_sin_guiones: (id, name)}.
+    Maneja que Odoo puede guardar el VAT con guiones (30-71189948-7) o sin (30711899487)."""
     try:
         m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
-        norm = [str(c).replace("-", "").replace(" ", "").strip() for c in cuits_tuple]
+
+        def _cuit_variants(c):
+            """Devuelve variantes de un CUIT para cubrir todos los formatos de Odoo:
+            - sin guiones:        30711899487
+            - con guiones:        30-71189948-7
+            - con prefijo AR:     AR30711899487   (Odoo l10n_ar)
+            - con prefijo AR+gu:  AR30-71189948-7
+            """
+            clean = str(c).replace("-", "").replace(" ", "").replace(".", "").strip()
+            # Si ya viene con prefijo AR, quitarlo para la base
+            if clean.upper().startswith("AR"):
+                clean = clean[2:]
+            variants = [clean]
+            if len(clean) == 11 and clean.isdigit():
+                fmt = f"{clean[:2]}-{clean[2:10]}-{clean[10]}"
+                variants.append(fmt)
+                variants.append(f"AR{clean}")
+                variants.append(f"AR{fmt}")
+            return variants
+
+        norm_set = set()   # CUITs sin guiones para lookup final
+        all_variants = []  # todas las variantes para el query
+        for c in cuits_tuple:
+            vs = _cuit_variants(c)
+            norm_set.add(vs[0])
+            all_variants.extend(vs)
+
         rows = m.execute_kw(ODOO_DB, uid, api_key, "res.partner", "search_read",
-            [[("vat", "in", norm), ("active", "=", True)]],
+            [[("vat", "in", all_variants), ("active", "=", True)]],
             {"fields": ["id", "name", "vat"], "limit": 300})
+
         result = {}
         for r in rows:
-            vat = (r.get("vat") or "").replace("-", "").replace(" ", "").strip()
-            if vat in norm:
-                result[vat] = (r["id"], r["name"])
+            # Normalizar el VAT guardado en Odoo: quitar prefijo AR y guiones
+            vat_raw = (r.get("vat") or "").strip()
+            vat_clean = vat_raw.upper()
+            if vat_clean.startswith("AR"):
+                vat_clean = vat_clean[2:]
+            vat_clean = vat_clean.replace("-", "").replace(" ", "")
+            if vat_clean in norm_set:
+                result[vat_clean] = (r["id"], r["name"])
         return result
     except Exception:
         return {}
@@ -4632,15 +4665,15 @@ with tab_recibos:
                                 "Fecha":   str(_rci.get("invoice_date") or ""),
                                 "Vence":   str(_rci.get("invoice_date_due") or ""),
                                 "Moneda":  _rcic,
-                                "Total":   _rcto,
-                                "Saldo":   _rcres,
+                                "Total":   fmt_ars(_rcto) if _rcic == "ARS" else f"{_rcic} {_rcto:,.2f}",
+                                "Saldo":   fmt_ars(_rcres) if _rcic == "ARS" else f"{_rcic} {_rcres:,.2f}",
                                 "_id":     _rci["id"],
                             })
                         _rci_df  = pd.DataFrame(_rci_rows)
                         _rci_cfg = {
                             "Sel":     st.column_config.CheckboxColumn("✓", width="small"),
-                            "Total":   st.column_config.NumberColumn("Total", format="%.2f"),
-                            "Saldo":   st.column_config.NumberColumn("Saldo", format="%.2f"),
+                            "Total":   st.column_config.TextColumn("Total"),
+                            "Saldo":   st.column_config.TextColumn("Saldo"),
                             "_id":     None,
                         }
                         _rci_disp = ["Sel", "Factura", "Fecha", "Vence",
