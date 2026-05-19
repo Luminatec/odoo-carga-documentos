@@ -2461,18 +2461,33 @@ def search_partners_by_cuits(models_url, uid, api_key, cuits_tuple):
 
         rows = m.execute_kw(ODOO_DB, uid, api_key, "res.partner", "search_read",
             [[("vat", "in", all_variants), ("active", "=", True)]],
-            {"fields": ["id", "name", "vat"], "limit": 300})
+            {"fields": ["id", "name", "vat", "is_company", "parent_id",
+                        "customer_rank", "type"], "limit": 300})
+
+        def _partner_score(r):
+            """Mayor puntaje = registro más apropiado para asociar un cobro.
+            Prioriza: cliente activo > empresa raíz > sin tipo especial."""
+            score = 0
+            if (r.get("customer_rank") or 0) > 0: score += 100
+            if r.get("is_company"):                score += 50
+            if not r.get("parent_id"):             score += 30
+            if r.get("type") in (False, "contact", "other"): score += 10
+            return score
+
+        # Agrupar por CUIT normalizado y quedarse con el de mayor score
+        _candidates = {}   # cuit_clean → list of rows
+        for r in rows:
+            vat_raw   = (r.get("vat") or "").strip().upper()
+            if vat_raw.startswith("AR"):
+                vat_raw = vat_raw[2:]
+            vat_clean = vat_raw.replace("-", "").replace(" ", "")
+            if vat_clean in norm_set:
+                _candidates.setdefault(vat_clean, []).append(r)
 
         result = {}
-        for r in rows:
-            # Normalizar el VAT guardado en Odoo: quitar prefijo AR y guiones
-            vat_raw = (r.get("vat") or "").strip()
-            vat_clean = vat_raw.upper()
-            if vat_clean.startswith("AR"):
-                vat_clean = vat_clean[2:]
-            vat_clean = vat_clean.replace("-", "").replace(" ", "")
-            if vat_clean in norm_set:
-                result[vat_clean] = (r["id"], r["name"])
+        for vat_clean, candidates in _candidates.items():
+            best = max(candidates, key=_partner_score)
+            result[vat_clean] = (best["id"], best["name"])
         return result
     except Exception:
         return {}
@@ -4630,7 +4645,12 @@ with tab_recibos:
                     # ── Detectar mismatch de nombre ───────────────────────────
                     _rc_nombre_excel = _rchs[0].get("nombre", "").strip().upper()
                     _rc_nombre_odoo  = _rc_pname_cuit.strip().upper()
-                    _rc_kws = [w for w in _rc_nombre_excel.split() if len(w) >= 5]
+                    # Limpiar puntuación de las keywords (ej: "LAURET," → "LAURET")
+                    _rc_kws = [
+                        re.sub(r"[^\w]", "", w)
+                        for w in _rc_nombre_excel.split()
+                        if len(re.sub(r"[^\w]", "", w)) >= 5
+                    ]
                     _rc_match_ok = not _rc_kws or any(
                         kw in _rc_nombre_odoo for kw in _rc_kws)
 
