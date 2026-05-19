@@ -4660,35 +4660,37 @@ with tab_recibos:
                             _rcres = float(_rci.get("amount_residual") or 0)
                             _rcto  = float(_rci.get("amount_total") or 0)
                             _rci_rows.append({
-                                "Sel":     False,
-                                "Factura": _rci.get("name") or f"ID {_rci['id']}",
-                                "Fecha":   str(_rci.get("invoice_date") or ""),
-                                "Vence":   str(_rci.get("invoice_date_due") or ""),
-                                "Moneda":  _rcic,
-                                "Total":   fmt_ars(_rcto) if _rcic == "ARS" else f"{_rcic} {_rcto:,.2f}",
-                                "Saldo":   fmt_ars(_rcres) if _rcic == "ARS" else f"{_rcic} {_rcres:,.2f}",
-                                "_id":     _rci["id"],
+                                "Sel":        False,
+                                "Factura":    _rci.get("name") or f"ID {_rci['id']}",
+                                "Fecha":      str(_rci.get("invoice_date") or ""),
+                                "Vence":      str(_rci.get("invoice_date_due") or ""),
+                                "Moneda":     _rcic,
+                                "Total":      fmt_ars(_rcto)  if _rcic == "ARS" else f"{_rcic} {_rcto:,.2f}",
+                                "Saldo":      fmt_ars(_rcres) if _rcic == "ARS" else f"{_rcic} {_rcres:,.2f}",
+                                "_saldo_num": _rcres,   # columna numérica oculta para cálculos
+                                "_id":        _rci["id"],
                             })
                         _rci_df  = pd.DataFrame(_rci_rows)
                         _rci_cfg = {
-                            "Sel":     st.column_config.CheckboxColumn("✓", width="small"),
-                            "Total":   st.column_config.TextColumn("Total"),
-                            "Saldo":   st.column_config.TextColumn("Saldo"),
-                            "_id":     None,
+                            "Sel":        st.column_config.CheckboxColumn("✓", width="small"),
+                            "Total":      st.column_config.TextColumn("Total"),
+                            "Saldo":      st.column_config.TextColumn("Saldo"),
+                            "_saldo_num": None,   # oculta
+                            "_id":        None,
                         }
                         _rci_disp = ["Sel", "Factura", "Fecha", "Vence",
                                      "Moneda", "Total", "Saldo"]
                         _rci_edited = st.data_editor(
-                            _rci_df[_rci_disp + ["_id"]],
+                            _rci_df[_rci_disp + ["_saldo_num", "_id"]],
                             column_config=_rci_cfg,
                             column_order=_rci_disp,
                             use_container_width=True, hide_index=True,
                             key=f"rc_inv_{_rcuit}",
                             disabled=[c for c in _rci_disp if c != "Sel"],
                         )
-                        _rcsel      = _rci_edited[_rci_edited["Sel"] == True]
-                        _rcsel_ids  = [int(r) for r in _rcsel["_id"].tolist()]
-                        _rcsel_saldo = float(_rcsel["Saldo"].sum())
+                        _rcsel       = _rci_edited[_rci_edited["Sel"] == True]
+                        _rcsel_ids   = [int(r) for r in _rcsel["_id"].tolist()]
+                        _rcsel_saldo = float(_rcsel["_saldo_num"].sum())
 
                     # ── Formulario de pago ────────────────────────────────────
                     st.markdown("#### Datos del recibo")
