@@ -1055,6 +1055,12 @@ def extract_pdf_fields(file_bytes):
                 fields["numero"] = m.group(1).strip()
                 break
 
+    # Formato "Nº0004 - 00020659" (Nº + espacios alrededor del guión, sin prefijo letra)
+    if not fields["numero"]:
+        m = re.search(r"N[°º]\s*(\d{4,5})\s*[-–]\s*(\d{6,8})", text)
+        if m:
+            fields["numero"] = f"{m.group(1).zfill(5)}-{m.group(2).zfill(8)}"
+
     # ── FECHA DE EMISIÓN ──────────────────────────────────────────────────
     emision_pats = [
         r"(?:Fecha\s+de\s+[Ee]misi[oó]n|Fecha\s+[Ee]mis\.?)[:\s]+(\d{1,2}/\d{1,2}/\d{4})",
@@ -1108,8 +1114,8 @@ def extract_pdf_fields(file_bytes):
 
     # ── NETO GRAVADO ──────────────────────────────────────────────────────
     neto_pats = [
-        # 1. Etiquetas explícitas (más seguras)
-        r"(?:Subtotal\s+Gravado|Neto\s+Gravado|Base\s+Imponible)[:\s$]*\$?\s*([\d.,]+)",
+        # 1. Etiquetas explícitas (más seguras), incluyendo "Subt.Gravado" (abreviado)
+        r"(?:Subt\.?\s*Gravado|Subtotal\s+Gravado|Neto\s+Gravado|Base\s+Imponible)[:\s$]*\$?\s*([\d.,]+)",
         r"(?:Gravado)\s*:\s*\$?\s*([\d.,]+)",
         # 2. "Subtotal:" con dos puntos
         r"(?:SUBTOTAL|Subtotal)\s*:\s*\$?\s*([\d.,]+)",
@@ -1147,6 +1153,25 @@ def extract_pdf_fields(file_bytes):
         if matches:
             fields["iva"] = normalize_amount(matches[-1].strip())
             break
+
+    # ── RESUMEN TABULAR (fila "T o t a l", común en facturas de servicios) ────
+    # Header: "Subtotal ... I.V.A. 21% ... T o t a l"
+    # Fila:   "$ 262,912.50  $ 262,912.50  $ 55,211.63  $ 318,124.13"
+    # Mapeo:   [0]=neto       [1]=neto       [-2]=iva      [-1]=total
+    if not fields["total"] or not fields["neto"] or not fields["iva"]:
+        _m_sumrow = re.search(
+            r"Subtotal[^\n]*T\s+o\s+t\s+a\s+l[^\n]*\n([^\n]+)",
+            text, re.IGNORECASE)
+        if _m_sumrow:
+            _amounts = re.findall(r"\$\s*([\d.,]+)", _m_sumrow.group(1))
+            if _amounts:
+                if not fields["total"]:
+                    fields["total"] = normalize_amount(_amounts[-1])
+                if not fields["neto"] and len(_amounts) >= 1:
+                    fields["neto"] = normalize_amount(_amounts[0])
+                if not fields["iva"] and len(_amounts) >= 3:
+                    # IVA es el penúltimo monto (antes del total)
+                    fields["iva"] = normalize_amount(_amounts[-2])
 
     # ── RAZÓN SOCIAL / PROVEEDOR EMISOR ──────────────────────────────────
     razon_pats = [
