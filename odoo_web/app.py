@@ -3396,7 +3396,7 @@ with tab_orders:
                                          "cost": _cost, "margin_pct": _margin,
                                          "_ov_key": _ov_key})
 
-                # ── Tabla de productos ──────────────────────────────────────
+                # ── Tabla de productos (Producto Odoo editable inline) ──────
                 _tbl_rows = []
                 for _i_el, _el in enumerate(_xl_enriched):
                     _op = _el.get("odoo_product")
@@ -3409,7 +3409,7 @@ with tab_orders:
                         "IVA %":       int(_el.get("iva_pct", 21)),
                         "Costo":       float(_el.get("cost", 0)),
                         "Margen %":    round(float(_el.get("margin_pct", 0)), 1),
-                        "Producto Odoo": _op["name"] if _op else "—",
+                        "Producto Odoo": _op["name"] if _op else "",
                     })
                 _tbl_cfg = {
                     "":              st.column_config.TextColumn("", width="small"),
@@ -3418,73 +3418,84 @@ with tab_orders:
                     "IVA %":         st.column_config.NumberColumn("IVA %", format="%d%%"),
                     "Costo":         st.column_config.NumberColumn("Costo", format="$ %.2f"),
                     "Margen %":      st.column_config.NumberColumn("Margen %", format="%.1f%%"),
-                    "Producto Odoo": st.column_config.TextColumn("Producto Odoo"),
+                    "Producto Odoo": st.column_config.TextColumn(
+                        "Producto Odoo",
+                        help="✏️ Escribí nombre o código (parcial) y presioná Enter para buscar"),
                 }
-                st.dataframe(pd.DataFrame(_tbl_rows), column_config=_tbl_cfg,
-                             use_container_width=True, hide_index=True)
+                _tbl_disabled_cols = ["", "Modelo", "Descripción", "Cant.",
+                                      "P. Unit.", "IVA %", "Costo", "Margen %"]
+                # Versión del key: cambia tras cada match exitoso para limpiar el estado del editor
+                _tbl_ver   = st.session_state.get(f"_tbl_ver_{uf.name}", 0)
+                _tbl_edited = st.data_editor(
+                    pd.DataFrame(_tbl_rows), column_config=_tbl_cfg,
+                    disabled=_tbl_disabled_cols,
+                    use_container_width=True, hide_index=True,
+                    key=f"tbl_ped_{uf.name}_{_tbl_ver}")
 
-                # ── Corrección de producto Odoo (todas las líneas) ─────────
-                _n_sin = sum(1 for _e in _xl_enriched if not _e.get("odoo_product"))
-                _exp_lbl = (f"🔍 Corregir producto Odoo — {_n_sin} sin match"
-                            if _n_sin else "🔍 Corregir producto Odoo")
-                with st.expander(_exp_lbl, expanded=(_n_sin > 0)):
-                    # Selectbox para elegir qué línea editar
-                    def _line_label(i, e):
-                        _op_n = e.get("odoo_product", {}).get("name", "") if e.get("odoo_product") else ""
-                        _mod  = e.get("modelo") or e.get("descripcion") or f"Línea {i+1}"
-                        return f"{i+1}. {_mod}" + (f"  →  {_op_n}" if _op_n else "  ⚠️ sin match")
-                    _line_opts = [_line_label(i, e) for i, e in enumerate(_xl_enriched)]
-                    # Pre-seleccionar primera línea sin match
-                    _default_idx = next(
-                        (i for i, e in enumerate(_xl_enriched) if not e.get("odoo_product")), 0)
-                    _sel_line = st.selectbox(
-                        "Línea del pedido", _line_opts,
-                        index=_default_idx,
-                        key=f"ov_line_{uf.name}",
-                        label_visibility="collapsed")
-                    _sel_i = _line_opts.index(_sel_line)
-                    _el_sel = _xl_enriched[_sel_i]
-                    _ov_key_sel = _el_sel.get("_ov_key")
+                # ── Procesar ediciones inline de Producto Odoo ─────────────
+                _tbl_updated  = False
+                _tbl_no_match = []
+                for _i_ed, _row_ed in _tbl_edited.iterrows():
+                    _new_q   = (_row_ed.get("Producto Odoo") or "").strip()
+                    _old_op  = _xl_enriched[_i_ed].get("odoo_product")
+                    _old_name = _old_op["name"] if _old_op else ""
+                    if not _new_q or _new_q == _old_name:
+                        continue  # sin cambio
+                    _ck_ed = _xl_enriched[_i_ed].get("_ov_key")
+                    _res = search_product_by_code_or_name(
+                        models_url, uid, api_key,
+                        code=_new_q, name_keywords=_new_q, limit=5)
+                    if len(_res) == 1:
+                        # Match único: asignar directo
+                        if _ck_ed:
+                            st.session_state[_ck_ed] = _res[0]
+                        _xl_enriched[_i_ed]["odoo_product"] = _res[0]
+                        _tbl_updated = True
+                    elif len(_res) > 1:
+                        # Múltiples resultados: guardar para mostrar selectbox
+                        st.session_state[f"_dis_{uf.name}_{_i_ed}"] = (
+                            _new_q, _res, _ck_ed, _i_ed)
+                    else:
+                        _tbl_no_match.append(
+                            f"⚠️ Sin resultados para «{_new_q}» (línea {_i_ed+1})")
 
-                    # Campo de búsqueda: acepta nombre parcial O código
-                    _srch_placeholder = (
-                        f"{_el_sel.get('modelo') or _el_sel.get('descripcion') or ''}"
-                    )
-                    _srch_q = st.text_input(
-                        "Buscar por nombre o código (parcial)",
-                        key=f"ov_q_{uf.name}_{_sel_i}",
-                        placeholder=_srch_placeholder or "ej: E1 MAX, fanttik, 7700…")
+                if _tbl_updated:
+                    st.session_state[f"_tbl_ver_{uf.name}"] = _tbl_ver + 1
+                    st.rerun()
 
-                    if _srch_q and len(_srch_q) >= 2:
-                        _ov_res = search_product_by_code_or_name(
-                            models_url, uid, api_key,
-                            code=_srch_q, name_keywords=_srch_q, limit=8)
-                        if _ov_res:
-                            _opts_map = {
-                                f"{r['name']}  [{r.get('default_code') or '—'}]": r
-                                for r in _ov_res}
-                            _sel_opt = st.selectbox(
-                                "Resultados", list(_opts_map.keys()),
-                                key=f"ov_res_{uf.name}_{_sel_i}",
-                                label_visibility="collapsed")
-                            if st.button("✅ Usar este producto",
-                                         key=f"ov_use_{uf.name}_{_sel_i}"):
-                                _chosen = _opts_map[_sel_opt]
-                                if _ov_key_sel:
-                                    st.session_state[_ov_key_sel] = _chosen
-                                _el_sel["odoo_product"] = _chosen
-                                st.rerun()
-                        else:
-                            st.caption("Sin resultados. Probá con otro término o código.")
-
-                    # Botón para quitar el match actual
-                    if _el_sel.get("odoo_product") and _ov_key_sel:
-                        if st.button("↩️ Quitar match actual",
-                                     key=f"ov_clear_{uf.name}_{_sel_i}"):
-                            if _ov_key_sel in st.session_state:
-                                del st.session_state[_ov_key_sel]
-                            _el_sel["odoo_product"] = None
+                # ── Desambiguación: mostrar opciones cuando hay varios resultados ──
+                for _i_ed in range(len(_xl_enriched)):
+                    _dis_key = f"_dis_{uf.name}_{_i_ed}"
+                    if _dis_key not in st.session_state:
+                        continue
+                    _dq, _dres, _dck, _di = st.session_state[_dis_key]
+                    _opts_map = {
+                        f"{r['name']}  [{r.get('default_code') or '—'}]": r
+                        for r in _dres}
+                    _dc1, _dc2 = st.columns([4, 1])
+                    with _dc1:
+                        _mod_lbl = (_xl_enriched[_di].get("modelo")
+                                    or _xl_enriched[_di].get("descripcion")
+                                    or f"Línea {_di+1}")
+                        _dis_sel = st.selectbox(
+                            f"**{_mod_lbl}** — elegí el producto:",
+                            list(_opts_map.keys()),
+                            key=f"dis_sel_{uf.name}_{_i_ed}")
+                    with _dc2:
+                        st.write("")
+                        st.write("")
+                        if st.button("✅ Usar", key=f"dis_use_{uf.name}_{_i_ed}"):
+                            _chosen = _opts_map[_dis_sel]
+                            if _dck:
+                                st.session_state[_dck] = _chosen
+                            _xl_enriched[_di]["odoo_product"] = _chosen
+                            del st.session_state[_dis_key]
+                            st.session_state[f"_tbl_ver_{uf.name}"] = (
+                                st.session_state.get(f"_tbl_ver_{uf.name}", 0) + 1)
                             st.rerun()
+
+                for _nm_msg in _tbl_no_match:
+                    st.caption(_nm_msg)
             else:
                 st.info("No se detectaron productos con cantidad pedida.")
 
