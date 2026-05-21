@@ -164,7 +164,7 @@ ODOO_DB  = "gpowerbyte-luminatec-master-22753148"
 # Emails con acceso a Importaciones.
 # BASE_ADMIN_EMAILS siempre tienen acceso, independientemente del secret.
 # Se puede agregar más emails via st.secrets["ADMIN_EMAILS"] (separados por coma).
-BASE_ADMIN_EMAILS = {"ivarela@luminatec.com", "dario@luminatec.com"}
+BASE_ADMIN_EMAILS = {"ivarela@luminatec.com", "dario@luminatec.com", "dalonso@luminatec.com"}
 _raw_admin = st.secrets.get("ADMIN_EMAILS", "")
 ADMIN_EMAILS = BASE_ADMIN_EMAILS | {e.strip().lower() for e in _raw_admin.split(",") if e.strip()}
 
