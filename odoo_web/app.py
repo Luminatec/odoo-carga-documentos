@@ -3296,15 +3296,17 @@ with tab_orders:
                 for _i_ln, _ln in enumerate(_lineas_xl):
                     _ov_key    = f"prod_ov_{uf.name}_{_i_ln}"
                     _cache_key = f"prod_cache_{uf.name}_{_i_ln}"
-                    # Cachear búsqueda en session_state para no repetir llamadas a Odoo
+                    # Cachear solo matches exitosos; si no encontró, reintentar en cada rerun
+                    # (permite que mejoras en la búsqueda se apliquen sin borrar cache)
                     if _cache_key not in st.session_state:
                         _prods = search_product_by_code_or_name(
                             models_url, uid, api_key,
                             code=_ln.get("codigo",""),
                             name_keywords=_ln.get("descripcion",""),
                             limit=1)
-                        st.session_state[_cache_key] = _prods[0] if _prods else None
-                    _op_auto = st.session_state[_cache_key]
+                        if _prods:
+                            st.session_state[_cache_key] = _prods[0]
+                    _op_auto = st.session_state.get(_cache_key)  # None si aún no matcheó
                     # Override manual tiene prioridad sobre el auto-match
                     _op      = st.session_state[_ov_key] if _ov_key in st.session_state else _op_auto
                     _cost    = float(_op["standard_price"]) if _op else 0.0
