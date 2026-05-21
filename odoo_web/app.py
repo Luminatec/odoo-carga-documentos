@@ -3287,34 +3287,73 @@ with tab_orders:
             st.markdown("##### 📦 Productos")
             _xl_enriched = []
             if _lineas_xl:
-                for _ln in _lineas_xl:
-                    _prods = search_product_by_code_or_name(
+                for _i_ln, _ln in enumerate(_lineas_xl):
+                    _ov_key = f"prod_ov_{uf.name}_{_i_ln}"
+                    _prods  = search_product_by_code_or_name(
                         models_url, uid, api_key,
                         code=_ln.get("codigo",""),
                         name_keywords=_ln.get("descripcion",""),
                         limit=1)
-                    _op    = _prods[0] if _prods else None
-                    _cost  = float(_op["standard_price"]) if _op else 0.0
-                    _price = safe_float(_ln.get("precio_unit", 0))
-                    _margin = ((_price - _cost) / _price * 100) if _price > 0 else 0.0
+                    _op_auto = _prods[0] if _prods else None
+                    # Aplicar override manual si existe
+                    _op = st.session_state.get(_ov_key, _op_auto)
+                    _cost    = float(_op["standard_price"]) if _op else 0.0
+                    _price   = safe_float(_ln.get("precio_unit", 0))
+                    _margin  = ((_price - _cost) / _price * 100) if _price > 0 else 0.0
                     _xl_enriched.append({**_ln, "odoo_product": _op,
-                                          "cost": _cost, "margin_pct": _margin})
-                _xl_df_rows = []
-                for _el in _xl_enriched:
-                    _xl_df_rows.append({
-                        "SKU/Código":    _el.get("codigo",""),
-                        "Descripción":   _el.get("descripcion",""),
-                        "Cant.":         _el.get("cantidad",0),
-                        "Precio s/IVA":  fmt_ars(_el.get("precio_unit",0)),
-                        "IVA %":         _el.get("iva_pct",""),
-                        "Subtotal":      fmt_ars(_el.get("subtotal",0)),
-                        "Costo Odoo":    fmt_ars(_el.get("cost",0)),
-                        "Margen %":      f"{_el.get('margin_pct',0):.1f}%",
-                        "Match Odoo":    (_el["odoo_product"]["name"]
-                                          if _el.get("odoo_product")
-                                          else f"⚠️ [{_el.get('codigo','')}]"),
-                    })
-                st.dataframe(pd.DataFrame(_xl_df_rows), use_container_width=True, hide_index=True)
+                                         "cost": _cost, "margin_pct": _margin,
+                                         "_ov_key": _ov_key})
+
+                for _i_el, _el in enumerate(_xl_enriched):
+                    _icon_p  = "✅" if _el.get("odoo_product") else "⚠️"
+                    _desc_hd = (_el.get("descripcion") or f"línea {_i_el+1}")[:45]
+                    with st.expander(
+                            f"{_icon_p} {_desc_hd}  ·  {int(_el.get('cantidad',0))} u  ·  {fmt_ars(_el.get('precio_unit',0))}",
+                            expanded=not bool(_el.get("odoo_product"))):
+                        _pc1, _pc2, _pc3, _pc4 = st.columns(4)
+                        _pc1.metric("Cant.",       int(_el.get("cantidad", 0)))
+                        _pc2.metric("Precio s/IVA", fmt_ars(_el.get("precio_unit", 0)))
+                        _pc3.metric("Subtotal",     fmt_ars(_el.get("subtotal", 0)))
+                        _pc4.metric("IVA %",        f"{_el.get('iva_pct', 21):.0f}%")
+
+                        _ov_key = _el["_ov_key"]
+                        if _el.get("odoo_product"):
+                            _op_n  = _el["odoo_product"]["name"]
+                            _op_c  = _el["odoo_product"].get("default_code") or "—"
+                            _op_cs = fmt_ars(_el["odoo_product"].get("standard_price", 0))
+                            st.success(f"✅ **{_op_n}**  ·  cod `{_op_c}`  ·  costo {_op_cs}  ·  margen {_el.get('margin_pct',0):.1f}%")
+                        else:
+                            st.warning(f"⚠️ Sin match automático — buscá el producto manualmente")
+
+                        # ── Búsqueda manual de override ───────────────────
+                        _srch_key = f"prod_srch_{uf.name}_{_i_el}"
+                        _srch_val = st.text_input(
+                            "Buscar producto en Odoo",
+                            key=_srch_key,
+                            placeholder="nombre o código interno...",
+                            label_visibility="collapsed")
+                        if _srch_val and len(_srch_val) >= 2:
+                            _manual_res = search_product_by_code_or_name(
+                                models_url, uid, api_key,
+                                code=_srch_val, name_keywords=_srch_val, limit=5)
+                            if _manual_res:
+                                _opts_map = {
+                                    f"{r['name']}  [{r.get('default_code') or ''}]": r
+                                    for r in _manual_res}
+                                _sel_lbl = st.selectbox(
+                                    "Resultado", list(_opts_map.keys()),
+                                    key=f"prod_sel_{uf.name}_{_i_el}",
+                                    label_visibility="collapsed")
+                                if st.button("✓ Usar este producto",
+                                             key=f"prod_use_{uf.name}_{_i_el}"):
+                                    st.session_state[_ov_key] = _opts_map[_sel_lbl]
+                                    st.rerun()
+                            else:
+                                st.caption("Sin resultados para esa búsqueda.")
+                        if st.session_state.get(_ov_key):
+                            if st.button("↩️ Quitar override", key=f"prod_clear_{uf.name}_{_i_el}"):
+                                del st.session_state[_ov_key]
+                                st.rerun()
             else:
                 st.info("No se detectaron productos con cantidad pedida.")
 
@@ -3828,15 +3867,19 @@ if tab_import is not None:
                                        f"pero la carpeta activa es **{st.session_state.carpeta_id}**. "
                                        "Verificá que sea el documento correcto.")
 
-                        # Info extraída del PDF
-                        _info_parts = []
-                        if _ext_info.get("cuit"):     _info_parts.append(f"CUIT: `{_ext_info['cuit']}`")
-                        if _ext_info.get("nro_comp"): _info_parts.append(f"Comprobante: `{_ext_info['nro_comp']}`")
-                        if _ext_info.get("fecha"):    _info_parts.append(f"Fecha: `{_ext_info['fecha']}`")
-                        if _ext_info.get("monto"):    _info_parts.append(f"Monto: `{_ext_info['monto']}`")
-                        if _ext_info.get("tc_pdf"):   _info_parts.append(f"TC (PDF): `{_ext_info['tc_pdf']}`")
-                        if _info_parts:
-                            st.caption("  ·  ".join(_info_parts))
+                        # ── Info extraída del PDF — métricas visuales ──────────
+                        _imp_metrics = [
+                            ("N° Comp.",  _ext_info.get("nro_comp")),
+                            ("Fecha",     _ext_info.get("fecha")),
+                            ("CUIT",      _ext_info.get("cuit")),
+                            ("Monto",     _ext_info.get("monto")),
+                            ("TC (PDF)",  _ext_info.get("tc_pdf")),
+                        ]
+                        _vis_metrics = [(k, v) for k, v in _imp_metrics if v]
+                        if _vis_metrics:
+                            _mc = st.columns(len(_vis_metrics))
+                            for _mi, (_mk, _mv) in enumerate(_vis_metrics):
+                                _mc[_mi].metric(_mk, _mv)
 
                         if not auto.get("no_aplica"):
                             ct1, ct2, ct3, ct4 = st.columns([3, 2, 2, 1])
