@@ -2639,20 +2639,23 @@ def search_partners_by_cuits(models_url, uid, api_key, cuits_tuple):
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_customer_unpaid_invoices(models_url, uid, api_key, partner_ids_tuple):
-    """Facturas de cliente sin pagar (posted, not_paid/partial).
-    Usa child_of para incluir contactos secundarios del mismo socio."""
+    """Facturas de cliente sin pagar (posted, not_paid/partial/in_payment).
+    Usa child_of para incluir contactos secundarios del mismo socio.
+    Incluye in_payment porque en Odoo AR muchas FAs quedan en ese estado
+    cuando el pago está registrado pero sin conciliar con extracto bancario."""
     try:
         m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
         rows = m.execute_kw(ODOO_DB, uid, api_key, "account.move", "search_read",
             [[("move_type", "=", "out_invoice"),
               ("state", "=", "posted"),
-              ("payment_state", "in", ["not_paid", "partial"]),
+              ("payment_state", "in", ["not_paid", "partial", "in_payment"]),
               ("partner_id", "child_of", list(partner_ids_tuple))]],
             {"fields": ["id", "name", "invoice_date", "invoice_date_due",
                         "amount_total", "amount_residual", "currency_id", "partner_id"],
              "order": "invoice_date asc", "limit": 300})
         return rows
-    except Exception:
+    except Exception as _e:
+        st.warning(f"⚠️ Error al cargar facturas pendientes: {_e}")
         return []
 
 def register_customer_payment(models, uid, api_key,
