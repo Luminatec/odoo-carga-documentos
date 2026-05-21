@@ -659,6 +659,30 @@ def load_carpeta_full(models_url, uid, api_key, carpeta_id):
     return result
 
 
+def get_bill_lines(models_url, uid, api_key, bill_ids):
+    """Trae líneas de producto de una lista de facturas. Retorna dict {bill_id: [lineas]}."""
+    if not bill_ids:
+        return {}
+    try:
+        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        lines = m.execute_kw(
+            ODOO_DB, uid, api_key, "account.move.line", "search_read",
+            [[("move_id", "in", bill_ids),
+              ("display_type", "=", False),
+              ("product_id", "!=", False)]],
+            {"fields": ["id", "move_id", "product_id", "name",
+                        "quantity", "price_unit", "price_subtotal",
+                        "price_total", "tax_ids"],
+             "limit": 500})
+        result = {}
+        for ln in lines:
+            mid = ln["move_id"][0] if isinstance(ln["move_id"], (list, tuple)) else ln["move_id"]
+            result.setdefault(mid, []).append(ln)
+        return result
+    except Exception:
+        return {}
+
+
 def _bill_currency(b):
     """Devuelve el nombre de moneda del bill ('ARS', 'USD', etc.)"""
     c = b.get("currency_id")
@@ -4101,12 +4125,21 @@ if tab_import is not None:
 
             # ── Comprobantes cargados en Odoo ─────────────────────────────────
             if carp_data and carp_data.get("bills"):
-                st.markdown("#### \U0001f4c4 Comprobantes en Odoo")
-                bill_rows = []
+                st.markdown("#### 📄 Comprobantes en Odoo")
+
+                _bill_ids_all = [b["id"] for b in carp_data["bills"]]
+                _all_lines    = get_bill_lines(models_url, uid, api_key, _bill_ids_all)
+                _estado_map   = {
+                    "draft":  "Borrador 📝",
+                    "posted": "Confirmado ✅",
+                    "cancel": "Cancelado ❌",
+                }
+                _total_ars_bills = 0.0
+
                 for b in carp_data["bills"]:
                     pid      = b["partner_id"][0] if b.get("partner_id") else 0
                     tipo_inf = PARTNER_TO_TIPO.get(pid,
-                        {"etapa": "\u2014", "label": b["partner_id"][1]
+                        {"etapa": "—", "label": b["partner_id"][1]
                          if b.get("partner_id") else "Otro"})
                     cur_name = b["currency_id"][1] if b.get("currency_id") else "ARS"
 
@@ -4120,44 +4153,74 @@ if tab_import is not None:
 
                     amt_orig = float(b.get("amount_total") or 0)
                     amt_ars  = abs(float(b.get("amount_total_signed") or amt_orig or 0))
-                    bill_url = odoo_url("account.move", b["id"])
-                    estado_map = {"draft": "Borrador", "posted": "Confirmado", "cancel": "Cancelado"}
-                    pay_map    = {"not_paid": "Sin pagar", "partial": "Pago parcial",
-                                  "in_payment": "En pago", "paid": "Pagado", "reversed": "Revertido"}
+                    _total_ars_bills += amt_ars
+                    bill_url   = odoo_url("account.move", b["id"])
+                    estado_lbl = _estado_map.get(b.get("state", ""), b.get("state", ""))
+                    _b_name    = b.get("name") or f"ID {b['id']}"
+                    _b_lines   = _all_lines.get(b["id"], [])
 
-                    bill_rows.append({
-                        "Etapa":       tipo_inf["etapa"],
-                        "Proveedor":   tipo_inf["label"],
-                        "Comprobante": b.get("name") or f"ID {b['id']}",
-                        "Fecha":       b.get("invoice_date") or None,
-                        "Moneda":      cur_name,
-                        "TC ($/u$s)":  tc_val,
-                        "Monto orig.": amt_orig,
-                        "ARS equiv.":  amt_ars if cur_name == "USD" else None,
-                        "Estado":      estado_map.get(b.get("state",""), b.get("state","")),
-                        "\U0001f517 Ver": bill_url,
-                    })
+                    _exp_title = (
+                        f"Etapa {tipo_inf['etapa']} · {tipo_inf['label']} · "
+                        f"{_b_name} · {cur_name} {amt_orig:,.2f} · {estado_lbl}"
+                    )
+                    with st.expander(_exp_title, expanded=False):
+                        _bc1, _bc2, _bc3, _bc4 = st.columns([2, 2, 3, 1])
+                        _bc1.markdown(f"**Fecha:** {b.get('invoice_date') or '—'}")
+                        _bc2.markdown(
+                            f"**Moneda:** {cur_name}"
+                            + (f"  ·  TC: ${tc_val:,.0f}" if tc_val else ""))
+                        _bc3.markdown(
+                            f"**Total:** {cur_name} {amt_orig:,.2f}"
+                            + (f"  =  ARS {fmt_ars(amt_ars)}" if cur_name == "USD" else ""))
+                        _bc4.markdown(f"[🔗 Odoo]({bill_url})")
 
-                col_cfg = {
-                    "Fecha":        st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
-                    "TC ($/u$s)":   st.column_config.NumberColumn("TC $/u$s", format="%.0f"),
-                    "Monto orig.":  st.column_config.NumberColumn("Monto orig.", format="%.2f"),
-                    "ARS equiv.":   st.column_config.NumberColumn("ARS equiv.", format="%.0f"),
-                    "\U0001f517 Ver": st.column_config.LinkColumn("Ver en Odoo",
-                                        display_text="Abrir \U0001f517"),
-                }
-                st.dataframe(pd.DataFrame(bill_rows), column_config=col_cfg,
-                             use_container_width=True, hide_index=True)
+                        if _b_lines:
+                            _ln_rows = []
+                            for ln in _b_lines:
+                                _pname = (ln["product_id"][1]
+                                          if ln.get("product_id") else ln.get("name", "—"))
+                                _ln_rows.append({
+                                    "Producto":    _pname,
+                                    "Cant.":       float(ln.get("quantity") or 0),
+                                    "P. Unit.":    float(ln.get("price_unit") or 0),
+                                    "Subtotal":    float(ln.get("price_subtotal") or 0),
+                                    "Total c/imp": float(ln.get("price_total") or 0),
+                                })
+                            _ln_cfg = {
+                                "Cant.":       st.column_config.NumberColumn("Cant.", format="%.2f"),
+                                "P. Unit.":    st.column_config.NumberColumn("P. Unit.", format="%.4f"),
+                                "Subtotal":    st.column_config.NumberColumn("Subtotal", format="%.2f"),
+                                "Total c/imp": st.column_config.NumberColumn("Total c/imp", format="%.2f"),
+                            }
+                            st.dataframe(pd.DataFrame(_ln_rows), column_config=_ln_cfg,
+                                         use_container_width=True, hide_index=True)
+                            _sum_sub = sum(r["Subtotal"]    for r in _ln_rows)
+                            _sum_tot = sum(r["Total c/imp"] for r in _ln_rows)
+                            _pie = [
+                                f"<b>Neto s/imp:</b>&nbsp;<code>{cur_name} {_sum_sub:,.2f}</code>",
+                                f"<b>Total c/imp:</b>&nbsp;<code>{cur_name} {_sum_tot:,.2f}</code>",
+                            ]
+                            if tc_val:
+                                _pie.append(
+                                    f"<b>ARS equiv.:</b>&nbsp;"
+                                    f"<code>{fmt_ars(_sum_tot * tc_val)}</code>")
+                            st.markdown(
+                                '<div style="font-size:0.9rem;background:#f0f2f6;'
+                                'padding:6px 12px;border-radius:6px;margin:4px 0;">'
+                                + "&nbsp;&nbsp;·&nbsp;&nbsp;".join(_pie)
+                                + "</div>",
+                                unsafe_allow_html=True)
+                        else:
+                            st.caption("Sin líneas de producto en esta factura.")
 
-                # Totales rápidos
-                _total_ars_bills = sum(
-                    abs(float(b.get("amount_total_signed") or b.get("amount_total") or 0))
-                    for b in carp_data["bills"]
-                )
-                st.caption(
-                    f"Total {len(carp_data['bills'])} comprobante(s) \u00b7 "
-                    f"Equivalente ARS total: **{fmt_ars(_total_ars_bills)}**"
-                )
+                st.markdown(
+                    '<div style="font-size:0.9rem;background:#e8f4fd;'
+                    'padding:6px 14px;border-radius:6px;margin:6px 0;">'
+                    f"<b>{len(carp_data['bills'])} comprobante(s)</b>"
+                    "&nbsp;&nbsp;·&nbsp;&nbsp;"
+                    f"<b>Equiv. ARS total:</b>&nbsp;<code>{fmt_ars(_total_ars_bills)}</code>"
+                    "</div>",
+                    unsafe_allow_html=True)
 
             st.divider()
 
