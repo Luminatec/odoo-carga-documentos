@@ -480,6 +480,46 @@ def attach_file(models, uid, api_key, res_model, res_id, filename, file_bytes, m
     }])
 
 
+def create_purchase_order_petdur(models, uid, api_key, carpeta_id, currency_id,
+                                  filename=None, file_bytes=None, mimetype=None):
+    """
+    Crea OC PETDUR (purchase.order) en Odoo para la carpeta de importación.
+    Agrega una línea placeholder para poder confirmar y marca Etapa 0.
+    Retorna el ID del purchase.order creado.
+    """
+    m = xmlrpc.client.ServerProxy(models, allow_none=True)
+    today = _dt_now.now().strftime("%Y-%m-%d")
+
+    # Crear la OC
+    po_vals = {
+        "partner_id":  49328,           # PETDUR CORPORATION S.A.
+        "partner_ref": carpeta_id,      # campo "Referencia de proveedor" = clave de búsqueda
+        "currency_id": currency_id,     # USD
+        "notes": f"Importación {carpeta_id} — OC creada automáticamente por lumidoo al subir Bill PETDUR",
+    }
+    po_id = m.execute_kw(ODOO_DB, uid, api_key, "purchase.order", "create", [po_vals])
+
+    # Línea placeholder (necesaria para poder confirmar la OC en Odoo)
+    line_vals = {
+        "order_id":     po_id,
+        "name":         f"{carpeta_id} — completar líneas de productos",
+        "product_qty":  1,
+        "price_unit":   0,
+        "date_planned": today,
+        "product_uom":  1,              # Unidades
+    }
+    m.execute_kw(ODOO_DB, uid, api_key, "purchase.order.line", "create", [line_vals])
+
+    # Confirmar OC → pasa a estado "purchase"
+    m.execute_kw(ODOO_DB, uid, api_key, "purchase.order", "button_confirm", [[po_id]])
+
+    # Adjuntar el documento si se provee
+    if filename and file_bytes:
+        attach_file(models, uid, api_key, "purchase.order", po_id, filename, file_bytes, mimetype)
+
+    return po_id
+
+
 # ── Mapeo partner_id → tipo para facturas de importación ────────────────────
 PARTNER_TO_TIPO = {
     49328: {"tipo": "petdur", "etapa": "1",  "label": "PETDUR"},
@@ -2101,13 +2141,15 @@ def extract_excel_oc_fields(file_bytes):
     except Exception:
         return fields
 
-    # Paso 1: encontrar la primera fila que tenga 'SKU' o 'Pedido'
+    # Paso 1: encontrar la primera fila que tenga 'SKU', 'Modelo', 'Pedido' o 'Cantidad'
     col_map = {}
     hdr_row_idx = None
     all_rows = list(ws.iter_rows(values_only=True))
     for ri, row in enumerate(all_rows[:25]):
         vals = [str(c or "").strip().lower() for c in row]
-        if any(v == 'sku' for v in vals) or any(v in ('pedido', 'cantidad') for v in vals):
+        if (any(v == 'sku' for v in vals)
+                or any(v in ('pedido', 'cantidad', 'qty') for v in vals)
+                or any(v in ('modelo', 'model') for v in vals)):
             hdr_row_idx = ri
             for ci, h in enumerate(vals):
                 if h == 'sku':
@@ -2120,15 +2162,19 @@ def extract_excel_oc_fields(file_bytes):
                         col_map['modelo'] = ci
                 elif h == 'iva':
                     col_map['iva'] = ci
-                elif 'precio s/iva' in h or 'precio sin' in h or ('precio' in h and 'iva' in h):
+                elif h in ('unitario', 'precio unitario', 'p. unitario', 'precio unit'):
+                    # Precio unitario tiene prioridad sobre subtotales
+                    col_map['precio_unit'] = ci
+                elif 'precio s/iva' in h or 'precio sin' in h or ('precio' in h and 'iva' in h and 'total' not in h):
                     if 'precio' not in col_map:
                         col_map['precio'] = ci
                 elif h == 'pvp' and 'precio' not in col_map:
                     col_map['pvp'] = ci
                 elif h in ('pedido', 'cantidad', 'qty'):
                     col_map['pedido'] = ci
-                elif 'subtotal' in h:
-                    col_map['subtotal'] = ci
+                elif 'subtotal' in h or ('precio' in h and 'total' in h and 'c/iva' not in h):
+                    if 'subtotal' not in col_map:
+                        col_map['subtotal'] = ci
                 elif 'caracteristic' in h or 'descripci' in h or 'detalle' in h:
                     if 'descripcion' not in col_map:
                         col_map['descripcion'] = ci
@@ -2137,20 +2183,27 @@ def extract_excel_oc_fields(file_bytes):
     if 'pedido' not in col_map:
         return fields
 
-    # Fallback precio: usar PVP si no hay precio s/IVA
-    precio_col = col_map.get('precio') if col_map.get('precio') is not None else col_map.get('pvp')
+    # Prioridad de precio: columna 'unitario' > 'precio s/iva' > PVP
+    precio_col = (col_map.get('precio_unit')
+                  or col_map.get('precio')
+                  or col_map.get('pvp'))
 
     # Paso 2: leer filas de datos (desde después del header)
-    _header_kws = {'sku', 'modelo', 'model', 'ean', 'pvp', 'iva', 'pedido', 'cantidad', 'stock'}
+    _header_kws = {'sku', 'modelo', 'model', 'ean', 'pvp', 'iva', 'pedido', 'cantidad',
+                   'stock', 'unitario', 'descripcion', 'descripción', 'total', 'subtotal'}
     for row in all_rows[hdr_row_idx + 1:]:
         if not any(c is not None for c in row):
             continue
         def _gcell(ci):
             return row[ci] if ci is not None and ci < len(row) else None
 
-        sku_val = str(_gcell(col_map.get('sku')) or "").strip()
-        # Saltar filas que son sub-headers repetidos
-        if not sku_val or sku_val.lower() in _header_kws:
+        sku_val    = str(_gcell(col_map.get('sku'))    or "").strip()
+        modelo_val = str(_gcell(col_map.get('modelo')) or "").strip()
+        desc_val   = str(_gcell(col_map.get('descripcion')) or "").strip()
+
+        # Saltar filas que son totales/sub-headers o completamente vacías de identificador
+        _ident = sku_val or modelo_val or desc_val
+        if not _ident or _ident.lower() in _header_kws:
             continue
 
         pedido_raw = _gcell(col_map.get('pedido'))
@@ -2163,8 +2216,6 @@ def extract_excel_oc_fields(file_bytes):
         if pedido_qty <= 0:
             continue
 
-        modelo_val = str(_gcell(col_map.get('modelo')) or "").strip()
-        desc_val   = str(_gcell(col_map.get('descripcion')) or "").strip()
         ean_val    = str(_gcell(col_map.get('ean')) or "").strip()
 
         iva_raw = _gcell(col_map.get('iva'))
@@ -3820,12 +3871,30 @@ if tab_import is not None:
                         _ok, _errs = 0, []
                         _created_items = []
                         _carp = st.session_state.carpeta_id
+                        _usd_id = get_currency_id(models_url, uid, api_key, "USD")
+
+                        # ── Auto-crear OC PETDUR (Etapa 0) si no existe y hay Bill PETDUR ──
+                        _tiene_petdur = any(d["tipo_cfg"]["tipo"] == "petdur" for d in classified_docs)
+                        _etapa0_ok    = st.session_state.etapas.get("0")
+                        if _tiene_petdur and not _etapa0_ok:
+                            try:
+                                _po_id  = create_purchase_order_petdur(
+                                    models, uid, api_key, _carp, _usd_id or 2)
+                                _po_url = odoo_url("purchase.order", _po_id)
+                                st.session_state.etapas["0"] = True
+                                st.session_state.carpeta_po  = {"id": _po_id, "name": _carp}
+                                _created_items.append({
+                                    "file": f"🏭 OC {_carp} (Etapa 0 auto-creada)",
+                                    "id": _po_id, "url": _po_url
+                                })
+                                _ok += 1
+                            except Exception as _e_po:
+                                _errs.append(f"⚠️ No se pudo crear OC automáticamente: {str(_e_po)[:120]}")
+
                         for _i, _doc in enumerate(classified_docs):
                             try:
                                 _full_ref = f"{_carp} / {_doc['ref']}" if _doc["ref"] else _carp
-                                _cur_id   = None
-                                if _doc.get("moneda", "ARS") == "USD":
-                                    _cur_id = get_currency_id(models_url, uid, api_key, "USD")
+                                _cur_id   = _usd_id if _doc.get("moneda", "ARS") == "USD" else None
                                 _move_id = create_vendor_bill(models, uid, api_key,
                                     partner_id      = _doc["tipo_cfg"]["partner_id"],
                                     ref             = _full_ref,
@@ -3849,7 +3918,8 @@ if tab_import is not None:
                                 st.session_state.history.append({
                                     "tipo":   f"Importación {_carp}",
                                     "archivo":_doc["filename"], "id":_move_id,
-                                    "url":_url, "estado":"✅"
+                                    "url":_url, "estado":"✅",
+                                    "hora": _dt_now.now().strftime("%H:%M")
                                 })
                                 _ok += 1
                             except Exception as _e:
