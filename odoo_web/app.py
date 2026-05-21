@@ -2331,7 +2331,10 @@ def classify_document(text, carpeta_id=""):
     else:
         _nr2 = re.search(r'N[°º]?\s*(?:COMP\.?|FACTURA|COMPROBANTE)?[:\s]+([A-Z0-9\-]{5,20})', tu)
         if _nr2:
-            extracted["nro_comp"] = _nr2.group(1).strip()
+            _nr2_val = _nr2.group(1).strip()
+            # Descartar si no tiene ningún dígito (serían palabras como "MONTO", "TOTAL"…)
+            if re.search(r'\d', _nr2_val):
+                extracted["nro_comp"] = _nr2_val
 
     # ── No aplica ─────────────────────────────────────────────────────────
     if "VOLANTE ELECTRONICO DE PAGO" in tu or (
@@ -3867,19 +3870,18 @@ if tab_import is not None:
                                        f"pero la carpeta activa es **{st.session_state.carpeta_id}**. "
                                        "Verificá que sea el documento correcto.")
 
-                        # ── Info extraída del PDF — métricas visuales ──────────
-                        _imp_metrics = [
+                        # ── Info extraída del PDF ──────────────────────────────
+                        _imp_fields = [
                             ("N° Comp.",  _ext_info.get("nro_comp")),
                             ("Fecha",     _ext_info.get("fecha")),
                             ("CUIT",      _ext_info.get("cuit")),
                             ("Monto",     _ext_info.get("monto")),
                             ("TC (PDF)",  _ext_info.get("tc_pdf")),
                         ]
-                        _vis_metrics = [(k, v) for k, v in _imp_metrics if v]
-                        if _vis_metrics:
-                            _mc = st.columns(len(_vis_metrics))
-                            for _mi, (_mk, _mv) in enumerate(_vis_metrics):
-                                _mc[_mi].metric(_mk, _mv)
+                        _vis_fields = [(k, v) for k, v in _imp_fields if v]
+                        if _vis_fields:
+                            st.caption("  ·  ".join(
+                                f"**{k}** `{v}`" for k, v in _vis_fields))
 
                         if not auto.get("no_aplica"):
                             ct1, ct2, ct3, ct4 = st.columns([3, 2, 2, 1])
