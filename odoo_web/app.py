@@ -3686,6 +3686,16 @@ if tab_import is not None:
 
             # ── Subir comprobantes ────────────────────────────────────
             st.markdown("#### ⬆️ Subir comprobantes")
+            # ── Resultado de la última carga (persiste tras rerun) ─────────
+            if "_imp_create_result" in st.session_state:
+                _res = st.session_state.pop("_imp_create_result")
+                if _res.get("ok", 0):
+                    st.success(f"✅ {_res['ok']} registro(s) creados para **{_res['carp']}**.")
+                    for _itm in _res.get("items", []):
+                        st.markdown(f"  📎 [{_itm['file']}]({_itm['url']}) → ID {_itm['id']}")
+                for _rerr in _res.get("errs", []):
+                    st.error(_rerr)
+
             st.info("💡 Podés subir documentos de cualquier etapa en cualquier orden. "
                     "seleccioná múltiples archivos con **Ctrl+A** en el explorador, "
                     "o arrastrá y soltá varios archivos al mismo tiempo.")
@@ -3798,6 +3808,7 @@ if tab_import is not None:
                         st.session_state["_imp_preview_open"] = False
                         _prog = st.progress(0)
                         _ok, _errs = 0, []
+                        _created_items = []
                         _carp = st.session_state.carpeta_id
                         for _i, _doc in enumerate(classified_docs):
                             try:
@@ -3818,7 +3829,7 @@ if tab_import is not None:
                                     invoice_origin  = _carp,
                                 )
                                 _url = odoo_url("account.move", _move_id)
-                                st.success(f"✅ {_doc['filename']} → ID {_move_id} — [Ver en Odoo]({_url})")
+                                _created_items.append({"file": _doc["filename"], "id": _move_id, "url": _url})
                                 _tipo = _doc["tipo_cfg"]["tipo"]
                                 if _tipo == "petdur":    st.session_state.etapas["1"]  = True
                                 elif _tipo == "di_afip": st.session_state.etapas["2"]  = True
@@ -3834,11 +3845,12 @@ if tab_import is not None:
                             except Exception as _e:
                                 _errs.append(f"❌ {_doc['filename']}: {str(_e)[:120]}")
                             _prog.progress((_i + 1) / len(classified_docs))
+                        st.session_state["_imp_create_result"] = {
+                            "ok": _ok, "carp": _carp,
+                            "items": _created_items, "errs": _errs
+                        }
                         if _ok:
-                            st.success(f"✅ {_ok} registro(s) creados para {_carp}.")
                             load_carpeta_full.clear()
-                        for _err in _errs:
-                            st.error(_err)
                         st.rerun()
 
             st.divider()
@@ -3880,13 +3892,33 @@ if tab_import is not None:
                 icon = "✅" if done else "⏳"
                 cols_et[i].markdown(f"**{icon}**  \n<small>{label}</small>",
                                     unsafe_allow_html=True, help=desc)
+                _auto_etapas = {"0", "1", "2", "2a"}  # se setean solo al subir docs
                 if not done and st.session_state.carpeta_id:
-                    if cols_et[i].button("✓", key=f"et_{key}", help=f"Marcar {label}"):
-                        st.session_state.etapas[key] = True
-                        st.rerun()
+                    if key in _auto_etapas:
+                        cols_et[i].caption("auto")
+                    else:
+                        if cols_et[i].button("✓", key=f"et_{key}", help=f"Marcar {label}"):
+                            _conf_key = f"_et_conf_{key}"
+                            st.session_state[_conf_key] = True
+                            st.rerun()
             completadas = sum(1 for v in st.session_state.etapas.values() if v)
             st.progress(completadas / len(ETAPAS_DEF),
                         text=f"{completadas}/{len(ETAPAS_DEF)} etapas completadas")
+
+            # ── Confirmación de marcado manual de etapa ───────────────────
+            for _ck, _clbl, _cdesc in ETAPAS_DEF:
+                _conf_key = f"_et_conf_{_ck}"
+                if st.session_state.get(_conf_key):
+                    st.warning(f"⚠️ ¿Confirmás que **{_clbl}** está completada en Odoo? "
+                               "Esta acción no se puede deshacer automáticamente.")
+                    _cc1, _cc2 = st.columns(2)
+                    if _cc1.button(f"✅ Sí, marcar {_clbl}", key=f"et_conf_yes_{_ck}"):
+                        st.session_state.etapas[_ck] = True
+                        st.session_state.pop(_conf_key)
+                        st.rerun()
+                    if _cc2.button("Cancelar", key=f"et_conf_no_{_ck}"):
+                        st.session_state.pop(_conf_key)
+                        st.rerun()
 
             st.divider()
 
