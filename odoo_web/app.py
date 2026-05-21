@@ -996,6 +996,11 @@ def create_sale_order(models, uid, api_key, partner_id, note, lines, filename, f
         call(models, uid, api_key, "sale.order.line", "create", [line_vals])
     if file_bytes:
         attach_file(models, uid, api_key, "sale.order", order_id, filename, file_bytes, mimetype)
+    # Confirmar el pedido (draft → sale)
+    try:
+        call(models, uid, api_key, "sale.order", "action_confirm", [[order_id]])
+    except Exception:
+        pass  # si falla la confirmación el pedido queda en draft pero no bloquea
     return order_id
 
 def _to_float(v):
