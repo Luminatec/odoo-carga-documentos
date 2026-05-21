@@ -747,7 +747,7 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                        filename, file_bytes, mimetype, journal_id=None, doc_type_id=None,
                        invoice_date_due=None, account_id=None, amount_neto=None,
                        currency_id=None, analytic_account_id=None, product_id=None,
-                       l10n_latam_document_number=None):
+                       l10n_latam_document_number=None, invoice_origin=None):
     vals = {"move_type": "in_invoice"}
     if partner_id:       vals["partner_id"]   = partner_id
     if ref:              vals["ref"]          = ref
@@ -756,6 +756,7 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
     if journal_id:       vals["journal_id"]   = journal_id
     if doc_type_id:      vals["l10n_latam_document_type_id"] = doc_type_id
     if currency_id:      vals["currency_id"]  = currency_id
+    if invoice_origin:   vals["invoice_origin"] = invoice_origin
     if l10n_latam_document_number:
         vals["l10n_latam_document_number"] = l10n_latam_document_number
     # Crear línea si hay cuenta o producto + monto
@@ -3805,15 +3806,16 @@ if tab_import is not None:
                                 if _doc.get("moneda", "ARS") == "USD":
                                     _cur_id = get_currency_id(models_url, uid, api_key, "USD")
                                 _move_id = create_vendor_bill(models, uid, api_key,
-                                    partner_id   = _doc["tipo_cfg"]["partner_id"],
-                                    ref          = _full_ref,
-                                    invoice_date = _doc["fecha"] or False,
-                                    filename     = _doc["filename"],
-                                    file_bytes   = _doc["file_bytes"],
-                                    mimetype     = _doc["mimetype"],
-                                    journal_id   = _doc["tipo_cfg"]["journal_id"],
-                                    doc_type_id  = _doc["tipo_cfg"]["doc_type"],
-                                    currency_id  = _cur_id,
+                                    partner_id      = _doc["tipo_cfg"]["partner_id"],
+                                    ref             = _full_ref,
+                                    invoice_date    = _doc["fecha"] or False,
+                                    filename        = _doc["filename"],
+                                    file_bytes      = _doc["file_bytes"],
+                                    mimetype        = _doc["mimetype"],
+                                    journal_id      = _doc["tipo_cfg"]["journal_id"],
+                                    doc_type_id     = _doc["tipo_cfg"]["doc_type"],
+                                    currency_id     = _cur_id,
+                                    invoice_origin  = _carp,
                                 )
                                 _url = odoo_url("account.move", _move_id)
                                 st.success(f"✅ {_doc['filename']} → ID {_move_id} — [Ver en Odoo]({_url})")
@@ -4102,9 +4104,36 @@ if tab_import is not None:
 
             # ── Decálogo CFO ──────────────────────────────────────────────────
             if st.session_state.etapas.get("4"):
-                with st.expander("✅ Checklist Decálogo CFO (Etapa 6)", expanded=False):
+                with st.expander("✅ Checklist Decálogo CFO (Etapa 6)", expanded=not st.session_state.etapas.get("6")):
                     for _di, _ditem in enumerate(DECALOGO):
                         st.checkbox(_ditem, key=f"dec_{_di}")
+
+                    st.divider()
+                    # Validación de cierre
+                    _etapas_requeridas = ["0","1","2","2a","3","4","5"]
+                    _et_faltantes = [lbl for k, lbl, _ in ETAPAS_DEF
+                                     if k in _etapas_requeridas
+                                     and not st.session_state.etapas.get(k)]
+                    _dec_faltantes = [DECALOGO[i] for i in range(len(DECALOGO))
+                                      if not st.session_state.get(f"dec_{i}", False)]
+                    _puede_cerrar = not _et_faltantes and not _dec_faltantes
+
+                    if st.session_state.etapas.get("6"):
+                        st.success("🔒 Importación cerrada — Acta CFO firmada.")
+                    else:
+                        if not _puede_cerrar:
+                            if _et_faltantes:
+                                st.warning("⚠️ Etapas pendientes: " + ", ".join(_et_faltantes))
+                            if _dec_faltantes:
+                                st.warning(f"⚠️ {len(_dec_faltantes)} check(s) del Decálogo sin marcar.")
+                        _cerrar_disabled = not _puede_cerrar
+                        if st.button("🔒 Cerrar importación y firmar Acta CFO",
+                                     type="primary", use_container_width=True,
+                                     key="btn_cerrar_carpeta",
+                                     disabled=_cerrar_disabled):
+                            st.session_state.etapas["6"] = True
+                            st.toast(f"Importación {st.session_state.carpeta_id} cerrada.", icon="🔒")
+                            st.rerun()
 
 
 
