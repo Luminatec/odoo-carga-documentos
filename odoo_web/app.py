@@ -3406,23 +3406,42 @@ with tab_orders:
                         "Descripción": (_el.get("descripcion") or "")[:50],
                         "Cant.":       int(_el.get("cantidad", 0)),
                         "P. Unit.":    float(_el.get("precio_unit", 0)),
-                        "Subtotal":    float(_el.get("subtotal", 0)),
                         "IVA %":       int(_el.get("iva_pct", 21)),
-                        "Producto Odoo": _op["name"] if _op else "—",
                         "Costo":       float(_el.get("cost", 0)),
                         "Margen %":    round(float(_el.get("margin_pct", 0)), 1),
+                        "Producto Odoo": _op["name"] if _op else "",
                     })
                 _tbl_cfg = {
                     "":              st.column_config.TextColumn("", width="small"),
                     "Cant.":         st.column_config.NumberColumn("Cant.", format="%d"),
                     "P. Unit.":      st.column_config.NumberColumn("P. Unit.", format="$ %.2f"),
-                    "Subtotal":      st.column_config.NumberColumn("Subtotal", format="$ %.2f"),
                     "IVA %":         st.column_config.NumberColumn("IVA %", format="%d%%"),
                     "Costo":         st.column_config.NumberColumn("Costo", format="$ %.2f"),
                     "Margen %":      st.column_config.NumberColumn("Margen %", format="%.1f%%"),
+                    "Producto Odoo": st.column_config.TextColumn("Producto Odoo"),
                 }
-                st.dataframe(pd.DataFrame(_tbl_rows), column_config=_tbl_cfg,
-                             use_container_width=True, hide_index=True)
+                _tbl_disabled = ["", "Modelo", "Descripción", "Cant.",
+                                  "P. Unit.", "IVA %", "Costo", "Margen %"]
+                _tbl_edited = st.data_editor(
+                    pd.DataFrame(_tbl_rows), column_config=_tbl_cfg,
+                    disabled=_tbl_disabled,
+                    use_container_width=True, hide_index=True,
+                    key=f"tbl_ped_{uf.name}")
+                # Sincronizar correcciones manuales de Producto Odoo al estado
+                for _i_ed, _row_ed in _tbl_edited.iterrows():
+                    _new_name = (_row_ed.get("Producto Odoo") or "").strip()
+                    _old_op = _xl_enriched[_i_ed].get("odoo_product")
+                    _old_name = _old_op["name"] if _old_op else ""
+                    if _new_name and _new_name != _old_name:
+                        _ck_ed = _xl_enriched[_i_ed].get("_ov_key")
+                        if _ck_ed:
+                            # Buscar el producto en Odoo por nombre exacto
+                            _fix_res = search_product_by_code_or_name(
+                                models_url, uid, api_key,
+                                code=_new_name, name_keywords=_new_name, limit=1)
+                            if _fix_res:
+                                st.session_state[_ck_ed] = _fix_res[0]
+                                _xl_enriched[_i_ed]["odoo_product"] = _fix_res[0]
 
                 # ── Override manual (solo para líneas sin match) ───────────
                 _unmatched = [_el for _el in _xl_enriched if not _el.get("odoo_product")]
