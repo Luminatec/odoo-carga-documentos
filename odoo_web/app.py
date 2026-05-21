@@ -3291,15 +3291,19 @@ with tab_orders:
             _xl_enriched = []
             if _lineas_xl:
                 for _i_ln, _ln in enumerate(_lineas_xl):
-                    _ov_key = f"prod_ov_{uf.name}_{_i_ln}"
-                    _prods  = search_product_by_code_or_name(
-                        models_url, uid, api_key,
-                        code=_ln.get("codigo",""),
-                        name_keywords=_ln.get("descripcion",""),
-                        limit=1)
-                    _op_auto = _prods[0] if _prods else None
-                    # Aplicar override manual si existe
-                    _op = st.session_state.get(_ov_key, _op_auto)
+                    _ov_key    = f"prod_ov_{uf.name}_{_i_ln}"
+                    _cache_key = f"prod_cache_{uf.name}_{_i_ln}"
+                    # Cachear búsqueda en session_state para no repetir llamadas a Odoo
+                    if _cache_key not in st.session_state:
+                        _prods = search_product_by_code_or_name(
+                            models_url, uid, api_key,
+                            code=_ln.get("codigo",""),
+                            name_keywords=_ln.get("descripcion",""),
+                            limit=1)
+                        st.session_state[_cache_key] = _prods[0] if _prods else None
+                    _op_auto = st.session_state[_cache_key]
+                    # Override manual tiene prioridad sobre el auto-match
+                    _op      = st.session_state[_ov_key] if _ov_key in st.session_state else _op_auto
                     _cost    = float(_op["standard_price"]) if _op else 0.0
                     _price   = safe_float(_ln.get("precio_unit", 0))
                     _margin  = ((_price - _cost) / _price * 100) if _price > 0 else 0.0
@@ -3313,11 +3317,12 @@ with tab_orders:
                     with st.expander(
                             f"{_icon_p} {_desc_hd}  ·  {int(_el.get('cantidad',0))} u  ·  {fmt_ars(_el.get('precio_unit',0))}",
                             expanded=not bool(_el.get("odoo_product"))):
-                        _pc1, _pc2, _pc3, _pc4 = st.columns(4)
-                        _pc1.metric("Cant.",       int(_el.get("cantidad", 0)))
-                        _pc2.metric("Precio s/IVA", fmt_ars(_el.get("precio_unit", 0)))
-                        _pc3.metric("Subtotal",     fmt_ars(_el.get("subtotal", 0)))
-                        _pc4.metric("IVA %",        f"{_el.get('iva_pct', 21):.0f}%")
+                        # Datos del Excel en una línea compacta
+                        st.caption(
+                            f"**Cant.** `{int(_el.get('cantidad',0))}` u  ·  "
+                            f"**Precio** `{fmt_ars(_el.get('precio_unit',0))}` s/IVA  ·  "
+                            f"**Subtotal** `{fmt_ars(_el.get('subtotal',0))}`  ·  "
+                            f"**IVA** `{_el.get('iva_pct',21):.0f}%`")
 
                         _ov_key = _el["_ov_key"]
                         if _el.get("odoo_product"):
@@ -3326,7 +3331,7 @@ with tab_orders:
                             _op_cs = fmt_ars(_el["odoo_product"].get("standard_price", 0))
                             st.success(f"✅ **{_op_n}**  ·  cod `{_op_c}`  ·  costo {_op_cs}  ·  margen {_el.get('margin_pct',0):.1f}%")
                         else:
-                            st.warning(f"⚠️ Sin match automático — buscá el producto manualmente")
+                            st.warning("⚠️ Sin match automático — buscá el producto manualmente")
 
                         # ── Búsqueda manual de override ───────────────────
                         _srch_key = f"prod_srch_{uf.name}_{_i_el}"
@@ -3353,7 +3358,7 @@ with tab_orders:
                                     st.rerun()
                             else:
                                 st.caption("Sin resultados para esa búsqueda.")
-                        if st.session_state.get(_ov_key):
+                        if _ov_key in st.session_state:
                             if st.button("↩️ Quitar override", key=f"prod_clear_{uf.name}_{_i_el}"):
                                 del st.session_state[_ov_key]
                                 st.rerun()
