@@ -2735,6 +2735,16 @@ with tab_bills:
         _file_lbl = f"({_uf_idx + 1}/{_total_upfiles}) " if _total_upfiles > 1 else ""
         st.markdown(f"**📎 {_file_lbl}{uf.name}**  `{ext.upper()}`  ({len(file_bytes)//1024} KB)")
         if ext in ("xlsx", "xls"):
+            # ── Detección temprana: ¿es un Excel de pedido de cliente? ───────
+            _oc_check = extract_excel_oc_fields(file_bytes)
+            if _oc_check.get("lineas"):
+                st.warning(
+                    f"⚠️ **Este Excel parece un pedido de cliente** — se detectaron "
+                    f"{len(_oc_check['lineas'])} producto(s) con columna de cantidad/pedido.\n\n"
+                    "Este archivo **no debe cargarse como factura de proveedor**. "
+                    "Por favor subilo en la pestaña **📦 Pedidos** para crear el pedido en Ventas."
+                )
+                continue
             try:
                 df = pd.read_excel(BytesIO(file_bytes), dtype=str).fillna("")
                 df.columns = [c.strip() for c in df.columns]
