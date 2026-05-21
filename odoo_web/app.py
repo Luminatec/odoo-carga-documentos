@@ -3685,15 +3685,7 @@ if tab_import is not None:
 
             # ── Subir comprobantes ────────────────────────────────────
             st.markdown("#### ⬆️ Subir comprobantes")
-            _etapas_done = st.session_state.etapas
-            _missing = []
-            if not _etapas_done.get("1"):  _missing.append("Etapa 1: Bill PETDUR (USD)")
-            if not _etapas_done.get("2"):  _missing.append("Etapa 2: DI AFIP")
-            if not _etapas_done.get("2a"): _missing.append("Etapa 2a: TRICE / Terminal 4 / Mundo Comex / SENASA")
-            if _missing:
-                st.caption("⏳ Pendiente: " + "  ·  ".join(_missing))
-
-            st.info("💡 Podés subir todos los archivos de la carpeta a la vez: "
+            st.info("💡 Podés subir documentos de cualquier etapa en cualquier orden. "
                     "seleccioná múltiples archivos con **Ctrl+A** en el explorador, "
                     "o arrastrá y soltá varios archivos al mismo tiempo.")
 
