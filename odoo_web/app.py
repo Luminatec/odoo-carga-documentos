@@ -9,6 +9,7 @@ import xmlrpc.client
 import base64
 import re
 from io import BytesIO
+from datetime import datetime as _dt_now
 
 import pandas as pd
 
@@ -1096,6 +1097,7 @@ Factura:
         fields["fecha_vencimiento"] = compute_vencimiento(fields["fecha_iso"], fields["dias_pago"])
         fields["fecha_vto_iso"]     = fields["fecha_vencimiento"]
 
+    fields["_source"] = "ai"
     return fields
 
 
@@ -1127,7 +1129,7 @@ def extract_pdf_fields(file_bytes):
 
     fields = {"numero": "", "fecha": "", "fecha_iso": "", "fecha_vencimiento": "",
               "fecha_vto_iso": "", "proveedor": "", "total": "", "neto": "", "iva": "",
-              "cuit": "", "condiciones_venta": "", "dias_pago": None}
+              "cuit": "", "condiciones_venta": "", "dias_pago": None, "_source": "regex"}
 
     # ── NÚMERO DE COMPROBANTE ─────────────────────────────────────────────
     # Soporta:
@@ -2721,12 +2723,16 @@ with tab_bills:
         type=["pdf","jpg","jpeg","png","xlsx","xls"], accept_multiple_files=True, key="bills_upload")
     if not files:
         st.caption("Subí uno o más archivos para empezar.")
-    for uf in (files or []):
+    _total_upfiles = len(files) if files else 0
+    if _total_upfiles > 1:
+        st.caption(f"📂 {_total_upfiles} archivo(s) cargados — procesando uno por uno.")
+    for _uf_idx, uf in enumerate(files or []):
         st.divider()
         ext        = uf.name.rsplit(".", 1)[-1].lower()
         file_bytes = uf.read()
         mimetype   = MIMETYPES.get(ext, "application/octet-stream")
-        st.markdown(f"**📎 {uf.name}**  `{ext.upper()}`  ({len(file_bytes)//1024} KB)")
+        _file_lbl = f"({_uf_idx + 1}/{_total_upfiles}) " if _total_upfiles > 1 else ""
+        st.markdown(f"**📎 {_file_lbl}{uf.name}**  `{ext.upper()}`  ({len(file_bytes)//1024} KB)")
         if ext in ("xlsx", "xls"):
             try:
                 df = pd.read_excel(BytesIO(file_bytes), dtype=str).fillna("")
@@ -2761,22 +2767,25 @@ with tab_bills:
                         ok += 1
                         url = odoo_url("account.move", move_id)
                         st.session_state.history.append({"tipo":"Factura proveedor",
-                            "archivo":f"{uf.name}·fila{i+1}","id":move_id,"url":url,"estado":"✅"})
+                            "archivo":f"{uf.name}·fila{i+1}","id":move_id,"url":url,"estado":"✅","hora":_dt_now.now().strftime("%H:%M")})
                     except Exception as e:
                         errs.append(f"Fila {i+1}: {str(e)[:100]}")
                     bar.progress((i+1)/len(df))
-                if ok: st.success(f"✅ {ok} de {len(df)} facturas creadas en Odoo.")
+                if ok: st.toast(f"{ok} de {len(df)} facturas creadas en Odoo.", icon="✅")
                 for err in errs: st.warning(err)
         else:
             extracted, raw_text = {}, ""
             if ext == "pdf":
-                with st.spinner("Leyendo PDF..."):
+                with st.spinner(f"Analizando PDF con IA... {_file_lbl}"):
                     extracted, raw_text = extract_pdf_fields(file_bytes)
-                st.caption("🤖 Datos detectados — revisá antes de confirmar." if extracted.get("proveedor")
-                           else "ℹ️ PDF sin texto extraíble. Completá los datos a mano.")
+                _src_tag = "✨ IA" if extracted.get("_source") == "ai" else "🔣 Regex"
+                if extracted.get("proveedor") or extracted.get("numero"):
+                    st.caption(f"🤖 Datos detectados [{_src_tag}] — revisá antes de confirmar.")
+                else:
+                    st.caption("ℹ️ PDF sin texto extraíble. Completá los datos a mano.")
             elif ext in ("jpg","jpeg","png"):
                 st.image(file_bytes, caption="Vista previa", width=420)
-                with st.spinner("Leyendo imagen con OCR..."):
+                with st.spinner(f"Leyendo imagen con OCR... {_file_lbl}"):
                     extracted, raw_text = extract_image_fields(file_bytes)
                 st.caption("🤖 Datos detectados por OCR — revisá antes de confirmar." if extracted.get("proveedor")
                            else "ℹ️ OCR no detectó datos. Completá los campos a mano.")
@@ -3058,9 +3067,10 @@ with tab_bills:
                             product_id=product_id_sel,
                             l10n_latam_document_number=_latam_num or None)
                         url = odoo_url("account.move", move_id)
-                        st.success(f"✅ Factura creada — [Abrir en Odoo]({url})")
+                        st.toast("Factura creada en Odoo", icon="✅")
+                        st.markdown(f"📎 [Abrir en Odoo]({url})")
                         st.session_state.history.append({"tipo":"Factura proveedor",
-                            "archivo":uf.name,"id":move_id,"url":url,"estado":"✅"})
+                            "archivo":uf.name,"id":move_id,"url":url,"estado":"✅","hora":_dt_now.now().strftime("%H:%M")})
                     except Exception as e:
                         st.error(f"❌ {e}")
 
@@ -3257,9 +3267,10 @@ with tab_orders:
                             payment_term_id = _xl_pt_id or None,
                         )
                         url = odoo_url("sale.order", _xl_order_id)
-                        st.success(f"✅ Pedido creado — [Abrir en Odoo]({url})")
+                        st.toast("Pedido creado en Odoo", icon="✅")
+                        st.markdown(f"📎 [Abrir en Odoo]({url})")
                         st.session_state.history.append({"tipo":"Pedido cliente",
-                            "archivo":uf.name,"id":_xl_order_id,"url":url,"estado":"✅"})
+                            "archivo":uf.name,"id":_xl_order_id,"url":url,"estado":"✅","hora":_dt_now.now().strftime("%H:%M")})
                     except Exception as _xe:
                         st.error(f"❌ {_xe}")
         else:
@@ -3609,9 +3620,10 @@ with tab_orders:
                             date_order       = _fec_oc,
                         )
                         url = odoo_url("sale.order", order_id)
-                        st.success(f"✅ Pedido creado — [Abrir en Odoo]({url})")
+                        st.toast("Pedido creado en Odoo", icon="✅")
+                        st.markdown(f"📎 [Abrir en Odoo]({url})")
                         st.session_state.history.append({"tipo":"Pedido cliente",
-                            "archivo":uf.name,"id":order_id,"url":url,"estado":"✅"})
+                            "archivo":uf.name,"id":order_id,"url":url,"estado":"✅","hora":_dt_now.now().strftime("%H:%M")})
                     except Exception as _e:
                         st.error(f"❌ {_e}")
 
@@ -4311,9 +4323,8 @@ with tab_op:
                                         models, uid, api_key,
                                         [_mid], _pay_date_str, _pay_journal_id)
                                     if _ok:
-                                        st.success(
-                                            f"✅ OP generada — **{_pname}** · "
-                                            f"{_cname} · {_curx} {_mont:,.2f}")
+                                        st.toast(
+                                            f"OP generada — {_pname} · {_cname} · {_curx} {_mont:,.2f}", icon="✅")
                                         _op_ok += 1
                                     else:
                                         _op_errs.append(f"❌ {_cname} ({_pname}): {_res}")
@@ -4324,7 +4335,7 @@ with tab_op:
                             for _oe in _op_errs:
                                 st.error(_oe)
                             if _op_ok:
-                                st.success(f"✅ {_op_ok} OP(s) generada(s) correctamente.")
+                                st.toast(f"{_op_ok} OP(s) generada(s) correctamente.", icon="✅")
                                 get_pending_bills.clear()
                                 st.info(
                                     "Presioná 🔄 Actualizar para ver el nuevo estado.")
@@ -4425,11 +4436,8 @@ with tab_op:
                                     f"{ODOO_URL}/odoo/accounting"
                                     f"/payments/{_pac_pay_id}"
                                 )
-                                st.success(
-                                    f"✅ Pago a cuenta registrado — "
-                                    f"ID {_pac_pay_id}")
-                                st.markdown(
-                                    f"[🔗 Ver en Odoo]({_pac_url})")
+                                st.toast(f"Pago a cuenta registrado — ID {_pac_pay_id}", icon="✅")
+                                st.markdown(f"[🔗 Ver en Odoo]({_pac_url})")
                             except Exception as _pace:
                                 st.error(
                                     f"Error al registrar el pago: {_pace}")
@@ -4561,8 +4569,7 @@ with tab_op:
                                     models, uid, api_key,
                                     _sid, _gs_date_str, _gs_jour_id)
                                 if _ok:
-                                    st.success(
-                                        f"✅ Pago registrado — **{_semp}** · {_snota}")
+                                    st.toast(f"Pago registrado — {_semp} · {_snota}", icon="✅")
                                     _gs_ok += 1
                                 else:
                                     _gs_errs.append(f"❌ {_snota} ({_semp}): {_res}")
@@ -4573,7 +4580,7 @@ with tab_op:
                         for _ge in _gs_errs:
                             st.error(_ge)
                         if _gs_ok:
-                            st.success(f"✅ {_gs_ok} pago(s) registrado(s).")
+                            st.toast(f"{_gs_ok} pago(s) registrado(s).", icon="✅")
                             get_pending_expense_sheets.clear()
                             st.info(
                                 "Presioná 🔄 Actualizar para ver el nuevo estado.")
@@ -4879,11 +4886,14 @@ with tab_recibos:
                             _rcic  = (_rci.get("currency_id") or [0, "ARS"])[1]
                             _rcres = float(_rci.get("amount_residual") or 0)
                             _rcto  = float(_rci.get("amount_total") or 0)
+                            _vence_raw = str(_rci.get("invoice_date_due") or "")
+                            _today_str = str(_rc_date_cls.today())
+                            _vence_disp = (f"⚠️ {_vence_raw}" if _vence_raw and _vence_raw < _today_str else _vence_raw)
                             _rci_rows.append({
                                 "Sel":        False,
                                 "Factura":    _rci.get("name") or f"ID {_rci['id']}",
                                 "Fecha":      str(_rci.get("invoice_date") or ""),
-                                "Vence":      str(_rci.get("invoice_date_due") or ""),
+                                "Vence":      _vence_disp,
                                 "Moneda":     _rcic,
                                 "Total":      fmt_ars(_rcto)  if _rcic == "ARS" else f"{_rcic} {_rcto:,.2f}",
                                 "Saldo":      fmt_ars(_rcres) if _rcic == "ARS" else f"{_rcic} {_rcres:,.2f}",
@@ -5072,9 +5082,8 @@ with tab_recibos:
                                             move_ids=_rcsel_ids if _rcsel_ids else None,
                                             memo=_rc_memo)
                                     if _rc_ok:
-                                        st.success(
-                                            f"✅ Recibo registrado para **{_rc_pname}** "
-                                            f"— ARS {fmt_ars(_rc_neto)}")
+                                        st.toast(
+                                            f"Recibo registrado para {_rc_pname} — ARS {fmt_ars(_rc_neto)}", icon="✅")
                                         search_partners_by_cuits.clear()
                                         get_customer_unpaid_invoices.clear()
                                         st.info(
@@ -5100,7 +5109,7 @@ with tab_history:
     else:
         import pandas as _pd_hist
         _hdf = _pd_hist.DataFrame(_hist)
-        _hcols = [c for c in ["tipo","archivo","estado","id","url"] if c in _hdf.columns]
+        _hcols = [c for c in ["hora","tipo","archivo","estado","id","url"] if c in _hdf.columns]
         _hdf_disp = _hdf[_hcols].copy()
         if "url" in _hdf_disp.columns:
             _hdf_disp["url"] = _hdf_disp["url"].apply(
