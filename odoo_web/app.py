@@ -668,8 +668,7 @@ def get_bill_lines(models_url, uid, api_key, bill_ids):
         lines = m.execute_kw(
             ODOO_DB, uid, api_key, "account.move.line", "search_read",
             [[("move_id", "in", bill_ids),
-              ("display_type", "=", False),
-              ("product_id", "!=", False)]],
+              ("display_type", "=", False)]],
             {"fields": ["id", "move_id", "product_id", "name",
                         "quantity", "price_unit", "price_subtotal",
                         "price_total", "tax_ids"],
@@ -681,6 +680,23 @@ def get_bill_lines(models_url, uid, api_key, bill_ids):
         return result
     except Exception:
         return {}
+
+
+def get_po_lines(models_url, uid, api_key, po_id):
+    """Trae líneas de una OC (purchase.order.line). Retorna lista de dicts."""
+    if not po_id:
+        return []
+    try:
+        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        lines = m.execute_kw(
+            ODOO_DB, uid, api_key, "purchase.order.line", "search_read",
+            [[("order_id", "=", po_id), ("product_id", "!=", False)]],
+            {"fields": ["id", "product_id", "name",
+                        "product_qty", "price_unit", "price_subtotal"],
+             "limit": 200})
+        return lines
+    except Exception:
+        return []
 
 
 def _bill_currency(b):
@@ -4211,7 +4227,38 @@ if tab_import is not None:
                                 + "</div>",
                                 unsafe_allow_html=True)
                         else:
-                            st.caption("Sin líneas de producto en esta factura.")
+                            # Para PETDUR: mostrar líneas de la OC como referencia
+                            _is_petdur = (pid == 49328)
+                            _po_ref = carp_data.get("po") if carp_data else None
+                            if _is_petdur and _po_ref:
+                                _po_lns = get_po_lines(models_url, uid, api_key, _po_ref["id"])
+                                if _po_lns:
+                                    st.caption("📋 Sin líneas en la factura — mostrando líneas de la OC como referencia:")
+                                    _po_rows = []
+                                    for pl in _po_lns:
+                                        _po_rows.append({
+                                            "Producto":  pl["product_id"][1] if pl.get("product_id") else pl.get("name","—"),
+                                            "Cant.":     float(pl.get("product_qty") or 0),
+                                            "P. Unit.":  float(pl.get("price_unit") or 0),
+                                            "Subtotal":  float(pl.get("price_subtotal") or 0),
+                                        })
+                                    _po_cfg = {
+                                        "Cant.":    st.column_config.NumberColumn("Cant.", format="%.2f"),
+                                        "P. Unit.": st.column_config.NumberColumn("P. Unit.", format="%.4f"),
+                                        "Subtotal": st.column_config.NumberColumn("Subtotal", format="%.2f"),
+                                    }
+                                    st.dataframe(pd.DataFrame(_po_rows), column_config=_po_cfg,
+                                                 use_container_width=True, hide_index=True)
+                                    _oc_sub = sum(r["Subtotal"] for r in _po_rows)
+                                    st.markdown(
+                                        '<div style="font-size:0.9rem;background:#f0f2f6;'
+                                        'padding:6px 12px;border-radius:6px;margin:4px 0;">'
+                                        f"<b>Subtotal OC:</b>&nbsp;<code>{cur_name} {_oc_sub:,.2f}</code>"
+                                        "</div>", unsafe_allow_html=True)
+                                else:
+                                    st.caption("Sin líneas en la factura ni en la OC.")
+                            else:
+                                st.caption("Sin líneas de producto en esta factura.")
 
                 st.markdown(
                     '<div style="font-size:0.9rem;background:#e8f4fd;'
