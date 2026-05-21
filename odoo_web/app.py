@@ -490,35 +490,14 @@ def create_purchase_order_petdur(models, uid, api_key, carpeta_id, currency_id,
     m = xmlrpc.client.ServerProxy(models, allow_none=True)
     today = _dt_now.now().strftime("%Y-%m-%d")
 
-    # 1. Crear la OC en draft
+    # Crear la OC en draft con campos mínimos (no confirmar — se hace manualmente en Odoo)
     po_vals = {
-        "partner_id":  49328,           # PETDUR CORPORATION S.A.
-        "partner_ref": carpeta_id,      # clave de búsqueda en load_carpeta_full
-        "currency_id": currency_id,     # USD
-        "notes": f"Importación {carpeta_id} — OC creada automáticamente por lumidoo",
+        "partner_id":  49328,       # PETDUR CORPORATION S.A.
+        "partner_ref": carpeta_id,  # clave de búsqueda en load_carpeta_full
     }
+    if currency_id:
+        po_vals["currency_id"] = currency_id
     po_id = m.execute_kw(ODOO_DB, uid, api_key, "purchase.order", "create", [po_vals])
-
-    # 2. Intentar agregar línea placeholder + confirmar (puede fallar según config Odoo)
-    try:
-        # Buscar la UOM "Unidades" dinámicamente para evitar usar ID hardcodeado
-        uom_rows = m.execute_kw(ODOO_DB, uid, api_key, "uom.uom", "search_read",
-            [[("name", "ilike", "Unidades"), ("active", "=", True)]],
-            {"fields": ["id", "name"], "limit": 1})
-        uom_id = uom_rows[0]["id"] if uom_rows else 1
-        line_vals = {
-            "order_id":       po_id,
-            "name":           f"{carpeta_id} — completar líneas de productos",
-            "product_qty":    1,
-            "price_unit":     0,
-            "date_planned":   today,
-            "product_uom_id": uom_id,
-        }
-        m.execute_kw(ODOO_DB, uid, api_key, "purchase.order.line", "create", [line_vals])
-        # Confirmar OC → estado "purchase"
-        m.execute_kw(ODOO_DB, uid, api_key, "purchase.order", "button_confirm", [[po_id]])
-    except Exception:
-        pass  # OC queda en draft — igual es válida y encontrable
 
     # 3. Adjuntar el documento si se provee
     if filename and file_bytes:
@@ -1535,6 +1514,30 @@ def search_product_by_code_or_name(models_url, uid, api_key,
                              + ([("name", "ilike", ctx[0])] if ctx else []))
                     r = _best(_tmpl(base2))
                     if r: return r
+
+            # ── 2c. Fallback texto puro: palabras largas, sin dígitos ──────────────
+            # Cubre productos como "sillas gamer", "linterna recargable", etc.
+            _stops_txt = {"para", "con", "por", "original", "pack", "color",
+                          "negro", "unidad", "unidades", "precio", "total",
+                          "costo", "envio", "marca", "modelo", "articulo",
+                          "producto", "colores", "varios"}
+            _txt_words = [
+                w.lower() for w in re.sub(r"[^\w\s]", " ", name_keywords).split()
+                if len(w) >= 5
+                and w.lower() not in _stops_txt
+                and not any(c.isdigit() for c in w)
+            ]
+            if _txt_words:
+                # Dos palabras clave juntas (más específico)
+                if len(_txt_words) >= 2:
+                    r = _best(_tmpl([("active", "=", True),
+                                     ("name", "ilike", _txt_words[0]),
+                                     ("name", "ilike", _txt_words[1])], 10))
+                    if r: return r
+                # Una sola palabra clave
+                r = _best(_tmpl([("active", "=", True),
+                                 ("name", "ilike", _txt_words[0])], 15))
+                if r: return r
 
         # ── 3. EAN13 ────────────────────────────────────────────────────────────
         if ean13 and len(str(ean13)) == 13 and str(ean13).isdigit():
@@ -3317,12 +3320,20 @@ with tab_orders:
                     with st.expander(
                             f"{_icon_p} {_desc_hd}  ·  {int(_el.get('cantidad',0))} u  ·  {fmt_ars(_el.get('precio_unit',0))}",
                             expanded=not bool(_el.get("odoo_product"))):
-                        # Datos del Excel en una línea compacta
-                        st.caption(
-                            f"**Cant.** `{int(_el.get('cantidad',0))}` u  ·  "
-                            f"**Precio** `{fmt_ars(_el.get('precio_unit',0))}` s/IVA  ·  "
-                            f"**Subtotal** `{fmt_ars(_el.get('subtotal',0))}`  ·  "
-                            f"**IVA** `{_el.get('iva_pct',21):.0f}%`")
+                        # Datos del Excel en una línea compacta — tamaño intermedio
+                        st.markdown(
+                            f'<div style="font-size:0.92rem; background:#f0f2f6; '
+                            f'padding:7px 14px; border-radius:7px; margin:4px 0; '
+                            f'line-height:1.7; color:#262730;">'
+                            f"<b>Cant.:</b>&nbsp;<code>{int(_el.get('cantidad',0))}</code>&nbsp;u"
+                            f"&nbsp;&nbsp;·&nbsp;&nbsp;"
+                            f"<b>Precio:</b>&nbsp;<code>{fmt_ars(_el.get('precio_unit',0))}</code>&nbsp;s/IVA"
+                            f"&nbsp;&nbsp;·&nbsp;&nbsp;"
+                            f"<b>Subtotal:</b>&nbsp;<code>{fmt_ars(_el.get('subtotal',0))}</code>"
+                            f"&nbsp;&nbsp;·&nbsp;&nbsp;"
+                            f"<b>IVA:</b>&nbsp;<code>{_el.get('iva_pct',21):.0f}%</code>"
+                            f'</div>',
+                            unsafe_allow_html=True)
 
                         _ov_key = _el["_ov_key"]
                         if _el.get("odoo_product"):
@@ -3885,8 +3896,14 @@ if tab_import is not None:
                         ]
                         _vis_fields = [(k, v) for k, v in _imp_fields if v]
                         if _vis_fields:
-                            st.caption("  ·  ".join(
-                                f"**{k}** `{v}`" for k, v in _vis_fields))
+                            _info_html = "  &nbsp;·&nbsp;  ".join(
+                                f"<b>{k}:</b>&nbsp;<code>{v}</code>"
+                                for k, v in _vis_fields)
+                            st.markdown(
+                                f'<div style="font-size:0.92rem; background:#f0f2f6; '
+                                f'padding:7px 14px; border-radius:7px; margin:4px 0; '
+                                f'line-height:1.7; color:#262730;">{_info_html}</div>',
+                                unsafe_allow_html=True)
 
                         if not auto.get("no_aplica"):
                             ct1, ct2, ct3, ct4 = st.columns([3, 2, 2, 1])
