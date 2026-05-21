@@ -1094,6 +1094,54 @@ def search_partner_by_cuit(models_url, uid, api_key, cuit):
         pass
     return None
 
+def search_partner_by_cuit_or_name(models_url, uid, api_key, query, limit=8):
+    """
+    Busca partners en Odoo por CUIT o razón social (parcial).
+    - Si el query tiene >= 10 dígitos → busca por VAT (exacto + ilike)
+    - Si parece texto → busca por nombre (ilike)
+    - Si tiene dígitos y texto → busca por ambos y une resultados
+    Retorna lista de dicts con keys: id, name, vat
+    """
+    if not query or not query.strip():
+        return []
+    try:
+        m   = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        q   = query.strip()
+        digits = re.sub(r"[^\d]", "", q)
+        results = []
+        seen_ids = set()
+
+        def _fetch(domain):
+            rows = m.execute_kw(
+                ODOO_DB, uid, api_key, "res.partner", "search_read",
+                [domain + [("active", "=", True)]],
+                {"fields": ["id", "name", "vat"], "limit": limit, "order": "name asc"})
+            return rows
+
+        # Búsqueda por CUIT/VAT si hay suficientes dígitos
+        if len(digits) >= 8:
+            variants = [digits]
+            if len(digits) == 11:
+                variants.append(f"{digits[:2]}-{digits[2:10]}-{digits[10:]}")
+            for vat_val in variants:
+                for row in _fetch([("vat", "=", vat_val)]):
+                    if row["id"] not in seen_ids:
+                        results.append(row); seen_ids.add(row["id"])
+            if not results:
+                for row in _fetch([("vat", "ilike", digits[-8:])]):
+                    if row["id"] not in seen_ids:
+                        results.append(row); seen_ids.add(row["id"])
+
+        # Búsqueda por nombre si el query tiene letras
+        if re.search(r"[A-Za-záéíóúñÁÉÍÓÚÑ]", q):
+            for row in _fetch([("name", "ilike", q)]):
+                if row["id"] not in seen_ids:
+                    results.append(row); seen_ids.add(row["id"])
+
+        return results[:limit]
+    except Exception:
+        return []
+
 @st.cache_data(ttl=30, show_spinner=False)
 def check_invoice_exists(models_url, uid, api_key, ref):
     """
@@ -3288,73 +3336,81 @@ with tab_orders:
                 if _k not in st.session_state:
                     st.session_state[_k] = _dv
 
-            _xl_cuit = st.text_input(
-                "CUIT del cliente",
-                key=_cuit_key_xl,
-                placeholder="30-12345678-9",
-                help="El Excel no trae cliente. Ingresá el CUIT para buscarlo en Odoo.",
-            )
-            # Auto-lookup al escribir el CUIT
+            # ── Búsqueda de cliente por CUIT o razón social ───────────────
             _xl_pid = st.session_state[_pid_key_xl]
             _xl_pnm = st.session_state[_pnm_key_xl]
-            if _xl_cuit and len(re.sub(r'[^0-9]', '', _xl_cuit)) >= 10:
-                if not _xl_pid:
-                    _partner_xl = search_partner_by_cuit(models_url, uid, api_key, _xl_cuit)
-                    if _partner_xl:
-                        st.session_state[_pid_key_xl] = _partner_xl[0]
-                        st.session_state[_pnm_key_xl] = _partner_xl[1]
-                        _xl_pid = _partner_xl[0]
-                        _xl_pnm = _partner_xl[1]
-                if _xl_pid:
-                    st.success(f"✅ Cliente identificado: **{_xl_pnm}**")
-                else:
-                    st.warning(f"⚠️ CUIT {_xl_cuit} no encontrado en Odoo.")
-                    with st.expander("➕ Crear nuevo cliente", expanded=False):
-                        _xnc1, _xnc2 = st.columns(2)
-                        _xnc_name   = _xnc1.text_input("Razón social *", key=f"xl_nc_name_{uf.name}")
-                        _xnc_street = _xnc1.text_input("Dirección", key=f"xl_nc_st_{uf.name}")
-                        _xnc_phone  = _xnc2.text_input("Teléfono", key=f"xl_nc_ph_{uf.name}")
-                        _xnc_email  = _xnc2.text_input("Email", key=f"xl_nc_em_{uf.name}")
-                        if st.button("Crear cliente", key=f"xl_btn_nc_{uf.name}"):
-                            if _xnc_name and _xl_cuit:
-                                try:
-                                    _new_xl_pid = create_partner(models, uid, api_key,
-                                        _xnc_name, _xl_cuit, _xnc_street, _xnc_phone, _xnc_email)
-                                    st.session_state[_pid_key_xl] = _new_xl_pid
-                                    st.session_state[_pnm_key_xl] = _xnc_name
-                                    st.success(f"✅ Cliente creado (ID {_new_xl_pid})")
-                                    st.rerun()
-                                except Exception as _xe:
-                                    st.error(f"❌ {_xe}")
-                            else:
-                                st.warning("Razón social y CUIT son obligatorios.")
+
+            # Si ya hay cliente asignado mostrar con opción de cambiar
+            if _xl_pid:
+                _cc1, _cc2 = st.columns([5, 1])
+                _cc1.success(f"✅ Cliente: **{_xl_pnm}**")
+                if _cc2.button("✏️ Cambiar", key=f"xl_change_{uf.name}"):
+                    st.session_state[_pid_key_xl] = None
+                    st.session_state[_pnm_key_xl] = ""
+                    st.session_state[_cuit_key_xl] = ""
+                    st.rerun()
             else:
-                st.info("📌 Ingresá el CUIT del cliente para continuar.")
-                # Checkbox para crear cliente sin CUIT previo
-                _xl_create_no_cuit_key = f"xl_create_no_cuit_{uf.name}"
-                st.checkbox("➕ Crear nuevo cliente sin buscar por CUIT", key=_xl_create_no_cuit_key)
-                if st.session_state.get(_xl_create_no_cuit_key):
-                    with st.expander("📝 Datos del nuevo cliente", expanded=True):
-                        _xnc1b, _xnc2b = st.columns(2)
-                        _xnc_name_b   = _xnc1b.text_input("Razón social *", key=f"xl_ncb_name_{uf.name}")
-                        _xnc_cuit_b   = _xnc2b.text_input("CUIT *", key=f"xl_ncb_cuit_{uf.name}", placeholder="30-12345678-9")
-                        _xnc_street_b = _xnc1b.text_input("Dirección", key=f"xl_ncb_st_{uf.name}")
-                        _xnc_phone_b  = _xnc2b.text_input("Teléfono", key=f"xl_ncb_ph_{uf.name}")
-                        _xnc_email_b  = st.text_input("Email", key=f"xl_ncb_em_{uf.name}")
-                        if st.button("Crear cliente", key=f"xl_btn_ncb_{uf.name}"):
-                            if _xnc_name_b and _xnc_cuit_b:
-                                try:
-                                    _new_pid_b = create_partner(models, uid, api_key,
-                                        _xnc_name_b, _xnc_cuit_b, _xnc_street_b, _xnc_phone_b, _xnc_email_b)
-                                    st.session_state[_pid_key_xl] = _new_pid_b
-                                    st.session_state[_pnm_key_xl] = _xnc_name_b
-                                    st.session_state[_xl_create_no_cuit_key] = False
-                                    st.success(f"✅ Cliente creado (ID {_new_pid_b})")
-                                    st.rerun()
-                                except Exception as _xeb:
-                                    st.error(f"❌ {_xeb}")
-                            else:
-                                st.warning("Razón social y CUIT son obligatorios.")
+                _xl_q = st.text_input(
+                    "Buscar cliente por CUIT o razón social",
+                    key=_cuit_key_xl,
+                    placeholder="ej: 30-12345678-9  o  Brant  o  Fanttik",
+                    help="Escribí el CUIT completo o parte de la razón social y presioná Enter",
+                )
+                _xl_q_val = (_xl_q or "").strip()
+                if _xl_q_val and len(_xl_q_val) >= 3:
+                    _xl_cands = search_partner_by_cuit_or_name(
+                        models_url, uid, api_key, _xl_q_val, limit=8)
+                    if len(_xl_cands) == 1:
+                        # Match único: asignar directo
+                        st.session_state[_pid_key_xl] = _xl_cands[0]["id"]
+                        st.session_state[_pnm_key_xl] = _xl_cands[0]["name"]
+                        st.rerun()
+                    elif len(_xl_cands) > 1:
+                        # Múltiples resultados: selectbox de elección
+                        _xl_opt_map = {
+                            f"{r['name']}  [{r.get('vat') or '—'}]": r
+                            for r in _xl_cands}
+                        _xc1, _xc2 = st.columns([4, 1])
+                        with _xc1:
+                            _xl_sel_lbl = st.selectbox(
+                                "Resultados", list(_xl_opt_map.keys()),
+                                key=f"xl_sel_{uf.name}",
+                                label_visibility="collapsed")
+                        with _xc2:
+                            st.write("")
+                            if st.button("✅ Usar", key=f"xl_use_{uf.name}"):
+                                _ch = _xl_opt_map[_xl_sel_lbl]
+                                st.session_state[_pid_key_xl] = _ch["id"]
+                                st.session_state[_pnm_key_xl] = _ch["name"]
+                                st.rerun()
+                    else:
+                        st.warning(f"⚠️ Sin resultados para «{_xl_q_val}».")
+                        with st.expander("➕ Crear nuevo cliente", expanded=False):
+                            _xnc1, _xnc2 = st.columns(2)
+                            _xnc_name   = _xnc1.text_input("Razón social *", key=f"xl_nc_name_{uf.name}")
+                            _xnc_cuit_v = _xnc2.text_input("CUIT *", key=f"xl_nc_cuit_{uf.name}",
+                                value=_xl_q_val if re.sub(r"[^\d]","",_xl_q_val).__len__() >= 10 else "",
+                                placeholder="30-12345678-9")
+                            _xnc_street = _xnc1.text_input("Dirección", key=f"xl_nc_st_{uf.name}")
+                            _xnc_phone  = _xnc2.text_input("Teléfono",  key=f"xl_nc_ph_{uf.name}")
+                            _xnc_email  = st.text_input("Email", key=f"xl_nc_em_{uf.name}")
+                            if st.button("Crear cliente", key=f"xl_btn_nc_{uf.name}"):
+                                if _xnc_name and _xnc_cuit_v:
+                                    try:
+                                        _new_xl_pid = create_partner(models, uid, api_key,
+                                            _xnc_name, _xnc_cuit_v,
+                                            _xnc_street, _xnc_phone, _xnc_email)
+                                        st.session_state[_pid_key_xl] = _new_xl_pid
+                                        st.session_state[_pnm_key_xl] = _xnc_name
+                                        st.rerun()
+                                    except Exception as _xe:
+                                        st.error(f"❌ {_xe}")
+                                else:
+                                    st.warning("Razón social y CUIT son obligatorios.")
+                elif _xl_q_val:
+                    st.caption("Escribí al menos 3 caracteres para buscar.")
+                else:
+                    st.info("📌 Ingresá el CUIT o razón social del cliente para continuar.")
 
             # ── Plazo de pago (siempre visible, opciones del sistema) ─────
             st.markdown("##### 📅 Plazo de pago")
@@ -5553,4 +5609,5 @@ with tab_history:
             _hdf_disp["url"] = _hdf_disp["url"].apply(
                 lambda u: f"[Abrir]({u})" if u else "")
         st.dataframe(_hdf_disp, use_container_width=True, hide_index=True)
+
 
