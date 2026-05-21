@@ -2375,9 +2375,25 @@ def register_payment_wizard(models, uid, api_key, move_ids, payment_date, journa
     except Exception as e:
         return False, str(e)
 
+def _get_payment_doc_type(models, uid, api_key, payment_type, partner_type, journal_id):
+    """Devuelve el l10n_latam_document_type_id correcto para un pago usando default_get de Odoo.
+    Esto garantiza que el pago aparezca en Clientes>Recibos o Proveedores>Órdenes de pago."""
+    try:
+        ctx = {
+            "default_payment_type": payment_type,
+            "default_partner_type": partner_type,
+            "default_journal_id":   journal_id,
+        }
+        defaults = models.execute_kw(ODOO_DB, uid, api_key, "account.payment", "default_get",
+            [["l10n_latam_document_type_id"]], {"context": ctx})
+        return defaults.get("l10n_latam_document_type_id") or False
+    except Exception:
+        return False
+
 def create_advance_payment(models, uid, api_key, partner_id, amount,
                            currency_id, payment_date, journal_id, memo=""):
-    """Pago a cuenta: crea y confirma un pago SIN vincular a ninguna FA."""
+    """Pago a cuenta: crea y confirma un pago SIN vincular a ninguna FA.
+    Setea l10n_latam_document_type_id para que aparezca en Proveedores > Órdenes de pago."""
     vals = {
         "payment_type": "outbound",
         "partner_type": "supplier",
@@ -2388,6 +2404,9 @@ def create_advance_payment(models, uid, api_key, partner_id, amount,
         "journal_id":   journal_id,
         "ref":          memo or "",
     }
+    _doc_type = _get_payment_doc_type(models, uid, api_key, "outbound", "supplier", journal_id)
+    if _doc_type:
+        vals["l10n_latam_document_type_id"] = _doc_type
     pay_id = models.execute_kw(ODOO_DB, uid, api_key, "account.payment", "create", [vals])
     models.execute_kw(ODOO_DB, uid, api_key, "account.payment", "action_post", [[pay_id]])
     return pay_id
@@ -2539,6 +2558,10 @@ def register_customer_payment(models, uid, api_key,
                 "journal_id":   journal_id,
                 "ref":          memo or "",
             }
+            # l10n_ar: setear document type para que aparezca en Clientes > Recibos
+            _doc_type = _get_payment_doc_type(models, uid, api_key, "inbound", "customer", journal_id)
+            if _doc_type:
+                vals["l10n_latam_document_type_id"] = _doc_type
             pay_id = models.execute_kw(ODOO_DB, uid, api_key,
                 "account.payment", "create", [vals])
             models.execute_kw(ODOO_DB, uid, api_key,
