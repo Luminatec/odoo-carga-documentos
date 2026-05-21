@@ -4598,11 +4598,13 @@ with tab_recibos:
 
     # ── helpers locales ─────────────────────────────────────────────────────
     def _rc_parse_monto(val):
-        s = (str(val)
-             .replace("$", "").replace("\xa0", "").replace(" ", "")
-             .replace(".", "").replace(",", "."))
+        """Convierte importe de home banking a float.
+        Soporta formato AR (1.234,56), US/Excel (1234.56) y sin centavos (1234)."""
+        s = str(val).replace("$", "").replace("\xa0", "").replace(" ", "").strip()
+        if not s or s.lower() in ("nan", "none", ""):
+            return 0.0
         try:
-            return float(s)
+            return float(normalize_amount(s))
         except Exception:
             return 0.0
 
