@@ -3409,7 +3409,7 @@ with tab_orders:
                         "IVA %":       int(_el.get("iva_pct", 21)),
                         "Costo":       float(_el.get("cost", 0)),
                         "Margen %":    round(float(_el.get("margin_pct", 0)), 1),
-                        "Producto Odoo": _op["name"] if _op else "",
+                        "Producto Odoo": _op["name"] if _op else "—",
                     })
                 _tbl_cfg = {
                     "":              st.column_config.TextColumn("", width="small"),
@@ -3420,60 +3420,71 @@ with tab_orders:
                     "Margen %":      st.column_config.NumberColumn("Margen %", format="%.1f%%"),
                     "Producto Odoo": st.column_config.TextColumn("Producto Odoo"),
                 }
-                _tbl_disabled = ["", "Modelo", "Descripción", "Cant.",
-                                  "P. Unit.", "IVA %", "Costo", "Margen %"]
-                _tbl_edited = st.data_editor(
-                    pd.DataFrame(_tbl_rows), column_config=_tbl_cfg,
-                    disabled=_tbl_disabled,
-                    use_container_width=True, hide_index=True,
-                    key=f"tbl_ped_{uf.name}")
-                # Sincronizar correcciones manuales de Producto Odoo al estado
-                for _i_ed, _row_ed in _tbl_edited.iterrows():
-                    _new_name = (_row_ed.get("Producto Odoo") or "").strip()
-                    _old_op = _xl_enriched[_i_ed].get("odoo_product")
-                    _old_name = _old_op["name"] if _old_op else ""
-                    if _new_name and _new_name != _old_name:
-                        _ck_ed = _xl_enriched[_i_ed].get("_ov_key")
-                        if _ck_ed:
-                            # Buscar el producto en Odoo por nombre exacto
-                            _fix_res = search_product_by_code_or_name(
-                                models_url, uid, api_key,
-                                code=_new_name, name_keywords=_new_name, limit=1)
-                            if _fix_res:
-                                st.session_state[_ck_ed] = _fix_res[0]
-                                _xl_enriched[_i_ed]["odoo_product"] = _fix_res[0]
+                st.dataframe(pd.DataFrame(_tbl_rows), column_config=_tbl_cfg,
+                             use_container_width=True, hide_index=True)
 
-                # ── Override manual (solo para líneas sin match) ───────────
-                _unmatched = [_el for _el in _xl_enriched if not _el.get("odoo_product")]
-                if _unmatched:
-                    with st.expander(f"🔍 Buscar productos sin match ({len(_unmatched)})", expanded=False):
-                        for _i_um, _el_um in enumerate(_unmatched):
-                            _i_orig = _xl_enriched.index(_el_um)
-                            _ov_key_um = _el_um["_ov_key"]
-                            st.markdown(f"**{_el_um.get('modelo') or _el_um.get('descripcion') or f'Línea {_i_orig+1}'}**")
-                            _srch_val = st.text_input(
-                                "Buscar en Odoo", key=f"prod_srch_{uf.name}_{_i_orig}",
-                                placeholder="nombre o código...", label_visibility="collapsed")
-                            if _srch_val and len(_srch_val) >= 2:
-                                _manual_res = search_product_by_code_or_name(
-                                    models_url, uid, api_key,
-                                    code=_srch_val, name_keywords=_srch_val, limit=5)
-                                if _manual_res:
-                                    _opts_map = {f"{r['name']}  [{r.get('default_code') or ''}]": r
-                                                 for r in _manual_res}
-                                    _sel_lbl = st.selectbox("", list(_opts_map.keys()),
-                                        key=f"prod_sel_{uf.name}_{_i_orig}",
-                                        label_visibility="collapsed")
-                                    if st.button("✓ Usar", key=f"prod_use_{uf.name}_{_i_orig}"):
-                                        st.session_state[_ov_key_um] = _opts_map[_sel_lbl]
-                                        st.rerun()
-                                else:
-                                    st.caption("Sin resultados.")
-                            if _ov_key_um in st.session_state:
-                                if st.button("↩️ Quitar", key=f"prod_clear_{uf.name}_{_i_orig}"):
-                                    del st.session_state[_ov_key_um]
-                                    st.rerun()
-                            st.divider()
+                # ── Corrección de producto Odoo (todas las líneas) ─────────
+                _n_sin = sum(1 for _e in _xl_enriched if not _e.get("odoo_product"))
+                _exp_lbl = (f"🔍 Corregir producto Odoo — {_n_sin} sin match"
+                            if _n_sin else "🔍 Corregir producto Odoo")
+                with st.expander(_exp_lbl, expanded=(_n_sin > 0)):
+                    # Selectbox para elegir qué línea editar
+                    def _line_label(i, e):
+                        _op_n = e.get("odoo_product", {}).get("name", "") if e.get("odoo_product") else ""
+                        _mod  = e.get("modelo") or e.get("descripcion") or f"Línea {i+1}"
+                        return f"{i+1}. {_mod}" + (f"  →  {_op_n}" if _op_n else "  ⚠️ sin match")
+                    _line_opts = [_line_label(i, e) for i, e in enumerate(_xl_enriched)]
+                    # Pre-seleccionar primera línea sin match
+                    _default_idx = next(
+                        (i for i, e in enumerate(_xl_enriched) if not e.get("odoo_product")), 0)
+                    _sel_line = st.selectbox(
+                        "Línea del pedido", _line_opts,
+                        index=_default_idx,
+                        key=f"ov_line_{uf.name}",
+                        label_visibility="collapsed")
+                    _sel_i = _line_opts.index(_sel_line)
+                    _el_sel = _xl_enriched[_sel_i]
+                    _ov_key_sel = _el_sel.get("_ov_key")
+
+                    # Campo de búsqueda: acepta nombre parcial O código
+                    _srch_placeholder = (
+                        f"{_el_sel.get('modelo') or _el_sel.get('descripcion') or ''}"
+                    )
+                    _srch_q = st.text_input(
+                        "Buscar por nombre o código (parcial)",
+                        key=f"ov_q_{uf.name}_{_sel_i}",
+                        placeholder=_srch_placeholder or "ej: E1 MAX, fanttik, 7700…")
+
+                    if _srch_q and len(_srch_q) >= 2:
+                        _ov_res = search_product_by_code_or_name(
+                            models_url, uid, api_key,
+                            code=_srch_q, name_keywords=_srch_q, limit=8)
+                        if _ov_res:
+                            _opts_map = {
+                                f"{r['name']}  [{r.get('default_code') or '—'}]": r
+                                for r in _ov_res}
+                            _sel_opt = st.selectbox(
+                                "Resultados", list(_opts_map.keys()),
+                                key=f"ov_res_{uf.name}_{_sel_i}",
+                                label_visibility="collapsed")
+                            if st.button("✅ Usar este producto",
+                                         key=f"ov_use_{uf.name}_{_sel_i}"):
+                                _chosen = _opts_map[_sel_opt]
+                                if _ov_key_sel:
+                                    st.session_state[_ov_key_sel] = _chosen
+                                _el_sel["odoo_product"] = _chosen
+                                st.rerun()
+                        else:
+                            st.caption("Sin resultados. Probá con otro término o código.")
+
+                    # Botón para quitar el match actual
+                    if _el_sel.get("odoo_product") and _ov_key_sel:
+                        if st.button("↩️ Quitar match actual",
+                                     key=f"ov_clear_{uf.name}_{_sel_i}"):
+                            if _ov_key_sel in st.session_state:
+                                del st.session_state[_ov_key_sel]
+                            _el_sel["odoo_product"] = None
+                            st.rerun()
             else:
                 st.info("No se detectaron productos con cantidad pedida.")
 
@@ -5531,3 +5542,4 @@ with tab_history:
             _hdf_disp["url"] = _hdf_disp["url"].apply(
                 lambda u: f"[Abrir]({u})" if u else "")
         st.dataframe(_hdf_disp, use_container_width=True, hide_index=True)
+
