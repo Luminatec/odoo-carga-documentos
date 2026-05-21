@@ -484,40 +484,50 @@ def create_purchase_order_petdur(models, uid, api_key, carpeta_id, currency_id,
                                   filename=None, file_bytes=None, mimetype=None):
     """
     Crea OC PETDUR (purchase.order) en Odoo para la carpeta de importación.
-    Agrega una línea placeholder para poder confirmar y marca Etapa 0.
-    Retorna el ID del purchase.order creado.
+    Intenta agregar línea placeholder y confirmar; si algo falla deja la OC en draft.
+    Siempre retorna el ID del purchase.order (nunca lanza excepción después de crear la OC).
     """
     m = xmlrpc.client.ServerProxy(models, allow_none=True)
     today = _dt_now.now().strftime("%Y-%m-%d")
 
-    # Crear la OC
+    # 1. Crear la OC en draft
     po_vals = {
         "partner_id":  49328,           # PETDUR CORPORATION S.A.
-        "partner_ref": carpeta_id,      # campo "Referencia de proveedor" = clave de búsqueda
+        "partner_ref": carpeta_id,      # clave de búsqueda en load_carpeta_full
         "currency_id": currency_id,     # USD
-        "notes": f"Importación {carpeta_id} — OC creada automáticamente por lumidoo al subir Bill PETDUR",
+        "notes": f"Importación {carpeta_id} — OC creada automáticamente por lumidoo",
     }
     po_id = m.execute_kw(ODOO_DB, uid, api_key, "purchase.order", "create", [po_vals])
 
-    # Línea placeholder (necesaria para poder confirmar la OC en Odoo)
-    line_vals = {
-        "order_id":     po_id,
-        "name":         f"{carpeta_id} — completar líneas de productos",
-        "product_qty":  1,
-        "price_unit":   0,
-        "date_planned": today,
-        "product_uom":  1,              # Unidades
-    }
-    m.execute_kw(ODOO_DB, uid, api_key, "purchase.order.line", "create", [line_vals])
+    # 2. Intentar agregar línea placeholder + confirmar (puede fallar según config Odoo)
+    try:
+        # Buscar la UOM "Unidades" dinámicamente para evitar usar ID hardcodeado
+        uom_rows = m.execute_kw(ODOO_DB, uid, api_key, "uom.uom", "search_read",
+            [[("name", "ilike", "Unidades"), ("active", "=", True)]],
+            {"fields": ["id", "name"], "limit": 1})
+        uom_id = uom_rows[0]["id"] if uom_rows else 1
+        line_vals = {
+            "order_id":       po_id,
+            "name":           f"{carpeta_id} — completar líneas de productos",
+            "product_qty":    1,
+            "price_unit":     0,
+            "date_planned":   today,
+            "product_uom_id": uom_id,
+        }
+        m.execute_kw(ODOO_DB, uid, api_key, "purchase.order.line", "create", [line_vals])
+        # Confirmar OC → estado "purchase"
+        m.execute_kw(ODOO_DB, uid, api_key, "purchase.order", "button_confirm", [[po_id]])
+    except Exception:
+        pass  # OC queda en draft — igual es válida y encontrable
 
-    # Confirmar OC → pasa a estado "purchase"
-    m.execute_kw(ODOO_DB, uid, api_key, "purchase.order", "button_confirm", [[po_id]])
-
-    # Adjuntar el documento si se provee
+    # 3. Adjuntar el documento si se provee
     if filename and file_bytes:
-        attach_file(models, uid, api_key, "purchase.order", po_id, filename, file_bytes, mimetype)
+        try:
+            attach_file(models, uid, api_key, "purchase.order", po_id, filename, file_bytes, mimetype)
+        except Exception:
+            pass
 
-    return po_id
+    return po_id  # Siempre retorna el ID
 
 
 # ── Mapeo partner_id → tipo para facturas de importación ────────────────────
@@ -609,13 +619,15 @@ def load_carpeta_full(models_url, uid, api_key, carpeta_id):
                          "state", "partner_ref", "x_studio_cotizacion_dolar"]
         po_fields_safe = ["id", "name", "partner_id", "amount_total", "currency_id",
                           "state", "partner_ref"]
+        # Incluir draft para OCs auto-creadas que no pudieron confirmarse
+        _po_states = ["draft", "sent", "purchase", "done"]
         try:
             pos = m.execute_kw(ODOO_DB, uid, api_key, "purchase.order", "search_read",
-                [[("partner_ref", "ilike", carpeta_id), ("state", "in", ["purchase", "done"])]],
+                [[("partner_ref", "ilike", carpeta_id), ("state", "in", _po_states)]],
                 {"fields": po_fields_ext, "limit": 5})
         except Exception:
             pos = m.execute_kw(ODOO_DB, uid, api_key, "purchase.order", "search_read",
-                [[("partner_ref", "ilike", carpeta_id), ("state", "in", ["purchase", "done"])]],
+                [[("partner_ref", "ilike", carpeta_id), ("state", "in", _po_states)]],
                 {"fields": po_fields_safe, "limit": 5})
         po = pos[0] if pos else None
         result["po"] = po
@@ -1467,10 +1479,26 @@ def search_product_by_code_or_name(models_url, uid, api_key,
                       if re.search(r"[A-Za-z]", w) and re.search(r"\d", w) and len(w) >= 4]
             # Tokens solo letras, cortos (contexto tipo "GI")
             short  = [w for w in words if w.isalpha() and len(w) == 2]
+            # Tokens alfanuméricos cortos (E1, S1, V8, X9…) con palabra extra de contexto
+            short_model = [w for w in words
+                           if re.search(r"[A-Za-z]", w) and re.search(r"\d", w)
+                           and 2 <= len(w) <= 3]
 
             # 2-extra: buscar por código con guión directamente en el nombre
             for hm in hyphen_model[:2]:
                 r = _best(_tmpl([("active", "=", True), ("name", "ilike", hm)], 10))
+                if r: return r
+
+            # 2-extra-b: modelo corto + siguiente palabra como contexto ("E1 maxt", "V8 mate")
+            for sm in short_model[:2]:
+                ctx_words = [w for w in words if w != sm and len(w) >= 3]
+                if ctx_words:
+                    r = _best(_tmpl([("active", "=", True),
+                                     ("name", "ilike", sm),
+                                     ("name", "ilike", ctx_words[0])], 10))
+                    if r: return r
+                # Segundo intento: solo el modelo corto (más amplio)
+                r = _best(_tmpl([("active", "=", True), ("name", "ilike", sm)], 10))
                 if r: return r
 
             # 2a. Número de modelo literal ("G1110" → "PIXMA G1110")
