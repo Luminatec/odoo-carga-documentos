@@ -659,6 +659,42 @@ def load_carpeta_full(models_url, uid, api_key, carpeta_id):
     return result
 
 
+def parse_petdur_invoice_lines(text):
+    """
+    Parsea líneas de producto de una factura PETDUR (e-Ticket Uruguay).
+    Formato por línea: Nro COD Descripcion Cantidad u Precio Monto
+    Retorna lista de dicts: descripcion, cantidad, precio_unit, monto.
+    """
+    def _num(s):
+        if "," in s:
+            parts = s.rsplit(",", 1)
+            return float(parts[0].replace(".", "").replace(",", "") + "." + parts[1])
+        return float(s.replace(".", ""))
+
+    lines = []
+    pattern = re.compile(
+        r"^\s*\d+\s+(.+?)\s+([\d.,]+)\s+u\s+([\d.,]+)\s+([\d.,]+)\s*$",
+        re.MULTILINE)
+    for m in pattern.finditer(text):
+        desc_raw, cant_s, precio_s, monto_s = m.groups()
+        desc_raw = desc_raw.strip()
+        # Eliminar prefijo duplicado: "A10 PRO A10 PRO" → "A10 PRO"
+        words = desc_raw.split()
+        mid = len(words) // 2
+        if mid >= 1 and words[:mid] == words[mid:mid + mid]:
+            desc_raw = " ".join(words[mid:])
+        try:
+            lines.append({
+                "descripcion": desc_raw,
+                "cantidad":    _num(cant_s),
+                "precio_unit": _num(precio_s),
+                "monto":       _num(monto_s),
+            })
+        except Exception:
+            pass
+    return lines
+
+
 def get_bill_lines(models_url, uid, api_key, bill_ids):
     """Trae líneas de producto de una lista de facturas. Retorna dict {bill_id: [lineas]}."""
     if not bill_ids:
@@ -2402,6 +2438,13 @@ def classify_document(text, carpeta_id=""):
                 extracted["mismatch_ref"] = _r_norm
                 break
 
+    # ── Líneas de producto PETDUR ─────────────────────────────────────────────
+    _cuit_no_sep = tu.replace("-", "").replace(" ", "")
+    if "PETDUR" in tu or "217016440010" in _cuit_no_sep:
+        _p_lns = parse_petdur_invoice_lines(text)
+        if _p_lns:
+            extracted["lineas_petdur"] = _p_lns
+
     # ── Clasificación por CUIT ─────────────────────────────────────────────
     cuit_norm = extracted.get("cuit_norm", "")
     # Buscar en todo el texto (por si el PDF tiene CUITs sin guiones)
@@ -3336,8 +3379,6 @@ with tab_orders:
                 for _i_ln, _ln in enumerate(_lineas_xl):
                     _ov_key    = f"prod_ov_{uf.name}_{_i_ln}"
                     _cache_key = f"prod_cache_{uf.name}_{_i_ln}"
-                    # Cachear solo matches exitosos; si no encontró, reintentar en cada rerun
-                    # (permite que mejoras en la búsqueda se apliquen sin borrar cache)
                     if _cache_key not in st.session_state:
                         _prods = search_product_by_code_or_name(
                             models_url, uid, api_key,
@@ -3346,8 +3387,7 @@ with tab_orders:
                             limit=1)
                         if _prods:
                             st.session_state[_cache_key] = _prods[0]
-                    _op_auto = st.session_state.get(_cache_key)  # None si aún no matcheó
-                    # Override manual tiene prioridad sobre el auto-match
+                    _op_auto = st.session_state.get(_cache_key)
                     _op      = st.session_state[_ov_key] if _ov_key in st.session_state else _op_auto
                     _cost    = float(_op["standard_price"]) if _op else 0.0
                     _price   = safe_float(_ln.get("precio_unit", 0))
@@ -3356,65 +3396,65 @@ with tab_orders:
                                          "cost": _cost, "margin_pct": _margin,
                                          "_ov_key": _ov_key})
 
+                # ── Tabla de productos ──────────────────────────────────────
+                _tbl_rows = []
                 for _i_el, _el in enumerate(_xl_enriched):
-                    _icon_p  = "✅" if _el.get("odoo_product") else "⚠️"
-                    _desc_hd = (_el.get("modelo") or _el.get("descripcion") or f"línea {_i_el+1}")[:45]
-                    with st.expander(
-                            f"{_icon_p} {_desc_hd}  ·  {int(_el.get('cantidad',0))} u  ·  {fmt_ars(_el.get('precio_unit',0))}",
-                            expanded=not bool(_el.get("odoo_product"))):
-                        # Datos del Excel en una línea compacta — tamaño intermedio
-                        st.markdown(
-                            f'<div style="font-size:0.92rem; background:#f0f2f6; '
-                            f'padding:7px 14px; border-radius:7px; margin:4px 0; '
-                            f'line-height:1.7; color:#262730;">'
-                            f"<b>Cant.:</b>&nbsp;<code>{int(_el.get('cantidad',0))}</code>&nbsp;u"
-                            f"&nbsp;&nbsp;·&nbsp;&nbsp;"
-                            f"<b>Precio:</b>&nbsp;<code>{fmt_ars(_el.get('precio_unit',0))}</code>&nbsp;s/IVA"
-                            f"&nbsp;&nbsp;·&nbsp;&nbsp;"
-                            f"<b>Subtotal:</b>&nbsp;<code>{fmt_ars(_el.get('subtotal',0))}</code>"
-                            f"&nbsp;&nbsp;·&nbsp;&nbsp;"
-                            f"<b>IVA:</b>&nbsp;<code>{_el.get('iva_pct',21):.0f}%</code>"
-                            f'</div>',
-                            unsafe_allow_html=True)
+                    _op = _el.get("odoo_product")
+                    _tbl_rows.append({
+                        "":            "✅" if _op else "⚠️",
+                        "Modelo":      _el.get("modelo") or "",
+                        "Descripción": (_el.get("descripcion") or "")[:50],
+                        "Cant.":       int(_el.get("cantidad", 0)),
+                        "P. Unit.":    float(_el.get("precio_unit", 0)),
+                        "Subtotal":    float(_el.get("subtotal", 0)),
+                        "IVA %":       int(_el.get("iva_pct", 21)),
+                        "Producto Odoo": _op["name"] if _op else "—",
+                        "Costo":       float(_el.get("cost", 0)),
+                        "Margen %":    round(float(_el.get("margin_pct", 0)), 1),
+                    })
+                _tbl_cfg = {
+                    "":              st.column_config.TextColumn("", width="small"),
+                    "Cant.":         st.column_config.NumberColumn("Cant.", format="%d"),
+                    "P. Unit.":      st.column_config.NumberColumn("P. Unit.", format="$ %.2f"),
+                    "Subtotal":      st.column_config.NumberColumn("Subtotal", format="$ %.2f"),
+                    "IVA %":         st.column_config.NumberColumn("IVA %", format="%d%%"),
+                    "Costo":         st.column_config.NumberColumn("Costo", format="$ %.2f"),
+                    "Margen %":      st.column_config.NumberColumn("Margen %", format="%.1f%%"),
+                }
+                st.dataframe(pd.DataFrame(_tbl_rows), column_config=_tbl_cfg,
+                             use_container_width=True, hide_index=True)
 
-                        _ov_key = _el["_ov_key"]
-                        if _el.get("odoo_product"):
-                            _op_n  = _el["odoo_product"]["name"]
-                            _op_c  = _el["odoo_product"].get("default_code") or "—"
-                            _op_cs = fmt_ars(_el["odoo_product"].get("standard_price", 0))
-                            st.success(f"✅ **{_op_n}**  ·  cod `{_op_c}`  ·  costo {_op_cs}  ·  margen {_el.get('margin_pct',0):.1f}%")
-                        else:
-                            st.warning("⚠️ Sin match automático — buscá el producto manualmente")
-
-                        # ── Búsqueda manual de override ───────────────────
-                        _srch_key = f"prod_srch_{uf.name}_{_i_el}"
-                        _srch_val = st.text_input(
-                            "Buscar producto en Odoo",
-                            key=_srch_key,
-                            placeholder="nombre o código interno...",
-                            label_visibility="collapsed")
-                        if _srch_val and len(_srch_val) >= 2:
-                            _manual_res = search_product_by_code_or_name(
-                                models_url, uid, api_key,
-                                code=_srch_val, name_keywords=_srch_val, limit=5)
-                            if _manual_res:
-                                _opts_map = {
-                                    f"{r['name']}  [{r.get('default_code') or ''}]": r
-                                    for r in _manual_res}
-                                _sel_lbl = st.selectbox(
-                                    "Resultado", list(_opts_map.keys()),
-                                    key=f"prod_sel_{uf.name}_{_i_el}",
-                                    label_visibility="collapsed")
-                                if st.button("✓ Usar este producto",
-                                             key=f"prod_use_{uf.name}_{_i_el}"):
-                                    st.session_state[_ov_key] = _opts_map[_sel_lbl]
+                # ── Override manual (solo para líneas sin match) ───────────
+                _unmatched = [_el for _el in _xl_enriched if not _el.get("odoo_product")]
+                if _unmatched:
+                    with st.expander(f"🔍 Buscar productos sin match ({len(_unmatched)})", expanded=False):
+                        for _i_um, _el_um in enumerate(_unmatched):
+                            _i_orig = _xl_enriched.index(_el_um)
+                            _ov_key_um = _el_um["_ov_key"]
+                            st.markdown(f"**{_el_um.get('modelo') or _el_um.get('descripcion') or f'Línea {_i_orig+1}'}**")
+                            _srch_val = st.text_input(
+                                "Buscar en Odoo", key=f"prod_srch_{uf.name}_{_i_orig}",
+                                placeholder="nombre o código...", label_visibility="collapsed")
+                            if _srch_val and len(_srch_val) >= 2:
+                                _manual_res = search_product_by_code_or_name(
+                                    models_url, uid, api_key,
+                                    code=_srch_val, name_keywords=_srch_val, limit=5)
+                                if _manual_res:
+                                    _opts_map = {f"{r['name']}  [{r.get('default_code') or ''}]": r
+                                                 for r in _manual_res}
+                                    _sel_lbl = st.selectbox("", list(_opts_map.keys()),
+                                        key=f"prod_sel_{uf.name}_{_i_orig}",
+                                        label_visibility="collapsed")
+                                    if st.button("✓ Usar", key=f"prod_use_{uf.name}_{_i_orig}"):
+                                        st.session_state[_ov_key_um] = _opts_map[_sel_lbl]
+                                        st.rerun()
+                                else:
+                                    st.caption("Sin resultados.")
+                            if _ov_key_um in st.session_state:
+                                if st.button("↩️ Quitar", key=f"prod_clear_{uf.name}_{_i_orig}"):
+                                    del st.session_state[_ov_key_um]
                                     st.rerun()
-                            else:
-                                st.caption("Sin resultados para esa búsqueda.")
-                        if _ov_key in st.session_state:
-                            if st.button("↩️ Quitar override", key=f"prod_clear_{uf.name}_{_i_el}"):
-                                del st.session_state[_ov_key]
-                                st.rerun()
+                            st.divider()
             else:
                 st.info("No se detectaron productos con cantidad pedida.")
 
@@ -3946,6 +3986,23 @@ if tab_import is not None:
                                 f'padding:7px 14px; border-radius:7px; margin:4px 0; '
                                 f'line-height:1.7; color:#262730;">{_info_html}</div>',
                                 unsafe_allow_html=True)
+                        # Líneas de productos (PETDUR)
+                        _pet_lns = _ext_info.get("lineas_petdur", [])
+                        if _pet_lns:
+                            st.markdown("**Líneas de la factura:**")
+                            _pet_df = pd.DataFrame([{
+                                "Descripción": ln["descripcion"],
+                                "Cant.":       ln["cantidad"],
+                                "P. Unit.":    ln["precio_unit"],
+                                "Monto":       ln["monto"],
+                            } for ln in _pet_lns])
+                            _pet_cfg = {
+                                "Cant.":    st.column_config.NumberColumn("Cant.", format="%.2f"),
+                                "P. Unit.": st.column_config.NumberColumn("P. Unit.", format="%.2f"),
+                                "Monto":    st.column_config.NumberColumn("Monto", format="%.2f"),
+                            }
+                            st.dataframe(_pet_df, column_config=_pet_cfg,
+                                         use_container_width=True, hide_index=True)
 
                         if not auto.get("no_aplica"):
                             ct1, ct2, ct3, ct4 = st.columns([3, 2, 2, 1])
