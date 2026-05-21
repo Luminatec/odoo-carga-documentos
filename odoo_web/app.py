@@ -2294,11 +2294,11 @@ def extract_excel_oc_fields(file_bytes):
         except Exception:
             subtotal = precio_unit * pedido_qty
 
-        desc_full = modelo_val or desc_val or sku_val
-
+        # modelo y descripcion se guardan por separado para mejorar la busqueda en Odoo
         fields["lineas"].append({
             "codigo":      sku_val,
-            "descripcion": desc_full[:120],
+            "modelo":      modelo_val,
+            "descripcion": (desc_val or modelo_val or sku_val)[:200],
             "ean":         ean_val,
             "cantidad":    pedido_qty,
             "precio_unit": precio_unit,
@@ -3325,8 +3325,8 @@ with tab_orders:
                     if _cache_key not in st.session_state:
                         _prods = search_product_by_code_or_name(
                             models_url, uid, api_key,
-                            code=_ln.get("codigo",""),
-                            name_keywords=_ln.get("descripcion",""),
+                            code=_ln.get("modelo","") or _ln.get("codigo",""),
+                            name_keywords=(_ln.get("descripcion","") or _ln.get("modelo","")).strip(),
                             limit=1)
                         if _prods:
                             st.session_state[_cache_key] = _prods[0]
@@ -3342,7 +3342,7 @@ with tab_orders:
 
                 for _i_el, _el in enumerate(_xl_enriched):
                     _icon_p  = "✅" if _el.get("odoo_product") else "⚠️"
-                    _desc_hd = (_el.get("descripcion") or f"línea {_i_el+1}")[:45]
+                    _desc_hd = (_el.get("modelo") or _el.get("descripcion") or f"línea {_i_el+1}")[:45]
                     with st.expander(
                             f"{_icon_p} {_desc_hd}  ·  {int(_el.get('cantidad',0))} u  ·  {fmt_ars(_el.get('precio_unit',0))}",
                             expanded=not bool(_el.get("odoo_product"))):
