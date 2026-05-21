@@ -1008,11 +1008,101 @@ def check_invoice_exists(models_url, uid, api_key, ref):
     except Exception:
         return False, None, None
 
+def _ai_extract_invoice_fields(text):
+    """
+    Extrae campos de factura usando Claude Haiku via API de Anthropic.
+    Retorna un fields_dict con los mismos keys que extract_pdf_fields,
+    o lanza excepción si falla (el caller hace fallback a regex).
+    Requiere st.secrets["ANTHROPIC_API_KEY"].
+    """
+    import anthropic, json as _json
+
+    _api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+    if not _api_key:
+        raise ValueError("ANTHROPIC_API_KEY no configurada en secrets")
+
+    client = anthropic.Anthropic(api_key=_api_key)
+
+    _prompt = """Extraé los campos de esta factura argentina. Respondé SOLO con JSON válido, sin texto extra ni bloques de código.
+
+Formato esperado:
+{
+  "numero": "00004-00020659",
+  "fecha": "DD/MM/YYYY",
+  "proveedor": "Razón social del EMISOR (quien factura, no quien recibe)",
+  "cuit": "30710058667",
+  "total": 318124.13,
+  "neto": 262912.50,
+  "iva": 55211.63,
+  "condiciones_venta": "A 7 dias FF",
+  "tipo": "RI"
+}
+
+Reglas:
+- "numero" siempre en formato XXXXX-XXXXXXXX (5 dígitos, guión, 8 dígitos, con ceros a la izquierda)
+- "cuit" del EMISOR (proveedor), sin guiones ni espacios
+- "total" incluye todos los impuestos
+- "neto" es la base imponible / subtotal gravado
+- "iva" es la suma de todos los IVA (21%, 10.5%, 27%)
+- "tipo": "RI" (Responsable Inscripto), "MONO" (Monotributo), "EX" (Exento)
+- Si la factura es tipo C o el emisor es Monotributo: "iva" = null, "neto" = mismo valor que "total"
+- Para campos no encontrados usar null
+- Números como decimales sin símbolo de moneda (ej: 318124.13, no "$318.124,13")
+
+Factura:
+""" + text
+
+    resp = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=512,
+        messages=[{"role": "user", "content": _prompt}]
+    )
+
+    raw_json = resp.content[0].text.strip()
+    # Limpiar por si el modelo wrapeó en ```json ... ```
+    raw_json = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_json, flags=re.MULTILINE).strip()
+    data = _json.loads(raw_json)
+
+    # ── Construir fields_dict con el mismo schema que el parser regex ─────
+    fields = {
+        "numero":            str(data.get("numero") or "").strip(),
+        "fecha":             str(data.get("fecha") or "").strip(),
+        "fecha_iso":         "",
+        "fecha_vencimiento": "",
+        "fecha_vto_iso":     "",
+        "proveedor":         str(data.get("proveedor") or "").strip()[:80],
+        "cuit":              re.sub(r"[\s\-]", "", str(data.get("cuit") or "")),
+        "total":             str(data.get("total") or "").replace(",", ".") if data.get("total") is not None else "",
+        "neto":              str(data.get("neto") or "").replace(",", ".") if data.get("neto") is not None else "",
+        "iva":               str(data.get("iva") or "").replace(",", ".") if data.get("iva") is not None else "",
+        "condiciones_venta": str(data.get("condiciones_venta") or "").strip(),
+        "dias_pago":         None,
+    }
+
+    # Convertir números a string limpio (sin notación científica)
+    for _k in ("total", "neto", "iva"):
+        try:
+            if fields[_k]:
+                fields[_k] = f"{float(fields[_k]):.2f}"
+        except Exception:
+            fields[_k] = ""
+
+    # Fecha ISO y vencimiento (igual que el parser regex)
+    if fields["fecha"]:
+        fields["fecha_iso"] = parse_ar_date(fields["fecha"])
+    cond_text = fields["condiciones_venta"] or text
+    fields["dias_pago"] = parse_payment_terms(cond_text)
+    if fields["dias_pago"] and fields["fecha_iso"]:
+        fields["fecha_vencimiento"] = compute_vencimiento(fields["fecha_iso"], fields["dias_pago"])
+        fields["fecha_vto_iso"]     = fields["fecha_vencimiento"]
+
+    return fields
+
+
 def extract_pdf_fields(file_bytes):
     """
-    Parser especializado para facturas electrónicas argentinas (AFIP/CAE/CAEA).
-    Extrae: proveedor, número de comprobante, fecha de emisión,
-            fecha de vencimiento de pago, total.
+    Parser para facturas electrónicas argentinas.
+    Intenta primero extracción con IA (Claude Haiku), con fallback a regex.
     Retorna (fields_dict, raw_text).
     """
     try:
@@ -1023,6 +1113,17 @@ def extract_pdf_fields(file_bytes):
         return {}, ""
     if not text.strip():
         return {}, ""
+
+    # ── Intentar extracción con IA ────────────────────────────────────────
+    try:
+        _ai_fields = _ai_extract_invoice_fields(text)
+        # Considerar exitoso si al menos tiene proveedor o número
+        if _ai_fields.get("proveedor") or _ai_fields.get("numero"):
+            return _ai_fields, text
+    except Exception:
+        pass  # silencioso: caer al parser regex
+
+    # ── Fallback: parser regex original ──────────────────────────────────
 
     fields = {"numero": "", "fecha": "", "fecha_iso": "", "fecha_vencimiento": "",
               "fecha_vto_iso": "", "proveedor": "", "total": "", "neto": "", "iva": "",
