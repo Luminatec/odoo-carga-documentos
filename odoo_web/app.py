@@ -481,32 +481,48 @@ def attach_file(models, uid, api_key, res_model, res_id, filename, file_bytes, m
 
 
 def create_purchase_order_petdur(models, uid, api_key, carpeta_id, currency_id,
-                                  filename=None, file_bytes=None, mimetype=None):
+                                  filename=None, file_bytes=None, mimetype=None,
+                                  bill_lines=None):
     """
     Crea OC PETDUR (purchase.order) en Odoo para la carpeta de importación.
-    Intenta agregar línea placeholder y confirmar; si algo falla deja la OC en draft.
-    Siempre retorna el ID del purchase.order (nunca lanza excepción después de crear la OC).
+    models debe ser el ServerProxy (objeto, no URL string).
+    bill_lines: lista de dicts {descripcion, cantidad, precio_unit} para crear líneas en la OC.
+    Retorna el ID del purchase.order.
     """
-    m = xmlrpc.client.ServerProxy(models, allow_none=True)
-    today = _dt_now.now().strftime("%Y-%m-%d")
-
-    # Crear la OC en draft con campos mínimos (no confirmar — se hace manualmente en Odoo)
+    # Crear la OC en draft con campos mínimos
     po_vals = {
         "partner_id":  49328,       # PETDUR CORPORATION S.A.
         "partner_ref": carpeta_id,  # clave de búsqueda en load_carpeta_full
     }
     if currency_id:
         po_vals["currency_id"] = currency_id
-    po_id = m.execute_kw(ODOO_DB, uid, api_key, "purchase.order", "create", [po_vals])
+    po_id = call(models, uid, api_key, "purchase.order", "create", [po_vals])
 
-    # 3. Adjuntar el documento si se provee
+    # Agregar líneas a la OC si se proveen (de lineas_petdur del PDF)
+    if bill_lines:
+        for ln in bill_lines:
+            try:
+                ln_vals = {
+                    "order_id":    po_id,
+                    "name":        ln.get("descripcion") or carpeta_id,
+                    "product_qty": float(ln.get("cantidad") or 1),
+                    "price_unit":  float(ln.get("precio_unit") or 0),
+                    "date_planned": _dt_now.now().strftime("%Y-%m-%d %H:%M:%S"),
+                }
+                if ln.get("product_id"):
+                    ln_vals["product_id"] = ln["product_id"]
+                call(models, uid, api_key, "purchase.order.line", "create", [ln_vals])
+            except Exception:
+                pass  # líneas opcionales — no bloquear la creación de la OC
+
+    # Adjuntar el documento PDF si se provee
     if filename and file_bytes:
         try:
             attach_file(models, uid, api_key, "purchase.order", po_id, filename, file_bytes, mimetype)
         except Exception:
             pass
 
-    return po_id  # Siempre retorna el ID
+    return po_id
 
 
 # ── Mapeo partner_id → tipo para facturas de importación ────────────────────
@@ -850,11 +866,48 @@ def _calc_cost_breakdown(po_lines, bills, tc_usd):
     }
     return rows, summary
 
+def get_journal_purchase_account(models_url, uid, api_key, journal_id):
+    """
+    Devuelve el account_id más usado en facturas de proveedor de este journal.
+    Fallback: default_account_id del journal.
+    """
+    try:
+        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        # Intentar con líneas recientes de facturas en ese journal
+        lines = m.execute_kw(
+            ODOO_DB, uid, api_key, "account.move.line", "search_read",
+            [[("journal_id", "=", journal_id),
+              ("move_type", "=", "in_invoice"),
+              ("display_type", "=", False),
+              ("account_id", "!=", False)]],
+            {"fields": ["account_id"], "limit": 20, "order": "id desc"})
+        if lines:
+            from collections import Counter
+            counts = Counter(l["account_id"][0] for l in lines if l.get("account_id"))
+            if counts:
+                return counts.most_common(1)[0][0]
+        # Fallback: default_account_id del journal
+        jrows = m.execute_kw(
+            ODOO_DB, uid, api_key, "account.journal", "read",
+            [[journal_id]], {"fields": ["default_account_id"]})
+        if jrows and jrows[0].get("default_account_id"):
+            return jrows[0]["default_account_id"][0]
+    except Exception:
+        pass
+    return None
+
+
 def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                        filename, file_bytes, mimetype, journal_id=None, doc_type_id=None,
                        invoice_date_due=None, account_id=None, amount_neto=None,
                        currency_id=None, analytic_account_id=None, product_id=None,
-                       l10n_latam_document_number=None, invoice_origin=None):
+                       l10n_latam_document_number=None, invoice_origin=None,
+                       extra_lines=None):
+    """
+    extra_lines: lista de dicts con keys opcionales:
+        name, quantity, price_unit, account_id, product_id
+    Si se pasa, reemplaza la lógica de línea única (account_id/amount_neto).
+    """
     vals = {"move_type": "in_invoice"}
     if partner_id:       vals["partner_id"]   = partner_id
     if ref:              vals["ref"]          = ref
@@ -866,18 +919,38 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
     if invoice_origin:   vals["invoice_origin"] = invoice_origin
     if l10n_latam_document_number:
         vals["l10n_latam_document_number"] = l10n_latam_document_number
-    # Crear línea si hay cuenta o producto + monto
-    if (account_id or product_id) and amount_neto:
+
+    # Líneas explícitas (ej: de lineas_petdur)
+    if extra_lines:
+        bill_lines = []
+        for ln in extra_lines:
+            lv = {
+                "name":       ln.get("name") or ref or "Artículo",
+                "quantity":   float(ln.get("quantity") or ln.get("cantidad") or 1),
+                "price_unit": float(ln.get("price_unit") or ln.get("precio_unit") or 0),
+            }
+            if ln.get("account_id"):
+                lv["account_id"] = ln["account_id"]
+            if ln.get("product_id"):
+                lv["product_id"] = ln["product_id"]
+            if analytic_account_id:
+                lv["analytic_distribution"] = {str(analytic_account_id): 100}
+            bill_lines.append((0, 0, lv))
+        if bill_lines:
+            vals["invoice_line_ids"] = bill_lines
+    # Línea única legada (account_id/amount_neto)
+    elif (account_id or product_id) and amount_neto:
         line_vals = {
-            "name": ref or "Factura proveedor",
+            "name":       ref or "Factura proveedor",
             "price_unit": float(amount_neto),
-            "quantity": 1,
+            "quantity":   1,
         }
-        if account_id:   line_vals["account_id"]  = account_id
-        if product_id:   line_vals["product_id"]  = product_id  # ya es product.product ID
+        if account_id:  line_vals["account_id"] = account_id
+        if product_id:  line_vals["product_id"] = product_id
         if analytic_account_id:
             line_vals["analytic_distribution"] = {str(analytic_account_id): 100}
         vals["invoice_line_ids"] = [(0, 0, line_vals)]
+
     move_id = call(models, uid, api_key, "account.move", "create", [vals])
     if file_bytes:
         attach_file(models, uid, api_key, "account.move", move_id, filename, file_bytes, mimetype)
@@ -4119,9 +4192,10 @@ if tab_import is not None:
                                 st.caption(f"TC Odoo para {_dt_up or _rd}: **$ {_tc_up:,.2f}**"
                                            if _tc_up else "TC no encontrado en Odoo para esa fecha")
                             classified_docs.append({
-                                "filename": uf.name, "file_bytes": file_bytes, "mimetype": mimetype,
-                                "tipo_cfg": TIPO_OPTIONS_IMP[tipo_sel],
-                                "ref": ref_doc, "fecha": fecha_doc, "moneda": moneda,
+                                "filename":  uf.name, "file_bytes": file_bytes, "mimetype": mimetype,
+                                "tipo_cfg":  TIPO_OPTIONS_IMP[tipo_sel],
+                                "ref":       ref_doc, "fecha": fecha_doc, "moneda": moneda,
+                                "extracted": _ext_info,
                             })
 
                 if classified_docs:
@@ -4166,12 +4240,23 @@ if tab_import is not None:
 
                         # ── Auto-crear OC PETDUR (Etapa 0) si no existe y hay Bill PETDUR ──
                         _tiene_petdur = any(d["tipo_cfg"]["tipo"] == "petdur" for d in classified_docs)
-                        _etapa0_ok    = st.session_state.etapas.get("0")
-                        if _tiene_petdur and not _etapa0_ok:
+                        _petdur_doc   = next((d for d in classified_docs
+                                              if d["tipo_cfg"]["tipo"] == "petdur"), None)
+                        _has_oc       = bool(st.session_state.get("carpeta_po"))
+                        _new_po_id    = None
+                        if _tiene_petdur and not _has_oc:
                             try:
-                                _po_id  = create_purchase_order_petdur(
-                                    models, uid, api_key, _carp, _usd_id or 2)
+                                _pet_ext  = (_petdur_doc or {}).get("extracted", {})
+                                _pet_lns  = _pet_ext.get("lineas_petdur", [])
+                                _po_id    = create_purchase_order_petdur(
+                                    models, uid, api_key, _carp, _usd_id or 2,
+                                    filename   = (_petdur_doc or {}).get("filename"),
+                                    file_bytes = (_petdur_doc or {}).get("file_bytes"),
+                                    mimetype   = (_petdur_doc or {}).get("mimetype"),
+                                    bill_lines = _pet_lns or None,
+                                )
                                 _po_url = odoo_url("purchase.order", _po_id)
+                                _new_po_id = _po_id
                                 st.session_state.etapas["0"] = True
                                 st.session_state.carpeta_po  = {"id": _po_id, "name": _carp}
                                 _created_items.append({
@@ -4180,12 +4265,43 @@ if tab_import is not None:
                                 })
                                 _ok += 1
                             except Exception as _e_po:
-                                _errs.append(f"⚠️ No se pudo crear OC automáticamente: {str(_e_po)[:120]}")
+                                _errs.append(f"⚠️ No se pudo crear OC: {str(_e_po)[:200]}")
+
+                        # Pre-cargar cuenta contable del journal USD para líneas PETDUR
+                        _petdur_jid     = 71
+                        _petdur_account = get_journal_purchase_account(
+                            models_url, uid, api_key, _petdur_jid)
 
                         for _i, _doc in enumerate(classified_docs):
                             try:
-                                _full_ref = f"{_carp} / {_doc['ref']}" if _doc["ref"] else _carp
-                                _cur_id   = _usd_id if _doc.get("moneda", "ARS") == "USD" else None
+                                _full_ref  = f"{_carp} / {_doc['ref']}" if _doc["ref"] else _carp
+                                _cur_id    = _usd_id if _doc.get("moneda", "ARS") == "USD" else None
+                                _ext       = _doc.get("extracted", {})
+                                _tipo      = _doc["tipo_cfg"]["tipo"]
+
+                                # Construir líneas para facturas PETDUR
+                                _bill_lines = None
+                                if _tipo == "petdur":
+                                    _raw_lns = _ext.get("lineas_petdur", [])
+                                    if _raw_lns and _petdur_account:
+                                        _bill_lines = [
+                                            {
+                                                "name":       ln["descripcion"],
+                                                "quantity":   ln["cantidad"],
+                                                "price_unit": ln["precio_unit"],
+                                                "account_id": _petdur_account,
+                                            }
+                                            for ln in _raw_lns
+                                        ]
+                                    elif not _raw_lns and _ext.get("monto") and _petdur_account:
+                                        # Sin líneas parseadas: una línea resumen con el total
+                                        _bill_lines = [{
+                                            "name":       _full_ref,
+                                            "quantity":   1,
+                                            "price_unit": float(_ext["monto"]),
+                                            "account_id": _petdur_account,
+                                        }]
+
                                 _move_id = create_vendor_bill(models, uid, api_key,
                                     partner_id      = _doc["tipo_cfg"]["partner_id"],
                                     ref             = _full_ref,
@@ -4197,6 +4313,7 @@ if tab_import is not None:
                                     doc_type_id     = _doc["tipo_cfg"]["doc_type"],
                                     currency_id     = _cur_id,
                                     invoice_origin  = _carp,
+                                    extra_lines     = _bill_lines,
                                 )
                                 _url = odoo_url("account.move", _move_id)
                                 _created_items.append({"file": _doc["filename"], "id": _move_id, "url": _url})
