@@ -481,16 +481,18 @@ def attach_file(models, uid, api_key, res_model, res_id, filename, file_bytes, m
 
 
 def create_purchase_order_petdur(models, uid, api_key, carpeta_id,
-                                  filename=None, file_bytes=None, mimetype=None):
+                                  currency_id=None, filename=None, file_bytes=None, mimetype=None):
     """
-    Crea OC PETDUR en draft (purchase.order) sin moneda ni líneas,
-    para evitar errores de validación de TC en Odoo Argentina.
+    Crea OC PETDUR en draft (purchase.order).
+    currency_id: pasar SOLO si se tiene el ID real de USD (no un fallback arbitrario).
     Retorna el ID del purchase.order.
     """
     po_vals = {
         "partner_id":  49328,       # PETDUR CORPORATION S.A.
         "partner_ref": carpeta_id,  # clave de búsqueda en load_carpeta_full
     }
+    if currency_id:
+        po_vals["currency_id"] = currency_id
     po_id = call(models, uid, api_key, "purchase.order", "create", [po_vals])
     if filename and file_bytes:
         try:
@@ -4272,6 +4274,8 @@ if tab_import is not None:
                             try:
                                 _po_id = create_purchase_order_petdur(
                                     models, uid, api_key, _carp,
+                                    # Solo pasar currency_id si tenemos el ID real de USD
+                                    currency_id = _usd_id if _usd_id else None,
                                     filename   = (_petdur_doc or {}).get("filename"),
                                     file_bytes = (_petdur_doc or {}).get("file_bytes"),
                                     mimetype   = (_petdur_doc or {}).get("mimetype"),
