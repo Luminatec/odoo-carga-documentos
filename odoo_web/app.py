@@ -3063,6 +3063,10 @@ def register_customer_payment(models, uid, api_key,
                    "active_ids": move_ids, "active_id": move_ids[0]}
             vals = {"payment_date": payment_date, "journal_id": journal_id,
                     "amount": float(amount)}
+            # l10n_ar: setear tipo de documento para que aparezca en Clientes > Recibos
+            _doc_type = _get_payment_doc_type(models, uid, api_key, "inbound", "customer", journal_id)
+            if _doc_type:
+                vals["l10n_latam_document_type_id"] = _doc_type
             wiz_id = models.execute_kw(ODOO_DB, uid, api_key,
                 "account.payment.register", "create", [vals], {"context": ctx})
             result = models.execute_kw(ODOO_DB, uid, api_key,
@@ -5691,7 +5695,11 @@ with tab_recibos:
                         if _ded_cnt_key not in st.session_state: st.session_state[_ded_cnt_key] = 0
 
                         # Cargar cuentas para conceptos (reutiliza cache de facturas)
-                        _rc_accts     = get_all_accounts(models_url, uid, api_key)
+                        _rc_accts_raw = get_all_accounts(models_url, uid, api_key)
+                        # Poner cuentas "(copia)" al final para no confundir con las originales
+                        _rc_accts = sorted(
+                            _rc_accts_raw,
+                            key=lambda x: (1 if "(copia)" in x[1].lower() else 0, x[1]))
                         _rc_acct_opts = ["— Seleccionar concepto —"] + [lbl for _, lbl in _rc_accts]
 
                         _deds = st.session_state[_ded_key]
