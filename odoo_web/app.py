@@ -2453,11 +2453,18 @@ def extract_excel_oc_fields(file_bytes):
     col_map = {}
     hdr_row_idx = None
     all_rows = list(ws.iter_rows(values_only=True))
+    # Palabras que identifican una fila de encabezado (sin importar el orden de columnas)
+    _HDR_WORDS = {
+        'sku', 'ean', 'ean13',
+        'pedido', 'cantidad', 'qty',
+        'modelo', 'model',
+        'producto', 'descripcion', 'descripción', 'nombre',
+        'precio', 'pvp', 'unitario',
+        'codigo', 'código',
+    }
     for ri, row in enumerate(all_rows[:25]):
         vals = [str(c or "").strip().lower() for c in row]
-        if (any(v == 'sku' for v in vals)
-                or any(v in ('pedido', 'cantidad', 'qty') for v in vals)
-                or any(v in ('modelo', 'model') for v in vals)):
+        if sum(1 for v in vals if v in _HDR_WORDS) >= 2:
             hdr_row_idx = ri
             for ci, h in enumerate(vals):
                 if h == 'sku':
