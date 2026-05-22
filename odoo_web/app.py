@@ -4087,11 +4087,10 @@ if tab_import is not None:
             with st.spinner(f"Cargando {st.session_state.carpeta_id} desde Odoo..."):
                 cdata = load_carpeta_full(models_url, uid, api_key, st.session_state.carpeta_id)
             st.session_state["carp_data"] = cdata
-            if cdata.get("po"):
-                st.session_state.carpeta_po  = cdata["po"]
-                st.session_state.etapas["0"] = True
-            if cdata.get("bills"):
-                st.session_state.carpeta_bills = [b["id"] for b in cdata["bills"]]
+            # Siempre resetear carpeta_po y carpeta_bills desde Odoo (evitar valor "sucio" de otra carpeta)
+            st.session_state.carpeta_po    = cdata.get("po")   # None si no hay OC
+            st.session_state.carpeta_bills = [b["id"] for b in cdata.get("bills", [])]
+            st.session_state.etapas        = {k: False for k, *_ in ETAPAS_DEF}
             for k, v in cdata.get("stages", {}).items():
                 if v:
                     st.session_state.etapas[k] = True
@@ -4270,7 +4269,8 @@ if tab_import is not None:
                         _tiene_petdur = any(d["tipo_cfg"]["tipo"] == "petdur" for d in classified_docs)
                         _petdur_doc   = next((d for d in classified_docs
                                               if d["tipo_cfg"]["tipo"] == "petdur"), None)
-                        _has_oc       = bool(st.session_state.get("carpeta_po"))
+                        _existing_po  = st.session_state.get("carpeta_po")
+                        _has_oc       = bool(_existing_po)
                         _new_po_id    = None
                         _oc_error     = None
                         if _tiene_petdur and not _has_oc:
@@ -4295,6 +4295,14 @@ if tab_import is not None:
                             except Exception as _e_po:
                                 _oc_error = str(_e_po)[:300]
                                 _errs.append(f"❌ No se pudo crear OC: {_oc_error}")
+                        elif _tiene_petdur and _has_oc:
+                            # OC ya existe — agregar al resumen para que el usuario la vea
+                            _ex_po_id  = (_existing_po or {}).get("id")
+                            _ex_po_url = odoo_url("purchase.order", _ex_po_id) if _ex_po_id else "#"
+                            _created_items.append({
+                                "file": f"🏭 OC ya existente ({_carp})",
+                                "id":   _ex_po_id, "url": _ex_po_url
+                            })
 
                         # Pre-cargar cuenta contable del journal USD para líneas PETDUR
                         _petdur_jid     = 71
