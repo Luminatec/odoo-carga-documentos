@@ -1348,12 +1348,41 @@ Factura:
     return fields
 
 
+def _bot_extract(file_bytes: bytes, filename: str, mime_type: str, doc_type: str) -> dict:
+    """Llama al endpoint /extract del bot para extraer campos usando Claude Sonnet nativo."""
+    import base64 as _b64
+    _url = os.getenv("BOT_URL", "").rstrip("/")
+    _token = os.getenv("CHAT_TOKEN", "")
+    if not _url or not _token:
+        return {}
+    try:
+        r = requests.post(
+            f"{_url}/extract",
+            json={
+                "file_b64": _b64.b64encode(file_bytes).decode(),
+                "file_name": filename,
+                "file_mime": mime_type,
+                "doc_type": doc_type,
+            },
+            headers={"X-Chat-Token": _token},
+            timeout=120,
+        )
+        r.raise_for_status()
+        return r.json().get("fields", {})
+    except Exception:
+        return {}
+
+
 def extract_pdf_fields(file_bytes):
     """
     Parser para facturas electrónicas argentinas.
     Intenta primero extracción con IA (Claude Haiku), con fallback a regex.
     Retorna (fields_dict, raw_text).
     """
+    bot = _bot_extract(file_bytes, "factura.pdf", "application/pdf", "factura")
+    if bot:
+        return bot, ""
+
     try:
         import pdfplumber
         with pdfplumber.open(BytesIO(file_bytes)) as pdf:
@@ -1812,6 +1841,10 @@ def _image_to_ocr_text(file_bytes):
 
 def extract_image_fields(file_bytes):
     """OCR imagen → pipeline de facturas (texto directo a extract_pdf_fields via PDF)."""
+    bot = _bot_extract(file_bytes, "factura.jpg", "image/jpeg", "factura")
+    if bot:
+        return bot, ""
+
     try:
         import pytesseract
         from PIL import Image as _PILImage
@@ -1835,6 +1868,10 @@ def extract_image_oc_fields(file_bytes):
       Línea N  : [ítem#] [código] [desc parcial] $ [precio]
       Línea N+1: especificación técnica (a ignorar)
     """
+    bot = _bot_extract(file_bytes, "oc.jpg", "image/jpeg", "oc")
+    if bot:
+        return bot, [], ""
+
     text, err = _image_to_ocr_text(file_bytes)
     if err or not text.strip():
         return {}, {}, err or ""
@@ -1958,6 +1995,10 @@ def extract_oc_fields(file_bytes):
     subtotal), y totales (neto, IVA 21%, IVA 10.5%, total OC).
     Retorna (fields_dict, all_tables, raw_text).
     """
+    bot = _bot_extract(file_bytes, "oc.pdf", "application/pdf", "oc")
+    if bot:
+        return bot, [], ""
+
     try:
         import pdfplumber
         with pdfplumber.open(BytesIO(file_bytes)) as pdf:
@@ -2373,6 +2414,10 @@ def extract_excel_oc_fields(file_bytes):
     Retorna (fields_dict) con estructura compatible con oc_fields.
     Sin CUIT ni condiciones de pago (el usuario las completa a mano).
     """
+    bot = _bot_extract(file_bytes, "oc.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "oc")
+    if bot:
+        return bot
+
     fields = {
         "cuit": "", "numero_oc": "", "fecha": "", "fecha_iso": "",
         "condiciones_pago": "", "dias_pago": None,
