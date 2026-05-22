@@ -12,8 +12,6 @@ from io import BytesIO
 from datetime import datetime as _dt_now
 
 import pandas as pd
-import requests
-import time
 
 st.set_page_config(
     page_title="Luminatec · Odoo",
@@ -1349,9 +1347,13 @@ Factura:
 
 
 def _bot_extract(file_bytes: bytes, filename: str, mime_type: str, doc_type: str) -> dict:
-    """Llama al endpoint /extract del bot para extraer campos usando Claude Sonnet nativo."""
+    """
+    Llama al endpoint /extract del bot Cloud Run usando Claude Sonnet con soporte nativo PDF.
+    Retorna dict con campos extraídos, o {} si el bot no está configurado o falla.
+    """
     import base64 as _b64
-    _url = os.getenv("BOT_URL", "").rstrip("/")
+    import os
+    _url   = os.getenv("BOT_URL", "").rstrip("/")
     _token = os.getenv("CHAT_TOKEN", "")
     if not _url or not _token:
         return {}
@@ -1359,10 +1361,10 @@ def _bot_extract(file_bytes: bytes, filename: str, mime_type: str, doc_type: str
         r = requests.post(
             f"{_url}/extract",
             json={
-                "file_b64": _b64.b64encode(file_bytes).decode(),
+                "file_b64":  _b64.b64encode(file_bytes).decode(),
                 "file_name": filename,
                 "file_mime": mime_type,
-                "doc_type": doc_type,
+                "doc_type":  doc_type,
             },
             headers={"X-Chat-Token": _token},
             timeout=120,
@@ -1376,12 +1378,20 @@ def _bot_extract(file_bytes: bytes, filename: str, mime_type: str, doc_type: str
 def extract_pdf_fields(file_bytes):
     """
     Parser para facturas electrónicas argentinas.
-    Intenta primero extracción con IA (Claude Haiku), con fallback a regex.
+    Intenta primero el bot (Claude Sonnet nativo PDF), luego IA local, luego regex.
     Retorna (fields_dict, raw_text).
     """
-    bot = _bot_extract(file_bytes, "factura.pdf", "application/pdf", "factura")
-    if bot:
-        return bot, ""
+    # ── Bot Cloud Run (Claude Sonnet, soporte nativo PDF) ─────────────────
+    _bot = _bot_extract(file_bytes, "factura.pdf", "application/pdf", "factura")
+    if _bot.get("proveedor") or _bot.get("numero"):
+        _bot["_source"] = "bot"
+        try:
+            import pdfplumber
+            with pdfplumber.open(BytesIO(file_bytes)) as _pdf:
+                _raw = "\n".join(p.extract_text() or "" for p in _pdf.pages)
+        except Exception:
+            _raw = ""
+        return _bot, _raw
 
     try:
         import pdfplumber
@@ -1392,7 +1402,7 @@ def extract_pdf_fields(file_bytes):
     if not text.strip():
         return {}, ""
 
-    # ── Intentar extracción con IA ────────────────────────────────────────
+    # ── Intentar extracción con IA local (Claude Haiku) ───────────────────
     try:
         _ai_fields = _ai_extract_invoice_fields(text)
         # Considerar exitoso si al menos tiene proveedor o número
@@ -1840,11 +1850,11 @@ def _image_to_ocr_text(file_bytes):
         return "", str(e)
 
 def extract_image_fields(file_bytes):
-    """OCR imagen → pipeline de facturas (texto directo a extract_pdf_fields via PDF)."""
-    bot = _bot_extract(file_bytes, "factura.jpg", "image/jpeg", "factura")
-    if bot:
-        return bot, ""
-
+    """OCR imagen → pipeline de facturas. Intenta bot primero, luego OCR."""
+    _bot = _bot_extract(file_bytes, "factura.jpg", "image/jpeg", "factura")
+    if _bot.get("proveedor") or _bot.get("numero"):
+        _bot["_source"] = "bot"
+        return _bot, ""
     try:
         import pytesseract
         from PIL import Image as _PILImage
@@ -1861,17 +1871,17 @@ def extract_image_fields(file_bytes):
 
 def extract_image_oc_fields(file_bytes):
     """
-    OCR imagen → extrae campos de Orden de Compra directamente del texto.
+    OCR imagen → extrae campos de Orden de Compra. Intenta bot primero, luego OCR.
 
     Formato observado en OCs Canon:
       Línea N-1: descripción completa del producto (viene antes de la línea del precio)
       Línea N  : [ítem#] [código] [desc parcial] $ [precio]
       Línea N+1: especificación técnica (a ignorar)
     """
-    bot = _bot_extract(file_bytes, "oc.jpg", "image/jpeg", "oc")
-    if bot:
-        return bot, [], ""
-
+    _bot = _bot_extract(file_bytes, "oc.jpg", "image/jpeg", "oc")
+    if _bot.get("numero_oc") or _bot.get("cuit") or _bot.get("lineas"):
+        _bot["_source"] = "bot"
+        return _bot, {}, ""
     text, err = _image_to_ocr_text(file_bytes)
     if err or not text.strip():
         return {}, {}, err or ""
@@ -1990,14 +2000,19 @@ def extract_image_oc_fields(file_bytes):
 def extract_oc_fields(file_bytes):
     """
     Parser para Órdenes de Compra de clientes (formato heterogéneo).
-    Extrae: CUIT del emisor (cliente/comprador), número OC, fecha, condiciones
-    de pago, líneas de productos (código, descripción, qty, precio_unit, iva%,
-    subtotal), y totales (neto, IVA 21%, IVA 10.5%, total OC).
+    Intenta bot primero (Claude Sonnet nativo PDF), luego pdfplumber+regex.
     Retorna (fields_dict, all_tables, raw_text).
     """
-    bot = _bot_extract(file_bytes, "oc.pdf", "application/pdf", "oc")
-    if bot:
-        return bot, [], ""
+    _bot = _bot_extract(file_bytes, "oc.pdf", "application/pdf", "oc")
+    if _bot.get("numero_oc") or _bot.get("cuit") or _bot.get("lineas"):
+        _bot["_source"] = "bot"
+        try:
+            import pdfplumber
+            with pdfplumber.open(BytesIO(file_bytes)) as _pdf:
+                _raw = "\n".join(p.extract_text() or "" for p in _pdf.pages)
+        except Exception:
+            _raw = ""
+        return _bot, [], _raw
 
     try:
         import pdfplumber
@@ -2408,15 +2423,17 @@ def extract_oc_fields(file_bytes):
 
 def extract_excel_oc_fields(file_bytes):
     """
-    Parser para Órdenes de Compra en formato Excel (ej: Fusion Bikes / Fanttik).
-    Detecta automáticamente columnas: SKU, Modelo/Descripción, EAN, IVA, Precio s/IVA, Pedido (qty).
-    Solo incluye filas con Pedido > 0.
+    Parser para Órdenes de Compra en formato Excel.
+    Intenta bot primero, luego parser openpyxl.
     Retorna (fields_dict) con estructura compatible con oc_fields.
-    Sin CUIT ni condiciones de pago (el usuario las completa a mano).
     """
-    bot = _bot_extract(file_bytes, "oc.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "oc")
-    if bot:
-        return bot
+    _bot = _bot_extract(
+        file_bytes, "oc.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "oc")
+    if _bot.get("lineas") or _bot.get("numero_oc"):
+        _bot["_source"] = "bot"
+        return _bot
 
     fields = {
         "cuit": "", "numero_oc": "", "fecha": "", "fecha_iso": "",
@@ -2448,7 +2465,7 @@ def extract_excel_oc_fields(file_bytes):
                 elif h in ('ean', 'ean13', 'codigo', 'código'):
                     if 'ean' not in col_map:
                         col_map['ean'] = ci
-                elif h in ('modelo', 'model', 'nombre'):
+                elif h in ('modelo', 'model', 'nombre', 'producto', 'descripcion', 'descripción'):
                     if 'modelo' not in col_map:
                         col_map['modelo'] = ci
                 elif h == 'iva':
@@ -2456,6 +2473,9 @@ def extract_excel_oc_fields(file_bytes):
                 elif h in ('unitario', 'precio unitario', 'p. unitario', 'precio unit'):
                     # Precio unitario tiene prioridad sobre subtotales
                     col_map['precio_unit'] = ci
+                elif h == 'precio' or h in ('precio unitario', 'precio unit', 'p. unitario', 'unitario'):
+                    if 'precio_unit' not in col_map:
+                        col_map['precio_unit'] = ci
                 elif 'precio s/iva' in h or 'precio sin' in h or ('precio' in h and 'iva' in h and 'total' not in h):
                     if 'precio' not in col_map:
                         col_map['precio'] = ci
@@ -3069,13 +3089,12 @@ def register_customer_payment(models, uid, api_key,
 _tabs = ["🧾 Facturas prov.", "📦 Pedidos", "🏦 Órdenes de Pago", "💰 Recibos de Cobro"]
 if is_admin:
     _tabs.append("🛳️ Importaciones")
-_tabs.append("🤖 Asistente")
 _tabs.append("📋 Historial")
 _tab_objs = st.tabs(_tabs)
 if is_admin:
-    tab_bills, tab_orders, tab_op, tab_recibos, tab_import, tab_chat, tab_history = _tab_objs
+    tab_bills, tab_orders, tab_op, tab_recibos, tab_import, tab_history = _tab_objs
 else:
-    tab_bills, tab_orders, tab_op, tab_recibos, tab_chat, tab_history = _tab_objs
+    tab_bills, tab_orders, tab_op, tab_recibos, tab_history = _tab_objs
     tab_import = None
 
 
@@ -5813,115 +5832,6 @@ with tab_recibos:
 # ═══════════════════════════════════════════════════
 # TAB HISTORIAL
 # ═══════════════════════════════════════════════════
-# ═══════════════════════════════════════════════════
-# TAB — ASISTENTE CLAUDE-ODOO
-# ═══════════════════════════════════════════════════
-with tab_chat:
-    _BOT_URL    = os.getenv("BOT_URL", "").rstrip("/")
-    _CHAT_TOKEN = os.getenv("CHAT_TOKEN", "")
-
-    if not _BOT_URL or not _CHAT_TOKEN:
-        st.warning(
-            "**Configuración incompleta.** Definí `BOT_URL` y `CHAT_TOKEN` en los secretos de la app.",
-            icon="⚠️",
-        )
-    else:
-        # Estado de sesión
-        if "chat_messages"  not in st.session_state: st.session_state.chat_messages  = []
-        if "chat_history"   not in st.session_state: st.session_state.chat_history   = []
-        if "chat_pending"   not in st.session_state: st.session_state.chat_pending   = []
-
-        _HEADERS = {"X-Chat-Token": _CHAT_TOKEN}
-
-        def _chat_send(message):
-            r = requests.post(
-                f"{_BOT_URL}/chat",
-                json={"message": message, "user_id": st.session_state.get("user_email", "web"), "history": st.session_state.chat_history},
-                headers=_HEADERS, timeout=180,
-            )
-            r.raise_for_status()
-            return r.json()
-
-        def _chat_approve(token):
-            r = requests.post(f"{_BOT_URL}/chat/approve", json={"token": token}, headers=_HEADERS, timeout=60)
-            r.raise_for_status()
-            return r.json()
-
-        def _chat_cancel(token):
-            requests.post(f"{_BOT_URL}/chat/cancel", json={"token": token}, headers=_HEADERS, timeout=30)
-
-        # Acciones pendientes de aprobación
-        if st.session_state.chat_pending:
-            st.subheader("⏳ Acciones pendientes de aprobación")
-            for _action in st.session_state.chat_pending:
-                _tok  = _action.get("token", "")
-                _tool = _action.get("tool", "")
-                _inp  = _action.get("input", {})
-                st.warning(f"**`{_tool}`** — `{_inp}`", icon="⚠️")
-                _c1, _c2 = st.columns(2)
-                with _c1:
-                    if st.button("✅ Aprobar", key=f"chat_ok_{_tok}"):
-                        with st.spinner("Ejecutando…"):
-                            try:
-                                _res = _chat_approve(_tok)
-                                st.success(_res.get("result", "Aprobado."))
-                            except Exception as _e:
-                                st.error(f"Error: {_e}")
-                        st.session_state.chat_pending = [a for a in st.session_state.chat_pending if a.get("token") != _tok]
-                        st.rerun()
-                with _c2:
-                    if st.button("❌ Cancelar", key=f"chat_no_{_tok}"):
-                        _chat_cancel(_tok)
-                        st.session_state.chat_pending = [a for a in st.session_state.chat_pending if a.get("token") != _tok]
-                        st.rerun()
-            st.divider()
-
-        # Historial de mensajes
-        for _msg in st.session_state.chat_messages:
-            with st.chat_message(_msg["role"]):
-                st.markdown(_msg["content"])
-
-        # Input
-        _prompt = st.chat_input("Preguntá sobre ventas, stock, facturas…")
-        if _prompt:
-            st.session_state.chat_messages.append({"role": "user", "content": _prompt})
-            with st.chat_message("user"):
-                st.markdown(_prompt)
-            with st.chat_message("assistant"):
-                _ph = st.empty()
-                _ph.markdown("⏳ _Consultando…_")
-                _t0 = time.time()
-                try:
-                    _data   = _chat_send(_prompt)
-                    _answer = _data.get("answer", "_Sin respuesta_")
-                    st.session_state.chat_history = _data.get("history", [])
-                    for _p in _data.get("pending", []):
-                        if _p not in st.session_state.chat_pending:
-                            st.session_state.chat_pending.append(_p)
-                    _ph.markdown(_answer)
-                    st.caption(f"_{time.time() - _t0:.1f}s_")
-                    if _data.get("pending"):
-                        st.rerun()
-                except requests.Timeout:
-                    _ph.error("⏱️ El agente tardó demasiado (>3 min). Intentá con una consulta más simple.")
-                    _answer = "_Timeout_"
-                except requests.HTTPError as _e:
-                    _ph.error(f"❌ Error {_e.response.status_code}: {_e.response.text[:200]}")
-                    _answer = "_Error_"
-                except Exception as _e:
-                    _ph.error(f"❌ {_e}")
-                    _answer = "_Error_"
-            st.session_state.chat_messages.append({"role": "assistant", "content": _answer})
-
-        # Nueva conversación
-        if st.session_state.chat_messages:
-            if st.button("🗑️ Nueva conversación", key="chat_reset"):
-                st.session_state.chat_messages = []
-                st.session_state.chat_history  = []
-                st.session_state.chat_pending  = []
-                st.rerun()
-
-
 with tab_history:
     st.subheader("📋 Historial de esta sesión")
     _hist = st.session_state.get("history", [])
