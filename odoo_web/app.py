@@ -481,10 +481,12 @@ def attach_file(models, uid, api_key, res_model, res_id, filename, file_bytes, m
 
 
 def create_purchase_order_petdur(models, uid, api_key, carpeta_id,
-                                  currency_id=None, filename=None, file_bytes=None, mimetype=None):
+                                  currency_id=None, tc_usd=None,
+                                  filename=None, file_bytes=None, mimetype=None):
     """
     Crea OC PETDUR en draft (purchase.order).
     currency_id: pasar SOLO si se tiene el ID real de USD (no un fallback arbitrario).
+    tc_usd: cotización ARS/USD del día (x_studio_cotizacion_dolar) — requerido por Odoo.
     Retorna el ID del purchase.order.
     """
     po_vals = {
@@ -493,6 +495,8 @@ def create_purchase_order_petdur(models, uid, api_key, carpeta_id,
     }
     if currency_id:
         po_vals["currency_id"] = currency_id
+    if tc_usd and float(tc_usd) > 0:
+        po_vals["x_studio_cotizacion_dolar"] = float(tc_usd)
     po_id = call(models, uid, api_key, "purchase.order", "create", [po_vals])
     if filename and file_bytes:
         try:
@@ -4264,6 +4268,9 @@ if tab_import is not None:
                         _created_items = []
                         _carp = st.session_state.carpeta_id
                         _usd_id = get_currency_id(models_url, uid, api_key, "USD")
+                        # TC del día para x_studio_cotizacion_dolar (campo requerido por Odoo)
+                        _today_str = pd.Timestamp.today().strftime("%Y-%m-%d")
+                        _tc_hoy, _  = get_usd_rate_odoo(models_url, uid, api_key, _today_str)
 
                         # ── Auto-crear OC PETDUR (Etapa 0) si no existe y hay Bill PETDUR ──
                         _tiene_petdur = any(d["tipo_cfg"]["tipo"] == "petdur" for d in classified_docs)
@@ -4277,11 +4284,11 @@ if tab_import is not None:
                             try:
                                 _po_id = create_purchase_order_petdur(
                                     models, uid, api_key, _carp,
-                                    # Solo pasar currency_id si tenemos el ID real de USD
                                     currency_id = _usd_id if _usd_id else None,
-                                    filename   = (_petdur_doc or {}).get("filename"),
-                                    file_bytes = (_petdur_doc or {}).get("file_bytes"),
-                                    mimetype   = (_petdur_doc or {}).get("mimetype"),
+                                    tc_usd      = _tc_hoy,   # Cotización Dólar requerida por Odoo
+                                    filename    = (_petdur_doc or {}).get("filename"),
+                                    file_bytes  = (_petdur_doc or {}).get("file_bytes"),
+                                    mimetype    = (_petdur_doc or {}).get("mimetype"),
                                 )
                                 _po_url    = odoo_url("purchase.order", _po_id)
                                 _new_po_id = _po_id
