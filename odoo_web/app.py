@@ -2577,17 +2577,15 @@ def classify_document(text, carpeta_id=""):
         _p_lns = parse_petdur_invoice_lines(text)
         if _p_lns:
             extracted["lineas_petdur"] = _p_lns
-        # Número de factura uruguaya: ej "101 A 873", "A 0000873", "Factura: A 873"
+        # Número de factura uruguaya: "Factura A 873", "e-Ticket A 873"
         if not extracted.get("nro_comp"):
-            _uy = re.search(
-                r'(?:FACTURA|COMPROBANTE|N[°º]?\s*FACTURA)[:\s]*'
-                r'([A-Z]?\s*\d{1,4}\s*[-/]?\s*[A-Z]?\s*\d{3,8})',
-                tu)
-            if _uy:
-                extracted["nro_comp"] = re.sub(r'\s+', '', _uy.group(1))
+            # Patrón directo contextual: 'FACTURA A 873' o 'E-TICKET A 873'
+            _uy_direct = re.search(r'(?:FACTURA|E-TICKET)\s+([A-Z])\s+(\d+)', tu)
+            if _uy_direct:
+                extracted["nro_comp"] = f"{_uy_direct.group(1)}{int(_uy_direct.group(2)):04d}"
             else:
-                # Fallback: patrón libre letra+dígitos ej "A 000873"
-                _uy2 = re.search(r'([A-Z])\s*(\d{3,8})', tu)
+                # Fallback: letra sola al inicio de palabra + espacio + dígitos
+                _uy2 = re.search(r'(?<![A-Z])([A-Z]) (\d{3,8})(?!\d)', tu)
                 if _uy2:
                     extracted["nro_comp"] = f"{_uy2.group(1)}{int(_uy2.group(2)):04d}"
 
@@ -4203,10 +4201,15 @@ if tab_import is not None:
                             ct1, ct2, ct3, ct4 = st.columns([3, 2, 2, 1])
                             tipo_sel  = ct1.selectbox("Tipo", list(TIPO_OPTIONS_IMP.keys()),
                                 index=list(TIPO_OPTIONS_IMP.keys()).index(default_lbl), key=f"tipo_{uf.name}")
-                            ref_doc   = ct2.text_input("N° comprobante",
-                                value=_ext_info.get("nro_comp",""), key=f"ref_d_{uf.name}")
-                            fecha_doc = ct3.text_input("Fecha (AAAA-MM-DD)",
-                                value=_ext_info.get("fecha",""), key=f"fec_d_{uf.name}",
+                            # Pre-poblar session_state desde extracción si el campo está vacío
+                            _ref_key = f"ref_d_{uf.name}"
+                            _fec_key = f"fec_d_{uf.name}"
+                            if not st.session_state.get(_ref_key) and _ext_info.get("nro_comp"):
+                                st.session_state[_ref_key] = _ext_info["nro_comp"]
+                            if not st.session_state.get(_fec_key) and _ext_info.get("fecha"):
+                                st.session_state[_fec_key] = _ext_info["fecha"]
+                            ref_doc   = ct2.text_input("N° comprobante", key=_ref_key)
+                            fecha_doc = ct3.text_input("Fecha (AAAA-MM-DD)", key=_fec_key,
                                 placeholder="2026-05-12")
                             _def_mon  = "USD" if auto.get("tipo") == "petdur" else "ARS"
                             moneda    = ct4.selectbox("Moneda", ["ARS","USD"],
