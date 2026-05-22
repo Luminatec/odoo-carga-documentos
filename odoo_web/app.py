@@ -482,13 +482,16 @@ def attach_file(models, uid, api_key, res_model, res_id, filename, file_bytes, m
 
 def create_purchase_order_petdur(models, uid, api_key, carpeta_id,
                                   currency_id=None, tc_usd=None,
-                                  filename=None, file_bytes=None, mimetype=None):
+                                  filename=None, file_bytes=None, mimetype=None,
+                                  lineas=None):
     """
     Crea OC PETDUR en draft (purchase.order).
     currency_id: pasar SOLO si se tiene el ID real de USD (no un fallback arbitrario).
     tc_usd: cotización ARS/USD del día (x_studio_cotizacion_dolar) — requerido por Odoo.
+    lineas: lista de {"descripcion", "cantidad", "precio_unit"} del documento PETDUR.
     Retorna el ID del purchase.order.
     """
+    import datetime as _dt_po
     po_vals = {
         "partner_id":  49328,       # PETDUR CORPORATION S.A.
         "partner_ref": carpeta_id,  # clave de búsqueda en load_carpeta_full
@@ -498,6 +501,26 @@ def create_purchase_order_petdur(models, uid, api_key, carpeta_id,
     if tc_usd and float(tc_usd) > 0:
         po_vals["x_studio_cotizacion_dolar"] = float(tc_usd)
     po_id = call(models, uid, api_key, "purchase.order", "create", [po_vals])
+
+    # Agregar líneas al pedido si vienen del documento PETDUR
+    if lineas:
+        _today_po = _dt_po.date.today().isoformat()
+        for ln in lineas:
+            try:
+                desc  = str(ln.get("descripcion") or "").strip() or carpeta_id
+                qty   = float(ln.get("cantidad")   or 1)
+                price = float(ln.get("precio_unit") or 0)
+                call(models, uid, api_key, "purchase.order.line", "create", [{
+                    "order_id":     po_id,
+                    "name":         desc,
+                    "product_qty":  qty,
+                    "price_unit":   price,
+                    "date_planned": _today_po,
+                    "product_uom":  1,          # UdM = Unidad (ID 1 en Odoo estándar)
+                }])
+            except Exception:
+                pass  # si falla una línea, seguir con las demás
+
     if filename and file_bytes:
         try:
             attach_file(models, uid, api_key, "purchase.order", po_id, filename, file_bytes, mimetype)
@@ -4367,6 +4390,7 @@ if tab_import is not None:
                                     filename    = (_petdur_doc or {}).get("filename"),
                                     file_bytes  = (_petdur_doc or {}).get("file_bytes"),
                                     mimetype    = (_petdur_doc or {}).get("mimetype"),
+                                    lineas      = ((_petdur_doc or {}).get("extracted") or {}).get("lineas_petdur") or [],
                                 )
                                 _po_url    = odoo_url("purchase.order", _po_id)
                                 _new_po_id = _po_id
