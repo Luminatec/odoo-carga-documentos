@@ -3123,12 +3123,13 @@ def register_customer_payment(models, uid, api_key,
 _tabs = ["🧾 Facturas prov.", "📦 Pedidos", "🏦 Órdenes de Pago", "💰 Recibos de Cobro"]
 if is_admin:
     _tabs.append("🛳️ Importaciones")
+_tabs.append("🤖 Asistente")
 _tabs.append("📋 Historial")
 _tab_objs = st.tabs(_tabs)
 if is_admin:
-    tab_bills, tab_orders, tab_op, tab_recibos, tab_import, tab_history = _tab_objs
+    tab_bills, tab_orders, tab_op, tab_recibos, tab_import, tab_chat, tab_history = _tab_objs
 else:
-    tab_bills, tab_orders, tab_op, tab_recibos, tab_history = _tab_objs
+    tab_bills, tab_orders, tab_op, tab_recibos, tab_chat, tab_history = _tab_objs
     tab_import = None
 
 
@@ -5871,6 +5872,103 @@ with tab_recibos:
 # ═══════════════════════════════════════════════════
 # TAB HISTORIAL
 # ═══════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════
+# TAB ASISTENTE — CHAT CLAUDE-ODOO
+# ═══════════════════════════════════════════════════
+with tab_chat:
+    st.subheader("🤖 Asistente Claude-Odoo")
+
+    _BOT_URL   = os.getenv("BOT_URL", "").rstrip("/")
+    _CHAT_TOKEN = os.getenv("CHAT_TOKEN", "")
+    _CHAT_HEADERS = {"X-Chat-Token": _CHAT_TOKEN}
+
+    if not _BOT_URL or not _CHAT_TOKEN:
+        st.warning("⚙️ Configuración incompleta: definí BOT_URL y CHAT_TOKEN en Streamlit Secrets.")
+    else:
+        # ── Estado de sesión ──────────────────────────────
+        if "odoo_history"  not in st.session_state: st.session_state.odoo_history  = []
+        if "odoo_messages" not in st.session_state: st.session_state.odoo_messages = []
+        if "odoo_pending"  not in st.session_state: st.session_state.odoo_pending  = []
+
+        # ── Funciones de llamada ──────────────────────────
+        def _chat_send(message: str) -> dict:
+            r = requests.post(
+                f"{_BOT_URL}/chat",
+                json={"message": message, "user_id": st.session_state.get("user_email", "streamlit"),
+                      "history": st.session_state.odoo_history},
+                headers=_CHAT_HEADERS, timeout=180,
+            )
+            r.raise_for_status()
+            return r.json()
+
+        def _chat_approve(token: str) -> dict:
+            r = requests.post(f"{_BOT_URL}/chat/approve", json={"token": token},
+                              headers=_CHAT_HEADERS, timeout=60)
+            r.raise_for_status()
+            return r.json()
+
+        def _chat_cancel(token: str):
+            requests.post(f"{_BOT_URL}/chat/cancel", json={"token": token},
+                          headers=_CHAT_HEADERS, timeout=30)
+
+        # ── Historial de mensajes ─────────────────────────
+        for _msg in st.session_state.odoo_messages:
+            with st.chat_message(_msg["role"]):
+                st.markdown(_msg["content"])
+
+        # ── Acciones pendientes de aprobación ─────────────
+        for _action in st.session_state.odoo_pending:
+            _token = _action.get("token", "")
+            st.warning(f"Acción pendiente: **`{_action.get('tool')}`** — `{_action.get('input')}`")
+            _col1, _col2 = st.columns(2)
+            with _col1:
+                if st.button("✅ Aprobar", key=f"ok_{_token}"):
+                    _res = _chat_approve(_token)
+                    st.success(_res.get("result", "Aprobado."))
+                    st.session_state.odoo_pending = [a for a in st.session_state.odoo_pending if a["token"] != _token]
+                    st.rerun()
+            with _col2:
+                if st.button("❌ Cancelar", key=f"no_{_token}"):
+                    _chat_cancel(_token)
+                    st.session_state.odoo_pending = [a for a in st.session_state.odoo_pending if a["token"] != _token]
+                    st.rerun()
+
+        # ── Input del usuario ──────────────────────────────
+        _prompt = st.chat_input("Preguntá sobre tus datos de Odoo…")
+        if _prompt:
+            st.session_state.odoo_messages.append({"role": "user", "content": _prompt})
+            with st.chat_message("user"):
+                st.markdown(_prompt)
+            with st.chat_message("assistant"):
+                _ph = st.empty()
+                _ph.markdown("⏳ _Consultando…_")
+                try:
+                    _data   = _chat_send(_prompt)
+                    _answer = _data.get("answer", "_Sin respuesta_")
+                    st.session_state.odoo_history = _data.get("history", [])
+                    for _p in _data.get("pending", []):
+                        if _p not in st.session_state.odoo_pending:
+                            st.session_state.odoo_pending.append(_p)
+                    _ph.markdown(_answer)
+                    if _data.get("pending"):
+                        st.rerun()
+                except requests.Timeout:
+                    _ph.error("⏱️ El agente tardó demasiado. Intentá una consulta más simple.")
+                    _answer = "_Timeout_"
+                except requests.HTTPError as _e:
+                    _ph.error(f"❌ Error {_e.response.status_code}: {_e.response.text[:200]}")
+                    _answer = "_Error_"
+            st.session_state.odoo_messages.append({"role": "assistant", "content": _answer})
+
+        # ── Reset ──────────────────────────────────────────
+        if st.session_state.odoo_messages:
+            if st.button("🗑️ Nueva conversación"):
+                st.session_state.odoo_history  = []
+                st.session_state.odoo_messages = []
+                st.session_state.odoo_pending  = []
+                st.rerun()
+
+
 with tab_history:
     st.subheader("📋 Historial de esta sesión")
     _hist = st.session_state.get("history", [])
