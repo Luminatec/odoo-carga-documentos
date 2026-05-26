@@ -937,7 +937,7 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                        invoice_date_due=None, account_id=None, amount_neto=None,
                        currency_id=None, analytic_account_id=None, product_id=None,
                        l10n_latam_document_number=None, invoice_origin=None,
-                       extra_lines=None):
+                       extra_lines=None, clear_taxes=False):
     """
     extra_lines: lista de dicts con keys opcionales:
         name, quantity, price_unit, account_id, product_id
@@ -984,6 +984,8 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
         if product_id:  line_vals["product_id"] = product_id
         if analytic_account_id:
             line_vals["analytic_distribution"] = {str(analytic_account_id): 100}
+        if clear_taxes:
+            line_vals["tax_ids"] = [(5, 0, 0)]   # limpiar impuestos (factura exenta)
         vals["invoice_line_ids"] = [(0, 0, line_vals)]
 
     move_id = call(models, uid, api_key, "account.move", "create", [vals])
@@ -3506,25 +3508,36 @@ with tab_bills:
                             placeholder="Nombre exacto en Odoo",
                             help="Se usa solo si el CUIT no resuelve a ningún proveedor")
 
-                # Monto a cargar (editable; por defecto: total con IVA o neto si no hay total)
+                # Monto a cargar (editable; por defecto: neto gravado / total si exenta)
                 _ca, _cb = st.columns([2, 1])
                 _total_ref = extracted.get("total") or ""
                 _neto_ref  = extracted.get("neto")  or ""
                 _iva_ref   = extracted.get("iva")   or ""
-                _default_amount = safe_float(_total_ref) or safe_float(_neto_ref)
+                # Default: neto (base imponible); Odoo aplica impuestos encima.
+                # Si no hay neto usa total (caso exenta: neto == total).
+                _default_amount = safe_float(_neto_ref) or safe_float(_total_ref)
                 amount_i = _ca.number_input(
-                    "💰 Importe a cargar *",
+                    "💰 Importe neto (base) *",
                     min_value=0.0,
                     value=_default_amount,
                     step=0.01,
                     format="%.2f",
                     key=f"amount_i_{uf.name}",
-                    help="Monto que se cargará en Odoo. Por defecto: total con IVA.",
+                    help="Base imponible (sin IVA). Odoo calcula los impuestos encima. "
+                         "Para facturas exentas, ingresá el total.",
                 )
                 _ca.caption(
                     f"Extraído → Neto: {fmt_ars(_neto_ref)}  |  "
                     f"IVA: {fmt_ars(_iva_ref)}  |  "
                     f"Total: {fmt_ars(_total_ref)}"
+                )
+                # Exenta: sin IVA extraído → pre-marcar
+                _exenta_default = not bool(safe_float(_iva_ref))
+                exenta_i = st.checkbox(
+                    "🔒 Factura exenta / Monotributo (sin impuestos)",
+                    value=_exenta_default,
+                    key=f"exenta_{uf.name}",
+                    help="Si está marcado, se crea la línea sin ningún impuesto en Odoo.",
                 )
 
                 st.text_area("Notas internas", height=55, key=f"notas_{uf.name}")
@@ -3646,7 +3659,8 @@ with tab_bills:
                             amount_neto=amount_i if amount_i else None,
                             analytic_account_id=analytic_id_sel,
                             product_id=product_id_sel,
-                            l10n_latam_document_number=_latam_num or None)
+                            l10n_latam_document_number=_latam_num or None,
+                            clear_taxes=exenta_i)
                         url = odoo_url("account.move", move_id)
                         st.toast("Factura creada en Odoo", icon="✅")
                         st.markdown(f"📎 [Abrir en Odoo]({url})")
