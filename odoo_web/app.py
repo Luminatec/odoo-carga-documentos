@@ -3508,15 +3508,10 @@ with tab_bills:
 
                 # Monto a cargar (editable; por defecto: total con IVA o neto si no hay total)
                 _ca, _cb = st.columns([2, 1])
-                def _to_float_safe(v):
-                    try:
-                        return float(str(v).replace(".", "").replace(",", ".").strip())
-                    except Exception:
-                        return 0.0
                 _total_ref = extracted.get("total") or ""
                 _neto_ref  = extracted.get("neto")  or ""
                 _iva_ref   = extracted.get("iva")   or ""
-                _default_amount = _to_float_safe(_total_ref) or _to_float_safe(_neto_ref)
+                _default_amount = safe_float(_total_ref) or safe_float(_neto_ref)
                 amount_i = _ca.number_input(
                     "💰 Importe a cargar *",
                     min_value=0.0,
