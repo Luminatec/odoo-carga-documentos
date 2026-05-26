@@ -937,7 +937,7 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                        invoice_date_due=None, account_id=None, amount_neto=None,
                        currency_id=None, analytic_account_id=None, product_id=None,
                        l10n_latam_document_number=None, invoice_origin=None,
-                       extra_lines=None, clear_taxes=False):
+                       extra_lines=None, clear_taxes=False, line_name=None):
     """
     extra_lines: lista de dicts con keys opcionales:
         name, quantity, price_unit, account_id, product_id
@@ -976,7 +976,7 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
     # Línea única legada (account_id/amount_neto)
     elif (account_id or product_id) and amount_neto:
         line_vals = {
-            "name":       ref or "Factura proveedor",
+            "name":       line_name or ref or "Factura proveedor",
             "price_unit": float(amount_neto),
             "quantity":   1,
         }
@@ -1307,7 +1307,8 @@ Formato esperado:
   "neto": 262912.50,
   "iva": 55211.63,
   "condiciones_venta": "A 7 dias FF",
-  "tipo": "RI"
+  "tipo": "RI",
+  "concepto": "Descripción breve del servicio o producto facturado"
 }
 
 Reglas:
@@ -1318,6 +1319,7 @@ Reglas:
 - "iva" es la suma de todos los IVA (21%, 10.5%, 27%)
 - "tipo": "RI" (Responsable Inscripto), "MONO" (Monotributo), "EX" (Exento)
 - Si la factura es tipo C o el emisor es Monotributo: "iva" = null, "neto" = mismo valor que "total"
+- "concepto": descripción breve del servicio/producto (1 línea, máx 100 chars). Buscá en el cuerpo de la factura: "concepto", "descripción", "detalle", o la primer línea del detalle de items. Si no hay, usar null
 - Para campos no encontrados usar null
 - Números como decimales sin símbolo de moneda (ej: 318124.13, no "$318.124,13")
 
@@ -1348,6 +1350,7 @@ Factura:
         "neto":              str(data.get("neto") or "").replace(",", ".") if data.get("neto") is not None else "",
         "iva":               str(data.get("iva") or "").replace(",", ".") if data.get("iva") is not None else "",
         "condiciones_venta": str(data.get("condiciones_venta") or "").strip(),
+        "concepto":          str(data.get("concepto") or "").strip()[:100],
         "dias_pago":         None,
     }
 
@@ -3520,6 +3523,13 @@ with tab_bills:
                             placeholder="2026-05-20",
                             help="Se calcula automáticamente si se detectan días en las condiciones de venta")
 
+                concepto_i = st.text_input(
+                    "📋 Concepto / Descripción",
+                    value=extracted.get("concepto", ""),
+                    placeholder="Descripción del servicio o producto",
+                    help="Se usa como descripción de la línea en Odoo",
+                )
+
                 # Proveedor por nombre como fallback si no hay CUIT
                 prov_i = st.text_input("Nombre del proveedor (fallback si no hay CUIT)",
                             value=(_partner_preloaded[1] if _partner_preloaded else extracted.get("proveedor","")[:60]),
@@ -3678,7 +3688,8 @@ with tab_bills:
                             analytic_account_id=analytic_id_sel,
                             product_id=product_id_sel,
                             l10n_latam_document_number=_latam_num or None,
-                            clear_taxes=exenta_i)
+                            clear_taxes=exenta_i,
+                            line_name=concepto_i.strip() or None)
                         url = odoo_url("account.move", move_id)
                         st.toast("Factura creada en Odoo", icon="✅")
                         st.markdown(f"📎 [Abrir en Odoo]({url})")
