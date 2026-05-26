@@ -2007,18 +2007,6 @@ def get_ar_accounts(_models_url, uid, api_key, account_type=None):
     except Exception:
         return []
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def get_all_partners_names(_models_url, uid, api_key):
-    """Lista de (id, name) de todos los contactos activos en Odoo."""
-    try:
-        m = xmlrpc.client.ServerProxy(_models_url, allow_none=True)
-        rows = m.execute_kw(ODOO_DB, uid, api_key, "res.partner", "search_read",
-            [[["active", "=", True], ["is_company", "=", True]]],
-            {"fields": ["id", "name"], "order": "name asc", "limit": 800})
-        return [(r["id"], r["name"]) for r in rows]
-    except Exception:
-        return []
-
 def create_full_partner(models, uid, api_key, vals_dict):
     """
     Crea un res.partner completo en Odoo.
@@ -4692,9 +4680,16 @@ with tab_contacts:
     _ct_acct_rec_map = {n: i for i, n in _ct_accts_rec}
     _ct_acct_pay_map = {n: i for i, n in _ct_accts_pay}
 
-    # Cargar lista de partners para referido
-    _ct_all_partners = get_all_partners_names(models_url, uid, api_key)
-    _ct_partner_names = ["— Sin referente —"] + [n for _, n in _ct_all_partners]
+    # Cargar lista de partners para referente (directo con models autenticado)
+    try:
+        _ct_all_partners = models.execute_kw(
+            ODOO_DB, uid, api_key, "res.partner", "search_read",
+            [[["active", "=", True]]],
+            {"fields": ["id", "name"], "order": "name asc", "limit": 1000})
+        _ct_all_partners = [(r["id"], r["name"]) for r in _ct_all_partners]
+    except Exception:
+        _ct_all_partners = []
+    _ct_partner_names  = ["— Sin referente —"] + [n for _, n in _ct_all_partners]
     _ct_partner_id_map = {n: i for i, n in _ct_all_partners}  # name → id
 
     with st.form("ct_form"):
