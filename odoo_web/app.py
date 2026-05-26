@@ -4694,7 +4694,8 @@ with tab_contacts:
 
     # Cargar lista de partners para referido
     _ct_all_partners = get_all_partners_names(models_url, uid, api_key)
-    _ct_partner_names = ["— Sin referido —"] + [n for _, n in _ct_all_partners]
+    _ct_partner_names = ["— Sin referente —"] + [n for _, n in _ct_all_partners]
+    _ct_partner_id_map = {n: i for i, n in _ct_all_partners}  # name → id
 
     with st.form("ct_form"):
         # ── Persona / Empresa ──────────────────────────────────────────────
@@ -4758,12 +4759,12 @@ with tab_contacts:
         _ct_pt_sel    = _ct_v2.selectbox("Términos de pago (ventas)", _ct_pt_opts)
         _ct_pl_opts   = ["— Predeterminado —"] + list(_plist_map.keys())
         _ct_pl_sel    = _ct_v3.selectbox("Lista de precios", _ct_pl_opts)
-        # Referido — solo para clientes
+        # Referente comercial
         _ct_referido = st.selectbox(
-            "Referido por (cliente)",
+            "Referente",
             options=_ct_partner_names,
             index=0,
-            help="Contacto de Odoo que refirió a este cliente",
+            help="Contacto de Odoo que actúa como referente comercial",
         )
 
         # ── Compras ────────────────────────────────────────────────────────
@@ -4861,9 +4862,11 @@ with tab_contacts:
                     if _ct_notes.strip():
                         _ct_vals["comment"] = _ct_notes.strip()
 
-                    # Referido
-                    if _ct_referido and _ct_referido != "— Sin referido —":
-                        _ct_vals["ref"] = _ct_referido
+                    # Referente (Many2one → referrer_id)
+                    if _ct_referido and _ct_referido != "— Sin referente —":
+                        _ref_pid = _ct_partner_id_map.get(_ct_referido)
+                        if _ref_pid:
+                            _ct_vals["referrer_id"] = _ref_pid
 
                     # Cuentas contables
                     if _ct_acct_rec_sel != "— Predeterminada —" and _ct_acct_rec_sel in _ct_acct_rec_map:
