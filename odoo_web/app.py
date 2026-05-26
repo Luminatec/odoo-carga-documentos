@@ -2895,6 +2895,32 @@ def get_payment_journals(models_url, uid, api_key):
     except Exception as e:
         return []
 
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_all_banks(_models_url, uid, api_key):
+    """Lista de (id, name) de res.bank para matchear bancos de cheques."""
+    try:
+        m = xmlrpc.client.ServerProxy(_models_url, allow_none=True)
+        rows = m.execute_kw(ODOO_DB, uid, api_key, "res.bank", "search_read",
+            [[]], {"fields": ["id", "name"], "limit": 500, "order": "name asc"})
+        return [(r["id"], r["name"]) for r in rows]
+    except Exception:
+        return []
+
+
+def match_bank_id(bank_name, all_banks):
+    """Nombre de banco del home banking -> res.bank.id o None."""
+    if not bank_name or not all_banks:
+        return None
+    clean = re.sub(r"\s*-\s*\d{5,}\s*$", "", bank_name.strip()).upper()
+    stop = {"BANCO","DEL","DE","LA","LAS","LOS","EL","Y","SA","SRL"}
+    words = [w for w in re.sub(r"[^\w\s]","",clean).split() if len(w)>=4 and w not in stop]
+    kw = words[0].lower() if words else clean[:15].lower()
+    for bid, bname in all_banks:
+        if kw in bname.lower(): return bid
+    return None
+
+
 def register_payment_wizard(models, uid, api_key, move_ids, payment_date, journal_id):
     """
     Genera un pago via el wizard account.payment.register.
@@ -3077,7 +3103,7 @@ def get_customer_unpaid_invoices(models_url, uid, api_key, partner_ids_tuple):
 def register_customer_payment(models, uid, api_key,
                                partner_id, amount, currency_id,
                                payment_date, journal_id,
-                               move_ids=None, memo=""):
+                               move_ids=None, memo="", cheques=None):
     """Registra un recibo de cobro de cliente usando account.payment.group.
     Flujo correcto para Odoo AR (módulo account_payments_group):
       1. Crear account.payment.group con payment_type='receivable'
@@ -3118,7 +3144,7 @@ def register_customer_payment(models, uid, api_key,
             pml_lines = models.execute_kw(ODOO_DB, uid, api_key,
                 "account.payment.method.line", "search_read",
                 [[["journal_id", "=", journal_id],
-                  ["payment_method_id.code", "=", "out_third_party_checks"]]],
+                  ["payment_method_id.code", "=", "new_third_party_checks"]]],
                 {"fields": ["id"], "limit": 1})
             pml_id = pml_lines[0]["id"] if pml_lines else None
         except Exception:
@@ -3137,6 +3163,21 @@ def register_customer_payment(models, uid, api_key,
         }
         if pml_id:
             pay_vals["payment_method_line_id"] = pml_id
+
+        # 3b. Adjuntar cheques inline (l10n_latam_new_check_ids)
+        if cheques:
+            check_lines = []
+            for ch in cheques:
+                ch_vals = {
+                    "payment_date": ch.get("payment_date") or payment_date,
+                    "amount":       float(ch.get("amount") or amount),
+                }
+                if ch.get("nro"):       ch_vals["name"] = str(ch["nro"])
+                if ch.get("bank_id"):   ch_vals["bank_id"] = ch["bank_id"]
+                if ch.get("issuer_vat"):ch_vals["issuer_vat"] = str(ch["issuer_vat"])
+                if pml_id:             ch_vals["payment_method_line_id"] = pml_id
+                check_lines.append((0, 0, ch_vals))
+            pay_vals["l10n_latam_new_check_ids"] = check_lines
 
         models.execute_kw(ODOO_DB, uid, api_key,
             "account.payment", "create", [pay_vals])
@@ -5526,17 +5567,9 @@ with tab_recibos:
             st.error("Formato no soportado. Subí un archivo CSV o XLSX del home banking.")
             return []
 
-    # ── journals (reutiliza los mismos de Ordenes de Pago) ──────────────────
-    _rc_jours = get_payment_journals(models_url, uid, api_key)
-    if _rc_jours:
-        # Ordenar: "cheque" primero (son los más usados en Recibos de Cobro)
-        def _cheque_first(item):
-            return 0 if "cheque" in item[1].lower() else 1
-        _rc_jours_sorted = sorted(_rc_jours, key=_cheque_first)
-        _rc_jour_opts = {label: jid for jid, label, _ in _rc_jours_sorted}
-        _rc_jour_cur  = {label: cur for _,   label, cur in _rc_jours_sorted}
-    else:
-        _rc_jour_opts, _rc_jour_cur = {}, {}
+    # ── Journal fijo: Cheques a depositar (id=73) ─────────────────────────────
+    _RC_JOURNAL_ID = 73
+    _rc_all_banks  = get_all_banks(models_url, uid, api_key)
 
     # ── uploader ────────────────────────────────────────────────────────────
     _rc_file = st.file_uploader(
@@ -5764,177 +5797,190 @@ with tab_recibos:
 
                     # ── Formulario de pago ────────────────────────────────────
                     st.markdown("#### Datos del recibo")
-                    if not _rc_jour_opts:
-                        st.error("No se encontraron diarios de pago en Odoo.")
+                    _rc_jour_id = _RC_JOURNAL_ID
+                    _rcc2, _rcc3 = st.columns([1, 1])
+                    _rc_date = _rcc2.date_input(
+                        "Fecha de cobro",
+                        value=_rc_date_cls.today(),
+                        key=f"rc_date_{_rcuit}")
+                    _rc_amount = _rcc3.number_input(
+                        "Importe cobrado (ARS)",
+                        min_value=0.0,
+                        value=float(_rctotal),
+                        step=0.01, format="%.2f",
+                        key=f"rc_amt_{_rcuit}",
+                        help="Pre-completado con el total de cheques. "
+                             "Ajustá si hay retenciones o NC.")
+
+                    # ── Deducciones dinámicas (Retenciones / NC) ────────────
+                    _ded_key     = f"rc_deds_{_rcuit}"
+                    _ded_cnt_key = f"rc_deds_cnt_{_rcuit}"
+                    if _ded_key     not in st.session_state: st.session_state[_ded_key]     = []
+                    if _ded_cnt_key not in st.session_state: st.session_state[_ded_cnt_key] = 0
+
+                    # Cargar cuentas para conceptos (reutiliza cache de facturas)
+                    _rc_accts_raw = get_all_accounts(models_url, uid, api_key)
+                    # Poner cuentas "(copia)" al final para no confundir con las originales
+                    _rc_accts = sorted(
+                        _rc_accts_raw,
+                        key=lambda x: (1 if "(copia)" in x[1].lower() else 0, x[1]))
+                    _rc_acct_opts = ["— Seleccionar concepto —"] + [lbl for _, lbl in _rc_accts]
+
+                    _deds = st.session_state[_ded_key]
+                    if _deds:
+                        st.markdown("**Deducciones / Retenciones / NC:**")
+                    _to_remove = None
+                    for _ded in _deds:
+                        _uid = _ded["uid"]
+                        _dc1, _dc2, _dc3 = st.columns([5, 2, 1])
+                        _cpt_key = f"rc_ded_cpt_{_rcuit}_{_uid}"
+                        _mnt_key = f"rc_ded_mnt_{_rcuit}_{_uid}"
+                        _cur_idx = _ded.get("concepto_idx", 0)
+                        _new_cpt = _dc1.selectbox(
+                            "", options=_rc_acct_opts, index=_cur_idx,
+                            key=_cpt_key, label_visibility="collapsed")
+                        _new_mnt = _dc2.number_input(
+                            "", value=float(_ded.get("monto", 0.0)),
+                            min_value=0.0, step=0.01, format="%.2f",
+                            key=_mnt_key, label_visibility="collapsed")
+                        if _dc3.button("✕", key=f"rc_rm_{_rcuit}_{_uid}"):
+                            _to_remove = _uid
+                        _cpt_idx = _rc_acct_opts.index(_new_cpt) if _new_cpt in _rc_acct_opts else 0
+                        _acct_id = next((aid for aid, albl in _rc_accts if albl == _new_cpt), None)
+                        _ded.update({"concepto": _new_cpt, "concepto_idx": _cpt_idx,
+                                     "account_id": _acct_id, "monto": _new_mnt})
+
+                    if _to_remove is not None:
+                        st.session_state[_ded_key] = [d for d in _deds if d["uid"] != _to_remove]
+                        st.rerun()
+
+                    if st.button("➕ Agregar retención / NC", key=f"rc_add_ded_{_rcuit}"):
+                        _new_uid = st.session_state[_ded_cnt_key] + 1
+                        st.session_state[_ded_cnt_key] = _new_uid
+                        st.session_state[_ded_key].append(
+                            {"uid": _new_uid, "monto": 0.0, "concepto_idx": 0,
+                             "concepto": "", "account_id": None})
+                        st.rerun()
+
+                    _rc_ajuste_total = sum(
+                        d.get("monto", 0.0) for d in st.session_state[_ded_key])
+
+                    _rc_memo = st.text_input(
+                        "Referencia / Memo",
+                        value=f"Recibo cheques — {_rchs[0]['nombre']}",
+                        key=f"rc_memo_{_rcuit}")
+
+                    _rc_neto = _rc_amount - _rc_ajuste_total
+                    _rc_info = f"**Importe neto:** ARS {fmt_ars(_rc_neto)}"
+                    if _rc_ajuste_total > 0:
+                        _rc_info += f"  ·  Deducciones: ARS {fmt_ars(_rc_ajuste_total)}"
+                    if _rcsel_ids:
+                        _rc_info += (
+                            f"  ·  {len(_rcsel_ids)} factura(s) seleccionada(s) "
+                            f"(saldo ARS {fmt_ars(_rcsel_saldo)})")
                     else:
-                        _rcc1, _rcc2, _rcc3 = st.columns([2, 1, 1])
-                        _rc_journal = _rcc1.selectbox(
-                            "Cuenta destino", list(_rc_jour_opts.keys()),
-                            key=f"rc_jour_{_rcuit}")
-                        _rc_date = _rcc2.date_input(
-                            "Fecha de cobro",
-                            value=_rc_date_cls.today(),
-                            key=f"rc_date_{_rcuit}")
-                        _rc_jour_id = _rc_jour_opts[_rc_journal]
+                        _rc_info += "  ·  Sin facturas → se registra como pago a cuenta"
+                    st.info(_rc_info)
 
-                        _rc_amount = _rcc3.number_input(
-                            "Importe cobrado (ARS)",
-                            min_value=0.0,
-                            value=float(_rctotal),
-                            step=0.01, format="%.2f",
-                            key=f"rc_amt_{_rcuit}",
-                            help="Pre-completado con el total de cheques. "
-                                 "Ajustá si hay retenciones o NC.")
+                    _dup_pending = st.session_state.get(f"rc_confirm_dup_{_rcuit}", False)
+                    if _dup_pending:
+                        st.button("↩️ Cancelar", key=f"rc_cancel_dup_{_rcuit}",
+                                  on_click=lambda: st.session_state.pop(
+                                      f"rc_confirm_dup_{_rcuit}", None))
+                        _rc_reg_btn = st.button(
+                            "⚠️ Registrar igual (puede ser duplicado)",
+                            type="secondary", key=f"rc_btn_{_rcuit}")
+                    else:
+                        _rc_reg_btn = st.button(
+                            f"💵 Registrar Recibo en Odoo",
+                            type="primary", key=f"rc_btn_{_rcuit}")
 
-                        # ── Deducciones dinámicas (Retenciones / NC) ────────────
-                        _ded_key     = f"rc_deds_{_rcuit}"
-                        _ded_cnt_key = f"rc_deds_cnt_{_rcuit}"
-                        if _ded_key     not in st.session_state: st.session_state[_ded_key]     = []
-                        if _ded_cnt_key not in st.session_state: st.session_state[_ded_cnt_key] = 0
-
-                        # Cargar cuentas para conceptos (reutiliza cache de facturas)
-                        _rc_accts_raw = get_all_accounts(models_url, uid, api_key)
-                        # Poner cuentas "(copia)" al final para no confundir con las originales
-                        _rc_accts = sorted(
-                            _rc_accts_raw,
-                            key=lambda x: (1 if "(copia)" in x[1].lower() else 0, x[1]))
-                        _rc_acct_opts = ["— Seleccionar concepto —"] + [lbl for _, lbl in _rc_accts]
-
-                        _deds = st.session_state[_ded_key]
-                        if _deds:
-                            st.markdown("**Deducciones / Retenciones / NC:**")
-                        _to_remove = None
-                        for _ded in _deds:
-                            _uid = _ded["uid"]
-                            _dc1, _dc2, _dc3 = st.columns([5, 2, 1])
-                            _cpt_key = f"rc_ded_cpt_{_rcuit}_{_uid}"
-                            _mnt_key = f"rc_ded_mnt_{_rcuit}_{_uid}"
-                            _cur_idx = _ded.get("concepto_idx", 0)
-                            _new_cpt = _dc1.selectbox(
-                                "", options=_rc_acct_opts, index=_cur_idx,
-                                key=_cpt_key, label_visibility="collapsed")
-                            _new_mnt = _dc2.number_input(
-                                "", value=float(_ded.get("monto", 0.0)),
-                                min_value=0.0, step=0.01, format="%.2f",
-                                key=_mnt_key, label_visibility="collapsed")
-                            if _dc3.button("✕", key=f"rc_rm_{_rcuit}_{_uid}"):
-                                _to_remove = _uid
-                            _cpt_idx = _rc_acct_opts.index(_new_cpt) if _new_cpt in _rc_acct_opts else 0
-                            _acct_id = next((aid for aid, albl in _rc_accts if albl == _new_cpt), None)
-                            _ded.update({"concepto": _new_cpt, "concepto_idx": _cpt_idx,
-                                         "account_id": _acct_id, "monto": _new_mnt})
-
-                        if _to_remove is not None:
-                            st.session_state[_ded_key] = [d for d in _deds if d["uid"] != _to_remove]
-                            st.rerun()
-
-                        if st.button("➕ Agregar retención / NC", key=f"rc_add_ded_{_rcuit}"):
-                            _new_uid = st.session_state[_ded_cnt_key] + 1
-                            st.session_state[_ded_cnt_key] = _new_uid
-                            st.session_state[_ded_key].append(
-                                {"uid": _new_uid, "monto": 0.0, "concepto_idx": 0,
-                                 "concepto": "", "account_id": None})
-                            st.rerun()
-
-                        _rc_ajuste_total = sum(
-                            d.get("monto", 0.0) for d in st.session_state[_ded_key])
-
-                        _rc_memo = st.text_input(
-                            "Referencia / Memo",
-                            value=f"Recibo cheques — {_rchs[0]['nombre']}",
-                            key=f"rc_memo_{_rcuit}")
-
-                        _rc_neto = _rc_amount - _rc_ajuste_total
-                        _rc_info = f"**Importe neto:** ARS {fmt_ars(_rc_neto)}"
-                        if _rc_ajuste_total > 0:
-                            _rc_info += f"  ·  Deducciones: ARS {fmt_ars(_rc_ajuste_total)}"
-                        if _rcsel_ids:
-                            _rc_info += (
-                                f"  ·  {len(_rcsel_ids)} factura(s) seleccionada(s) "
-                                f"(saldo ARS {fmt_ars(_rcsel_saldo)})")
+                    if _rc_reg_btn:
+                        if _rc_neto <= 0:
+                            st.error("El importe neto debe ser mayor a cero.")
                         else:
-                            _rc_info += "  ·  Sin facturas → se registra como pago a cuenta"
-                        st.info(_rc_info)
+                            _rc_date_str = _rc_date.strftime("%Y-%m-%d")
+                            # Obtener currency_id de la primera factura seleccionada
+                            _rc_cur_id = 1  # ARS por defecto
+                            if _rcsel_ids and _rc_invs:
+                                _rci_first = next(
+                                    (i for i in _rc_invs
+                                     if i["id"] == _rcsel_ids[0]), None)
+                                if _rci_first:
+                                    _rcurr = _rci_first.get("currency_id")
+                                    if _rcurr and isinstance(_rcurr, (list, tuple)):
+                                        _rc_cur_id = _rcurr[0]
 
-                        _dup_pending = st.session_state.get(f"rc_confirm_dup_{_rcuit}", False)
-                        if _dup_pending:
-                            st.button("↩️ Cancelar", key=f"rc_cancel_dup_{_rcuit}",
-                                      on_click=lambda: st.session_state.pop(
-                                          f"rc_confirm_dup_{_rcuit}", None))
-                            _rc_reg_btn = st.button(
-                                "⚠️ Registrar igual (puede ser duplicado)",
-                                type="secondary", key=f"rc_btn_{_rcuit}")
-                        else:
-                            _rc_reg_btn = st.button(
-                                f"💵 Registrar Recibo en Odoo",
-                                type="primary", key=f"rc_btn_{_rcuit}")
+                            # ── Validación de duplicados ──────────────────
+                            # Busca pagos ya registrados con mismo cliente,
+                            # monto, fecha y journal en estado confirmado.
+                            _dup_key = f"rc_confirm_dup_{_rcuit}"
+                            _dup_existing = []
+                            try:
+                                _dup_existing = models.execute_kw(
+                                    ODOO_DB, uid, api_key,
+                                    "account.payment", "search_read",
+                                    [[
+                                        ("partner_id",   "=",  _rc_pid),
+                                        ("amount",       "=",  _rc_neto),
+                                        ("date",         "=",  _rc_date_str),
+                                        ("journal_id",   "=",  _rc_jour_id),
+                                        ("payment_type", "=",  "inbound"),
+                                        ("state",        "in", ["posted", "reconciled"]),
+                                    ]],
+                                    {"fields": ["id", "name", "amount", "date"], "limit": 3})
+                            except Exception:
+                                pass
 
-                        if _rc_reg_btn:
-                            if _rc_neto <= 0:
-                                st.error("El importe neto debe ser mayor a cero.")
+                            if _dup_existing and not st.session_state.get(_dup_key):
+                                _dup_names = ", ".join(
+                                    d.get("name","?") for d in _dup_existing)
+                                st.warning(
+                                    f"⚠️ Ya existe un cobro registrado con el mismo cliente, "
+                                    f"monto y fecha: **{_dup_names}**. "
+                                    f"Si es un cobro diferente, confirmá para continuar.")
+                                st.session_state[_dup_key] = True
+                                st.rerun()
                             else:
-                                _rc_date_str = _rc_date.strftime("%Y-%m-%d")
-                                # Obtener currency_id de la primera factura seleccionada
-                                _rc_cur_id = 1  # ARS por defecto
-                                if _rcsel_ids and _rc_invs:
-                                    _rci_first = next(
-                                        (i for i in _rc_invs
-                                         if i["id"] == _rcsel_ids[0]), None)
-                                    if _rci_first:
-                                        _rcurr = _rci_first.get("currency_id")
-                                        if _rcurr and isinstance(_rcurr, (list, tuple)):
-                                            _rc_cur_id = _rcurr[0]
-
-                                # ── Validación de duplicados ──────────────────
-                                # Busca pagos ya registrados con mismo cliente,
-                                # monto, fecha y journal en estado confirmado.
-                                _dup_key = f"rc_confirm_dup_{_rcuit}"
-                                _dup_existing = []
-                                try:
-                                    _dup_existing = models.execute_kw(
-                                        ODOO_DB, uid, api_key,
-                                        "account.payment", "search_read",
-                                        [[
-                                            ("partner_id",   "=",  _rc_pid),
-                                            ("amount",       "=",  _rc_neto),
-                                            ("date",         "=",  _rc_date_str),
-                                            ("journal_id",   "=",  _rc_jour_id),
-                                            ("payment_type", "=",  "inbound"),
-                                            ("state",        "in", ["posted", "reconciled"]),
-                                        ]],
-                                        {"fields": ["id", "name", "amount", "date"], "limit": 3})
-                                except Exception:
-                                    pass
-
-                                if _dup_existing and not st.session_state.get(_dup_key):
-                                    _dup_names = ", ".join(
-                                        d.get("name","?") for d in _dup_existing)
-                                    st.warning(
-                                        f"⚠️ Ya existe un cobro registrado con el mismo cliente, "
-                                        f"monto y fecha: **{_dup_names}**. "
-                                        f"Si es un cobro diferente, confirmá para continuar.")
-                                    st.session_state[_dup_key] = True
-                                    st.rerun()
+                                # Limpiar flag de confirmación para próxima vez
+                                st.session_state.pop(_dup_key, None)
+                                _rc_cheque_vals = []
+                                for _rch in _rchs:
+                                    _bk = match_bank_id(_rch.get("banco",""),_rc_all_banks)
+                                    _dt = _rch.get("fecha_pago","") or ""
+                                    try:
+                                        if "/" in _dt:
+                                            _p = _dt.split("/")
+                                            if len(_p)==3:
+                                                _dt = f"{_p[2]}-{_p[1].zfill(2)}-{_p[0].zfill(2)}"
+                                    except Exception:
+                                        _dt = _rc_date_str
+                                    if not _dt or len(_dt)<8: _dt = _rc_date_str
+                                    _rc_cheque_vals.append({
+                                        "nro":          _rch.get("nro",""),
+                                        "bank_id":      _bk,
+                                        "issuer_vat":   _rch.get("cuit",""),
+                                        "payment_date": _dt,
+                                        "amount":       float(_rch.get("importe") or 0),
+                                    })
+                                with st.spinner("Registrando cobro en Odoo..."):
+                                    _rc_ok, _rc_res = register_customer_payment(
+                                        models, uid, api_key,
+                                        _rc_pid, _rc_neto, _rc_cur_id,
+                                        _rc_date_str, _rc_jour_id,
+                                        move_ids=_rcsel_ids if _rcsel_ids else None,
+                                        memo=_rc_memo,
+                                        cheques=_rc_cheque_vals if _rc_cheque_vals else None)
+                                if _rc_ok:
+                                    st.toast(
+                                        f"Recibo registrado para {_rc_pname} — ARS {fmt_ars(_rc_neto)}", icon="✅")
+                                    search_partners_by_cuits.clear()
+                                    get_customer_unpaid_invoices.clear()
+                                    st.info(
+                                        "Presioná 🔄 Actualizar para ver "
+                                        "el estado actualizado.")
                                 else:
-                                    # Limpiar flag de confirmación para próxima vez
-                                    st.session_state.pop(_dup_key, None)
-                                    with st.spinner("Registrando cobro en Odoo..."):
-                                        _rc_ok, _rc_res = register_customer_payment(
-                                            models, uid, api_key,
-                                            _rc_pid, _rc_neto, _rc_cur_id,
-                                            _rc_date_str, _rc_jour_id,
-                                            move_ids=_rcsel_ids if _rcsel_ids else None,
-                                            memo=_rc_memo)
-                                    if _rc_ok:
-                                        st.toast(
-                                            f"Recibo registrado para {_rc_pname} — ARS {fmt_ars(_rc_neto)}", icon="✅")
-                                        search_partners_by_cuits.clear()
-                                        get_customer_unpaid_invoices.clear()
-                                        st.info(
-                                            "Presioná 🔄 Actualizar para ver "
-                                            "el estado actualizado.")
-                                    else:
-                                        st.error(f"Error al registrar en Odoo: {_rc_res}")
+                                    st.error(f"Error al registrar en Odoo: {_rc_res}")
 
     st.divider()
     st.caption(
