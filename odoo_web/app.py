@@ -602,7 +602,7 @@ def get_po_lines(models_url, uid, api_key, po_id):
     except Exception:
         return []
 
-@st.cache_data(ttl=30, show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False)
 def load_carpeta_full(models_url, uid, api_key, carpeta_id):
     """
     Carga bills, OC, pickings y detecta etapas de una carpeta desde Odoo.
@@ -2844,7 +2844,7 @@ is_admin = st.session_state.user_email in ADMIN_EMAILS
 # ───────────────────────────────────────────────────────────────────────────
 # ORDENES DE PAGO — helpers
 # ───────────────────────────────────────────────────────────────────────────
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def get_pending_bills(models_url, uid, api_key):
     """Todas las FAs de proveedor confirmadas y con saldo pendiente."""
     try:
@@ -2953,7 +2953,7 @@ def create_advance_payment(models, uid, api_key, partner_id, amount,
     models.execute_kw(ODOO_DB, uid, api_key, "account.payment", "action_post", [[pay_id]])
     return pay_id
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def get_pending_expense_sheets(models_url, uid, api_key):
     """Notas de gastos aprobadas pendientes de pago (hr.expense.sheet state=post)."""
     try:
@@ -2987,7 +2987,7 @@ def register_expense_payment(models, uid, api_key, sheet_id, payment_date, journ
         return False, str(e)
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=180, show_spinner=False)
 def search_partners_by_cuits(models_url, uid, api_key, cuits_tuple):
     """Busca socios en Odoo por tupla de CUITs. Retorna dict {cuit_sin_guiones: (id, name)}.
     Maneja que Odoo puede guardar el VAT con guiones (30-71189948-7) o sin (30711899487)."""
@@ -3053,7 +3053,7 @@ def search_partners_by_cuits(models_url, uid, api_key, cuits_tuple):
     except Exception:
         return {}
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=180, show_spinner=False)
 def get_customer_unpaid_invoices(models_url, uid, api_key, partner_ids_tuple):
     """Facturas de cliente sin pagar (posted, not_paid/partial/in_payment).
     Usa child_of para incluir contactos secundarios del mismo socio.
@@ -3078,44 +3078,58 @@ def register_customer_payment(models, uid, api_key,
                                partner_id, amount, currency_id,
                                payment_date, journal_id,
                                move_ids=None, memo=""):
-    """Registra un recibo de cobro de cliente.
-    Si move_ids, usa wizard (reconcilia con facturas). Sin move_ids, pago a cuenta."""
+    """Registra un recibo de cobro de cliente usando account.payment.group.
+    Flujo correcto para Odoo AR (módulo account_payments_group):
+      1. Crear account.payment.group con payment_type='receivable'
+      2. Crear account.payment vinculado al grupo (payment_group_id)
+      3. Opcionalmente linkear facturas (move_line_ids)
+      4. Llamar post() en el grupo para confirmar
+    Esto garantiza que el recibo aparezca en Clientes > Recibos."""
     try:
+        # 1. Obtener las líneas receivable de las facturas seleccionadas
+        inv_line_ids = []
         if move_ids:
-            ctx = {"active_model": "account.move",
-                   "active_ids": move_ids, "active_id": move_ids[0]}
-            vals = {"payment_date": payment_date, "journal_id": journal_id,
-                    "amount": float(amount)}
-            # l10n_ar: setear tipo de documento para que aparezca en Clientes > Recibos
-            _doc_type = _get_payment_doc_type(models, uid, api_key, "inbound", "customer", journal_id)
-            if _doc_type:
-                vals["l10n_latam_document_type_id"] = _doc_type
-            wiz_id = models.execute_kw(ODOO_DB, uid, api_key,
-                "account.payment.register", "create", [vals], {"context": ctx})
-            result = models.execute_kw(ODOO_DB, uid, api_key,
-                "account.payment.register", "action_create_payments",
-                [[wiz_id]], {"context": ctx})
-            return True, result
-        else:
-            vals = {
-                "payment_type": "inbound",
-                "partner_type": "customer",
-                "partner_id":   partner_id,
-                "amount":       float(amount),
-                "currency_id":  currency_id,
-                "date":         payment_date,
-                "journal_id":   journal_id,
-                "ref":          memo or "",
-            }
-            # l10n_ar: setear document type para que aparezca en Clientes > Recibos
-            _doc_type = _get_payment_doc_type(models, uid, api_key, "inbound", "customer", journal_id)
-            if _doc_type:
-                vals["l10n_latam_document_type_id"] = _doc_type
-            pay_id = models.execute_kw(ODOO_DB, uid, api_key,
-                "account.payment", "create", [vals])
-            models.execute_kw(ODOO_DB, uid, api_key,
-                "account.payment", "action_post", [[pay_id]])
-            return True, pay_id
+            inv_lines = models.execute_kw(ODOO_DB, uid, api_key,
+                "account.move.line", "search_read",
+                [[("move_id", "in", move_ids),
+                  ("account_id.account_type", "=", "asset_receivable"),
+                  ("reconciled", "=", False)]],
+                {"fields": ["id"], "limit": 100})
+            inv_line_ids = [l["id"] for l in inv_lines]
+
+        # 2. Crear el grupo (solo campos del grupo, sin pagos inline)
+        group_vals = {
+            "payment_type": "receivable",
+            "partner_id":   partner_id,
+            "currency_id":  currency_id,
+            "date":         payment_date,
+        }
+        if inv_line_ids:
+            group_vals["move_line_ids"] = [(6, 0, inv_line_ids)]
+        group_id = models.execute_kw(ODOO_DB, uid, api_key,
+            "account.payment.group", "create", [group_vals])
+
+        # 3. Crear el payment vinculado al grupo
+        #    Nota: en esta instalación el campo se llama "memo" (no "ref")
+        pay_vals = {
+            "payment_type":   "inbound",
+            "partner_type":   "customer",
+            "partner_id":     partner_id,
+            "amount":         float(amount),
+            "currency_id":    currency_id,
+            "date":           payment_date,
+            "journal_id":     journal_id,
+            "memo":           memo or "",
+            "payment_group_id": group_id,
+        }
+        models.execute_kw(ODOO_DB, uid, api_key,
+            "account.payment", "create", [pay_vals])
+
+        # 4. Confirmar el grupo
+        models.execute_kw(ODOO_DB, uid, api_key,
+            "account.payment.group", "post", [[group_id]])
+
+        return True, group_id
     except Exception as e:
         return False, str(e)
 
@@ -4920,9 +4934,20 @@ with tab_op:
 
         if _op_refresh:
             get_pending_bills.clear()
+            st.session_state.pop("_op_bills_ok", None)
 
-        with st.spinner("Cargando facturas pendientes..."):
-            _all_pending = get_pending_bills(models_url, uid, api_key)
+        if not st.session_state.get("_op_bills_ok"):
+            st.info("Presioná **Actualizar** para cargar las facturas pendientes.")
+            _all_pending = []
+        else:
+            with st.spinner("Cargando facturas pendientes..."):
+                _all_pending = get_pending_bills(models_url, uid, api_key)
+
+        # Marcar como cargado la primera vez que el usuario presiona Actualizar
+        if _op_refresh:
+            st.session_state["_op_bills_ok"] = True
+            with st.spinner("Cargando facturas pendientes..."):
+                _all_pending = get_pending_bills(models_url, uid, api_key)
 
         if not _all_pending:
             st.info("No hay facturas de proveedor pendientes de pago.")
@@ -5216,9 +5241,19 @@ with tab_op:
         _gasto_refresh = st.button("🔄 Actualizar", key="gasto_refresh_btn")
         if _gasto_refresh:
             get_pending_expense_sheets.clear()
+            st.session_state.pop("_op_sheets_ok", None)
 
-        with st.spinner("Cargando notas de gastos pendientes..."):
-            _sheets = get_pending_expense_sheets(models_url, uid, api_key)
+        if not st.session_state.get("_op_sheets_ok"):
+            st.info("Presioná **Actualizar** para cargar las notas de gastos pendientes.")
+            _sheets = []
+        else:
+            with st.spinner("Cargando notas de gastos pendientes..."):
+                _sheets = get_pending_expense_sheets(models_url, uid, api_key)
+
+        if _gasto_refresh:
+            st.session_state["_op_sheets_ok"] = True
+            with st.spinner("Cargando notas de gastos pendientes..."):
+                _sheets = get_pending_expense_sheets(models_url, uid, api_key)
 
         if not _sheets:
             st.info(
@@ -5869,106 +5904,151 @@ with tab_recibos:
         f"usá [Odoo Ventas]({ODOO_URL}/odoo/accounting/customers/invoices) directamente.")
 
 
+
+# ═══════════════════════════════════════════════════
+# TAB ASISTENTE — Chat Claude-Odoo
+# ═══════════════════════════════════════════════════
+with tab_chat:
+    import os as _os_chat
+    import requests as _req_chat
+    import json as _json_chat
+
+    st.subheader("🤖 Asistente Luminatec")
+    st.caption(
+        "Hacé preguntas sobre facturas, pagos, saldos, carpetas de importación o cualquier "
+        "dato de Odoo. El asistente puede consultar y, con tu confirmación, crear registros.")
+
+    _chat_bot_url   = _os_chat.getenv("BOT_URL", "").rstrip("/")
+    _chat_bot_token = _os_chat.getenv("CHAT_TOKEN", "")
+
+    if not _chat_bot_url or not _chat_bot_token:
+        st.warning(
+            "⚠️ El Asistente no está configurado. "
+            "Agregá `BOT_URL` y `CHAT_TOKEN` en los Secrets de Streamlit Cloud.")
+    else:
+        # ── Session state ──────────────────────────────────────────────────────
+        if "chat_history"  not in st.session_state: st.session_state.chat_history  = []
+        if "chat_pending"  not in st.session_state: st.session_state.chat_pending  = None
+        if "chat_user_id"  not in st.session_state:
+            st.session_state.chat_user_id = st.session_state.get("user_email", "user")
+
+        # ── Helpers ────────────────────────────────────────────────────────────
+        def _chat_send(message):
+            """Envía mensaje al bot y actualiza historial + pending."""
+            try:
+                r = _req_chat.post(
+                    f"{_chat_bot_url}/chat",
+                    json={
+                        "message": message,
+                        "user_id": st.session_state.chat_user_id,
+                        "history": st.session_state.chat_history,
+                    },
+                    headers={"X-Chat-Token": _chat_bot_token},
+                    timeout=60,
+                )
+                r.raise_for_status()
+                data = r.json()
+                st.session_state.chat_history = data.get("history", st.session_state.chat_history)
+                st.session_state.chat_pending = data.get("pending")   # None o dict con token
+                return data.get("answer", "")
+            except Exception as _e:
+                return f"❌ Error al contactar al asistente: {_e}"
+
+        def _chat_approve():
+            """Aprueba la acción pendiente."""
+            pending = st.session_state.chat_pending
+            if not pending:
+                return
+            try:
+                r = _req_chat.post(
+                    f"{_chat_bot_url}/chat/approve",
+                    json={"token": pending.get("token")},
+                    headers={"X-Chat-Token": _chat_bot_token},
+                    timeout=30,
+                )
+                r.raise_for_status()
+                data = r.json()
+                st.session_state.chat_history = data.get("history", st.session_state.chat_history)
+                st.session_state.chat_pending = None
+            except Exception as _e:
+                st.error(f"Error al aprobar: {_e}")
+
+        def _chat_cancel():
+            """Cancela la acción pendiente."""
+            pending = st.session_state.chat_pending
+            if not pending:
+                return
+            try:
+                r = _req_chat.post(
+                    f"{_chat_bot_url}/chat/cancel",
+                    json={"token": pending.get("token")},
+                    headers={"X-Chat-Token": _chat_bot_token},
+                    timeout=15,
+                )
+                r.raise_for_status()
+                data = r.json()
+                st.session_state.chat_history = data.get("history", st.session_state.chat_history)
+            except Exception as _e:
+                st.error(f"Error al cancelar: {_e}")
+            st.session_state.chat_pending = None
+
+        # ── Render historial de mensajes ────────────────────────────────────────
+        _chat_container = st.container()
+        with _chat_container:
+            for _msg in st.session_state.chat_history:
+                _role = _msg.get("role", "assistant")
+                _content = _msg.get("content", "")
+                if not _content:
+                    continue
+                if _role == "user":
+                    with st.chat_message("user"):
+                        st.markdown(_content)
+                else:
+                    with st.chat_message("assistant", avatar="🤖"):
+                        st.markdown(_content)
+
+        # ── Acción pendiente de aprobación ─────────────────────────────────────
+        _pending = st.session_state.chat_pending
+        if _pending:
+            st.divider()
+            st.warning(
+                f"⚠️ **Acción pendiente de confirmación:** "
+                f"{_pending.get('description', 'El asistente quiere realizar una acción en Odoo.')}")
+            _ap_col, _cn_col = st.columns(2)
+            if _ap_col.button("✅ Confirmar", type="primary", key="chat_approve_btn",
+                               use_container_width=True):
+                _chat_approve()
+                st.rerun()
+            if _cn_col.button("❌ Cancelar", key="chat_cancel_btn",
+                               use_container_width=True):
+                _chat_cancel()
+                st.rerun()
+
+        # ── Input de chat ──────────────────────────────────────────────────────
+        st.divider()
+        _col_input, _col_new = st.columns([5, 1])
+        with _col_new:
+            if st.button("🔄 Nueva", key="chat_new_conv", use_container_width=True,
+                         help="Reiniciar conversación"):
+                st.session_state.chat_history = []
+                st.session_state.chat_pending = None
+                st.rerun()
+
+        _user_input = st.chat_input(
+            "Preguntá algo, por ejemplo: ¿Cuál es el saldo pendiente de PETDUR?",
+            key="chat_input_box")
+
+        if _user_input:
+            # Agregar mensaje del usuario al historial local para render inmediato
+            st.session_state.chat_history.append({"role": "user", "content": _user_input})
+            with st.spinner("El asistente está pensando..."):
+                _answer = _chat_send(_user_input)
+            st.rerun()
+
+
 # ═══════════════════════════════════════════════════
 # TAB HISTORIAL
 # ═══════════════════════════════════════════════════
-# ═══════════════════════════════════════════════════
-# TAB ASISTENTE — CHAT CLAUDE-ODOO
-# ═══════════════════════════════════════════════════
-with tab_chat:
-    st.subheader("🤖 Asistente Claude-Odoo")
-
-    _BOT_URL   = os.getenv("BOT_URL", "").rstrip("/")
-    _CHAT_TOKEN = os.getenv("CHAT_TOKEN", "")
-    _CHAT_HEADERS = {"X-Chat-Token": _CHAT_TOKEN}
-
-    if not _BOT_URL or not _CHAT_TOKEN:
-        st.warning("⚙️ Configuración incompleta: definí BOT_URL y CHAT_TOKEN en Streamlit Secrets.")
-    else:
-        # ── Estado de sesión ──────────────────────────────
-        if "odoo_history"  not in st.session_state: st.session_state.odoo_history  = []
-        if "odoo_messages" not in st.session_state: st.session_state.odoo_messages = []
-        if "odoo_pending"  not in st.session_state: st.session_state.odoo_pending  = []
-
-        # ── Funciones de llamada ──────────────────────────
-        def _chat_send(message: str) -> dict:
-            r = requests.post(
-                f"{_BOT_URL}/chat",
-                json={"message": message, "user_id": st.session_state.get("user_email", "streamlit"),
-                      "history": st.session_state.odoo_history},
-                headers=_CHAT_HEADERS, timeout=180,
-            )
-            r.raise_for_status()
-            return r.json()
-
-        def _chat_approve(token: str) -> dict:
-            r = requests.post(f"{_BOT_URL}/chat/approve", json={"token": token},
-                              headers=_CHAT_HEADERS, timeout=60)
-            r.raise_for_status()
-            return r.json()
-
-        def _chat_cancel(token: str):
-            requests.post(f"{_BOT_URL}/chat/cancel", json={"token": token},
-                          headers=_CHAT_HEADERS, timeout=30)
-
-        # ── Historial de mensajes ─────────────────────────
-        for _msg in st.session_state.odoo_messages:
-            with st.chat_message(_msg["role"]):
-                st.markdown(_msg["content"])
-
-        # ── Acciones pendientes de aprobación ─────────────
-        for _action in st.session_state.odoo_pending:
-            _token = _action.get("token", "")
-            st.warning(f"Acción pendiente: **`{_action.get('tool')}`** — `{_action.get('input')}`")
-            _col1, _col2 = st.columns(2)
-            with _col1:
-                if st.button("✅ Aprobar", key=f"ok_{_token}"):
-                    _res = _chat_approve(_token)
-                    st.success(_res.get("result", "Aprobado."))
-                    st.session_state.odoo_pending = [a for a in st.session_state.odoo_pending if a["token"] != _token]
-                    st.rerun()
-            with _col2:
-                if st.button("❌ Cancelar", key=f"no_{_token}"):
-                    _chat_cancel(_token)
-                    st.session_state.odoo_pending = [a for a in st.session_state.odoo_pending if a["token"] != _token]
-                    st.rerun()
-
-        # ── Input del usuario ──────────────────────────────
-        _prompt = st.chat_input("Preguntá sobre tus datos de Odoo…")
-        if _prompt:
-            st.session_state.odoo_messages.append({"role": "user", "content": _prompt})
-            with st.chat_message("user"):
-                st.markdown(_prompt)
-            with st.chat_message("assistant"):
-                _ph = st.empty()
-                _ph.markdown("⏳ _Consultando…_")
-                try:
-                    _data   = _chat_send(_prompt)
-                    _answer = _data.get("answer", "_Sin respuesta_")
-                    st.session_state.odoo_history = _data.get("history", [])
-                    for _p in _data.get("pending", []):
-                        if _p not in st.session_state.odoo_pending:
-                            st.session_state.odoo_pending.append(_p)
-                    _ph.markdown(_answer)
-                    if _data.get("pending"):
-                        st.rerun()
-                except requests.Timeout:
-                    _ph.error("⏱️ El agente tardó demasiado. Intentá una consulta más simple.")
-                    _answer = "_Timeout_"
-                except requests.HTTPError as _e:
-                    _ph.error(f"❌ Error {_e.response.status_code}: {_e.response.text[:200]}")
-                    _answer = "_Error_"
-            st.session_state.odoo_messages.append({"role": "assistant", "content": _answer})
-
-        # ── Reset ──────────────────────────────────────────
-        if st.session_state.odoo_messages:
-            if st.button("🗑️ Nueva conversación"):
-                st.session_state.odoo_history  = []
-                st.session_state.odoo_messages = []
-                st.session_state.odoo_pending  = []
-                st.rerun()
-
-
 with tab_history:
     st.subheader("📋 Historial de esta sesión")
     _hist = st.session_state.get("history", [])
