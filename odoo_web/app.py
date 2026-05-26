@@ -5513,8 +5513,12 @@ with tab_recibos:
     # ── journals (reutiliza los mismos de Ordenes de Pago) ──────────────────
     _rc_jours = get_payment_journals(models_url, uid, api_key)
     if _rc_jours:
-        _rc_jour_opts = {label: jid for jid, label, _ in _rc_jours}
-        _rc_jour_cur  = {label: cur for _,   label, cur in _rc_jours}
+        # Ordenar: "cheque" primero (son los más usados en Recibos de Cobro)
+        def _cheque_first(item):
+            return 0 if "cheque" in item[1].lower() else 1
+        _rc_jours_sorted = sorted(_rc_jours, key=_cheque_first)
+        _rc_jour_opts = {label: jid for jid, label, _ in _rc_jours_sorted}
+        _rc_jour_cur  = {label: cur for _,   label, cur in _rc_jours_sorted}
     else:
         _rc_jour_opts, _rc_jour_cur = {}, {}
 
