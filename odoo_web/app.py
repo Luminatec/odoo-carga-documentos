@@ -3126,8 +3126,26 @@ def register_customer_payment(models, uid, api_key,
             "account.payment", "create", [pay_vals])
 
         # 4. Confirmar el grupo
-        models.execute_kw(ODOO_DB, uid, api_key,
-            "account.payment.group", "post", [[group_id]])
+        # Nota: post() retorna None en esta instalacion, lo que causa un error
+        # de marshalling en XML-RPC. Se ignora ese error especifico y se verifica
+        # el estado real del grupo para confirmar que se confirmo correctamente.
+        try:
+            models.execute_kw(ODOO_DB, uid, api_key,
+                "account.payment.group", "post", [[group_id]])
+        except Exception as post_err:
+            err_str = str(post_err)
+            if "marshal" in err_str.lower() or "none" in err_str.lower() or "nil" in err_str.lower():
+                # post() retorno None -> XML-RPC no puede serializarlo,
+                # pero la accion se ejecuto. Verificar estado real.
+                try:
+                    grp_check = models.execute_kw(ODOO_DB, uid, api_key,
+                        "account.payment.group", "read",
+                        [[group_id]], {"fields": ["state", "name"]})
+                    if grp_check and grp_check[0].get("state") == "posted":
+                        return True, group_id  # Confirmado OK a pesar del error XML-RPC
+                except Exception:
+                    pass
+            raise  # Re-lanzar si no es el error esperado
 
         return True, group_id
     except Exception as e:
