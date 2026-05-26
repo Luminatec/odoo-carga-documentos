@@ -3111,6 +3111,19 @@ def register_customer_payment(models, uid, api_key,
 
         # 3. Crear el payment vinculado al grupo
         #    Nota: en esta instalación el campo se llama "memo" (no "ref")
+
+        # 3a. Buscar la linea de metodo de pago "Cheque de Terceros Existente"
+        #     para el journal seleccionado (code: out_third_party_checks = Existing Third Party Checks)
+        try:
+            pml_lines = models.execute_kw(ODOO_DB, uid, api_key,
+                "account.payment.method.line", "search_read",
+                [[["journal_id", "=", journal_id],
+                  ["payment_method_id.code", "=", "out_third_party_checks"]]],
+                {"fields": ["id"], "limit": 1})
+            pml_id = pml_lines[0]["id"] if pml_lines else None
+        except Exception:
+            pml_id = None
+
         pay_vals = {
             "payment_type":   "inbound",
             "partner_type":   "customer",
@@ -3122,6 +3135,9 @@ def register_customer_payment(models, uid, api_key,
             "memo":           memo or "",
             "payment_group_id": group_id,
         }
+        if pml_id:
+            pay_vals["payment_method_line_id"] = pml_id
+
         models.execute_kw(ODOO_DB, uid, api_key,
             "account.payment", "create", [pay_vals])
 
