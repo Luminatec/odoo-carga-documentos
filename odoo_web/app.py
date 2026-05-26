@@ -3502,7 +3502,7 @@ with tab_bills:
 
                 # Proveedor por nombre como fallback si no hay CUIT
                 prov_i = st.text_input("Nombre del proveedor (fallback si no hay CUIT)",
-                            value="" if _partner_preloaded else extracted.get("proveedor","")[:60],
+                            value=(_partner_preloaded[1] if _partner_preloaded else extracted.get("proveedor","")[:60]),
                             placeholder="Nombre exacto en Odoo",
                             help="Se usa solo si el CUIT no resuelve a ningún proveedor")
 
