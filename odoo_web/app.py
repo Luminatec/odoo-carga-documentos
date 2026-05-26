@@ -1993,6 +1993,20 @@ def get_pricelists(_models_url, uid, api_key):
         return []
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_ar_accounts(_models_url, uid, api_key, account_type=None):
+    """Cuentas contables filtradas por tipo (asset_receivable / liability_payable)."""
+    try:
+        m = xmlrpc.client.ServerProxy(_models_url, allow_none=True)
+        domain = []
+        if account_type:
+            domain = [["account_type", "=", account_type]]
+        rows = m.execute_kw(ODOO_DB, uid, api_key, "account.account", "search_read",
+            [domain], {"fields": ["id", "name", "code"], "order": "code asc", "limit": 200})
+        return [(r["id"], f"{r['code']} {r['name']}") for r in rows]
+    except Exception:
+        return []
+
 def create_full_partner(models, uid, api_key, vals_dict):
     """
     Crea un res.partner completo en Odoo.
@@ -4660,9 +4674,22 @@ with tab_contacts:
         if _tr == "EX" and "EXENTO" in _an_up:
             _def_afip_idx = _ai; break
 
+    # Pre-cargar cuentas contables
+    _ct_accts_rec = get_ar_accounts(models_url, uid, api_key, "asset_receivable")
+    _ct_accts_pay = get_ar_accounts(models_url, uid, api_key, "liability_payable")
+    _ct_acct_rec_map = {n: i for i, n in _ct_accts_rec}
+    _ct_acct_pay_map = {n: i for i, n in _ct_accts_pay}
+
     with st.form("ct_form"):
+        # ── Persona / Empresa ──────────────────────────────────────────────
+        _ct_company_type = st.radio(
+            "Tipo de entidad", ["🏢 Empresa", "👤 Persona"],
+            horizontal=True, index=0,
+        )
+        _ct_is_company_val = (_ct_company_type == "🏢 Empresa")
+
         # ── Tipo de contacto ───────────────────────────────────────────────
-        st.markdown("##### 🏷️ Tipo")
+        st.markdown("##### 🏷️ Rol")
         _ct_c1, _ct_c2 = st.columns(2)
         _ct_is_customer = _ct_c1.checkbox("Es cliente", value=True)
         _ct_is_supplier = _ct_c2.checkbox("Es proveedor", value=False)
@@ -4715,6 +4742,12 @@ with tab_contacts:
         _ct_pt_sel    = _ct_v2.selectbox("Términos de pago (ventas)", _ct_pt_opts)
         _ct_pl_opts   = ["— Predeterminado —"] + list(_plist_map.keys())
         _ct_pl_sel    = _ct_v3.selectbox("Lista de precios", _ct_pl_opts)
+        # Referido — solo para clientes
+        _ct_referido  = st.text_input(
+            "Referido por (cliente)",
+            placeholder="Escribí el nombre del referido y presioná Tab",
+            help="Ingresá el nombre del contacto que refirió a este cliente",
+        )
 
         # ── Compras ────────────────────────────────────────────────────────
         st.markdown("##### 🛒 Compras")
@@ -4723,6 +4756,25 @@ with tab_contacts:
             key="ct_pt_purch")
         _ct_ref_purch = _ct_p2.text_input("Referencia del proveedor",
             placeholder="Código que el proveedor nos asigna")
+
+        # ── Contabilidad ───────────────────────────────────────────────────
+        st.markdown("##### 📊 Contabilidad")
+        _ct_acct_c1, _ct_acct_c2 = st.columns(2)
+        _ct_rec_opts = ["— Predeterminada —"] + list(_ct_acct_rec_map.keys())
+        _ct_pay_opts = ["— Predeterminada —"] + list(_ct_acct_pay_map.keys())
+        # Default: primera cuenta de cada tipo
+        _ct_rec_def = 1 if _ct_accts_rec else 0
+        _ct_pay_def = 1 if _ct_accts_pay else 0
+        _ct_acct_rec_sel = _ct_acct_c1.selectbox(
+            "Cuenta por cobrar", _ct_rec_opts, index=_ct_rec_def,
+            help="Cuenta contable para créditos por ventas")
+        _ct_acct_pay_sel = _ct_acct_c2.selectbox(
+            "Cuenta por pagar", _ct_pay_opts, index=_ct_pay_def,
+            help="Cuenta contable para proveedores")
+        _ct_credit_limit = st.number_input(
+            "Límite de crédito", min_value=0.0, value=0.0,
+            step=1000.0, format="%.2f",
+            help="0 = sin límite")
 
         # ── Notas ──────────────────────────────────────────────────────────
         st.markdown("##### 📝 Notas internas")
@@ -4740,8 +4792,9 @@ with tab_contacts:
             with st.spinner("Creando contacto en Odoo..."):
                 try:
                     _ct_vals = {
-                        "name":       _ct_name.strip(),
-                        "is_company": True,
+                        "name":          _ct_name.strip(),
+                        "is_company":    _ct_is_company_val,
+                        "company_type":  "company" if _ct_is_company_val else "person",
                         "customer_rank": 1 if _ct_is_customer else 0,
                         "supplier_rank": 1 if _ct_is_supplier else 0,
                     }
@@ -4790,6 +4843,28 @@ with tab_contacts:
                     # Notas
                     if _ct_notes.strip():
                         _ct_vals["comment"] = _ct_notes.strip()
+
+                    # Referido (buscar por nombre si se ingresó)
+                    if _ct_referido.strip():
+                        try:
+                            _ref_res = search_partners(
+                                models_url, uid, api_key, _ct_referido.strip(), limit=1)
+                            if _ref_res:
+                                _ct_vals["ref"] = _ref_res[0][1]  # nombre del partner encontrado
+                            else:
+                                _ct_vals["ref"] = _ct_referido.strip()
+                        except Exception:
+                            _ct_vals["ref"] = _ct_referido.strip()
+
+                    # Cuentas contables
+                    if _ct_acct_rec_sel != "— Predeterminada —" and _ct_acct_rec_sel in _ct_acct_rec_map:
+                        _ct_vals["property_account_receivable_id"] = _ct_acct_rec_map[_ct_acct_rec_sel]
+                    if _ct_acct_pay_sel != "— Predeterminada —" and _ct_acct_pay_sel in _ct_acct_pay_map:
+                        _ct_vals["property_account_payable_id"] = _ct_acct_pay_map[_ct_acct_pay_sel]
+
+                    # Límite de crédito
+                    if _ct_credit_limit > 0:
+                        _ct_vals["credit_limit"] = _ct_credit_limit
 
                     _new_pid = create_full_partner(models, uid, api_key, _ct_vals)
                     _new_url = odoo_url("res.partner", _new_pid)
