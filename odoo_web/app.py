@@ -2758,26 +2758,44 @@ with st.sidebar:
 </div>""", unsafe_allow_html=True)
     st.markdown("---")
 
-    # ── Selector de entorno ─────────────────────────────────────────────
-    _is_test = st.toggle(
-        "🧪 Modo testing",
-        value=(st.session_state.get("odoo_env") == "test"),
-        help="Cambia al entorno de prueba de Odoo (requiere nuevo login)",
+    # ── Selector de entorno (solo ivarela@luminatec.com) ────────────────
+    _dev_email = "ivarela@luminatec.com"
+    _current_email = st.session_state.get("user_email", "")
+    # Mostrar el toggle solo si ya está logueado como dev, o si aún no hay sesión
+    # pero el email ingresado coincide — para eso lo mostramos siempre antes del login
+    # y lo ocultamos post-login si no es el dev.
+    _show_env_toggle = (
+        not st.session_state.get("logged_in")          # antes del login: visible
+        or _current_email == _dev_email                 # o es el dev
     )
-    if _is_test and st.session_state.get("odoo_env") != "test":
-        st.session_state["odoo_env"] = "test"
-        st.session_state.logged_in    = False
-        st.session_state.odoo_uid     = None
-        st.session_state.odoo_password = ""
-        st.rerun()
-    elif not _is_test and st.session_state.get("odoo_env") != "prod":
-        st.session_state["odoo_env"] = "prod"
-        st.session_state.logged_in    = False
-        st.session_state.odoo_uid     = None
-        st.session_state.odoo_password = ""
-        st.rerun()
-    if st.session_state.get("odoo_env") == "test":
-        st.warning("🧪 **Entorno de TESTING**")
+    if _show_env_toggle:
+        _is_test = st.toggle(
+            "🧪 Modo testing",
+            value=(st.session_state.get("odoo_env") == "test"),
+            help="Entorno de prueba — solo disponible para el administrador",
+        )
+        if _is_test and st.session_state.get("odoo_env") != "test":
+            st.session_state["odoo_env"] = "test"
+            st.session_state.logged_in    = False
+            st.session_state.odoo_uid     = None
+            st.session_state.odoo_password = ""
+            st.rerun()
+        elif not _is_test and st.session_state.get("odoo_env") != "prod":
+            st.session_state["odoo_env"] = "prod"
+            st.session_state.logged_in    = False
+            st.session_state.odoo_uid     = None
+            st.session_state.odoo_password = ""
+            st.rerun()
+        if st.session_state.get("odoo_env") == "test":
+            st.warning("🧪 **Entorno de TESTING**")
+    else:
+        # Usuario no-dev logueado: forzar producción silenciosamente
+        if st.session_state.get("odoo_env") == "test":
+            st.session_state["odoo_env"] = "prod"
+            st.session_state.logged_in    = False
+            st.session_state.odoo_uid     = None
+            st.session_state.odoo_password = ""
+            st.rerun()
     st.markdown("---")
 
     if not st.session_state.logged_in:
