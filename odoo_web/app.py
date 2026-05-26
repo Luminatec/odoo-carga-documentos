@@ -3679,7 +3679,7 @@ with tab_bills:
                             _latam_num = _latam_num[1:]
 
                         move_id = create_vendor_bill(models, uid, api_key,
-                            partner_id=partner_id, ref=ref_i,
+                            partner_id=partner_id, ref=concepto_i.strip() or ref_i,
                             invoice_date=fecha_i or False,
                             invoice_date_due=fecha_vto_i or None,
                             filename=uf.name, file_bytes=file_bytes, mimetype=mimetype,
