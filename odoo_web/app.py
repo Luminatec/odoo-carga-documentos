@@ -160,6 +160,8 @@ st.markdown("""
 
 ODOO_URL = "https://gpowerbyte-luminatec.odoo.com"
 ODOO_DB  = "gpowerbyte-luminatec-master-22753148"
+TEST_ODOO_URL = "https://gpowerbyte-luminatec-test-31645353.dev.odoo.com"
+TEST_ODOO_DB  = "gpowerbyte-luminatec-test-31645353"
 
 # Emails con acceso a Importaciones.
 # BASE_ADMIN_EMAILS siempre tienen acceso, independientemente del secret.
@@ -222,7 +224,6 @@ DECALOGO = [
 # ───────────────────────────────────────────────────
 # PROXY DE MODELOS (stateless, compartido entre usuarios)
 # ───────────────────────────────────────────────────
-@st.cache_resource(show_spinner=False)
 def get_models_proxy():
     """ServerProxy para account.move, etc. Es stateless — uid y password van por llamada."""
     return xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object", allow_none=True)
@@ -2734,6 +2735,13 @@ for k, v in DEFAULTS.items():
         st.session_state[k] = v
 
 
+# ─── Entorno activo (producción / testing) ───────────────────────────────
+if "odoo_env" not in st.session_state:
+    st.session_state["odoo_env"] = "prod"
+if st.session_state["odoo_env"] == "test":
+    ODOO_URL = TEST_ODOO_URL
+    ODOO_DB  = TEST_ODOO_DB
+
 # ═══════════════════════════════════════════════════
 # SIDEBAR
 # ═══════════════════════════════════════════════════
@@ -2746,6 +2754,28 @@ with st.sidebar:
   <span class="lumi-logo-dot">🛒</span>
   <span class="lumi-logo-text">LUMINATEC</span>
 </div>""", unsafe_allow_html=True)
+    st.markdown("---")
+
+    # ── Selector de entorno ─────────────────────────────────────────────
+    _is_test = st.toggle(
+        "🧪 Modo testing",
+        value=(st.session_state.get("odoo_env") == "test"),
+        help="Cambia al entorno de prueba de Odoo (requiere nuevo login)",
+    )
+    if _is_test and st.session_state.get("odoo_env") != "test":
+        st.session_state["odoo_env"] = "test"
+        st.session_state.logged_in    = False
+        st.session_state.odoo_uid     = None
+        st.session_state.odoo_password = ""
+        st.rerun()
+    elif not _is_test and st.session_state.get("odoo_env") != "prod":
+        st.session_state["odoo_env"] = "prod"
+        st.session_state.logged_in    = False
+        st.session_state.odoo_uid     = None
+        st.session_state.odoo_password = ""
+        st.rerun()
+    if st.session_state.get("odoo_env") == "test":
+        st.warning("🧪 **Entorno de TESTING**")
     st.markdown("---")
 
     if not st.session_state.logged_in:
@@ -2794,7 +2824,8 @@ with st.sidebar:
             st.rerun()
 
     st.divider()
-    st.caption(f"Base de datos: `{ODOO_DB}`")
+    _env_label = "🟢 Producción" if st.session_state.get("odoo_env","prod") == "prod" else "🧪 Testing"
+    st.caption(f"{_env_label} · `{ODOO_DB}`")
 
 
 # ═══════════════════════════════════════════════════
@@ -3378,8 +3409,29 @@ with tab_bills:
                 st.warning(f"⚠️ CUIT **{_cuit_raw}** no encontrado en Odoo.")
                 st.checkbox("➕ Crear nuevo proveedor en Odoo", key=_create_new_vend_key)
             else:
-                # Sin CUIT todavía → guiar al usuario, no mostrar form de creación
-                st.info("ℹ️ Ingresá el CUIT del proveedor para buscarlo en Odoo.")
+                # Sin CUIT → permitir buscar por nombre o CUIT, o crear nuevo proveedor
+                _search_query = st.text_input(
+                    "🔍 Buscar proveedor por nombre o CUIT",
+                    placeholder="Ej: Acme SA  ó  30-12345678-9",
+                    key=f"vend_search_{uf.name}",
+                    help="Buscá en Odoo por nombre o CUIT del proveedor",
+                )
+                if _search_query and _search_query.strip():
+                    _srch_results = search_partners(
+                        models_url, uid, api_key, _search_query.strip(), limit=6)
+                    if _srch_results:
+                        _srch_opts = {f"{r[1]} ({r[2]})": r[0] for r in _srch_results}
+                        _chosen_lbl = st.selectbox(
+                            "Proveedor encontrado",
+                            options=list(_srch_opts.keys()),
+                            key=f"vend_sel_{uf.name}",
+                        )
+                        if _chosen_lbl:
+                            st.session_state[f"partner_override_{uf.name}"] = _srch_opts[_chosen_lbl]
+                            st.session_state[f"partner_name_{uf.name}"]     = _chosen_lbl
+                    else:
+                        st.info("No se encontraron proveedores. Podés crear uno nuevo.")
+                st.checkbox("➕ Crear nuevo proveedor en Odoo", key=_create_new_vend_key)
 
             if st.session_state.get(_create_new_vend_key):
                 with st.expander("📝 Datos del nuevo proveedor", expanded=True):
@@ -3454,15 +3506,31 @@ with tab_bills:
                             placeholder="Nombre exacto en Odoo",
                             help="Se usa solo si el CUIT no resuelve a ningún proveedor")
 
-                # Montos extraídos (sólo referencia) — sin key= para evitar que
-                # session_state cachee "" de la primera renderización
-                _ca, _cb, _cc = st.columns(3)
-                _ca.text_input("Neto gravado (ref.)",
-                    value=fmt_ars(extracted.get("neto","")), disabled=True)
-                _cb.text_input("IVA (ref.)",
-                    value=fmt_ars(extracted.get("iva","")), disabled=True)
-                _cc.text_input("Total c/imp. (ref.)",
-                    value=fmt_ars(extracted.get("total","")), disabled=True)
+                # Monto a cargar (editable; por defecto: total con IVA o neto si no hay total)
+                _ca, _cb = st.columns([2, 1])
+                def _to_float_safe(v):
+                    try:
+                        return float(str(v).replace(".", "").replace(",", ".").strip())
+                    except Exception:
+                        return 0.0
+                _total_ref = extracted.get("total") or ""
+                _neto_ref  = extracted.get("neto")  or ""
+                _iva_ref   = extracted.get("iva")   or ""
+                _default_amount = _to_float_safe(_total_ref) or _to_float_safe(_neto_ref)
+                amount_i = _ca.number_input(
+                    "💰 Importe a cargar *",
+                    min_value=0.0,
+                    value=_default_amount,
+                    step=0.01,
+                    format="%.2f",
+                    key=f"amount_i_{uf.name}",
+                    help="Monto que se cargará en Odoo. Por defecto: total con IVA.",
+                )
+                _ca.caption(
+                    f"Extraído → Neto: {fmt_ars(_neto_ref)}  |  "
+                    f"IVA: {fmt_ars(_iva_ref)}  |  "
+                    f"Total: {fmt_ars(_total_ref)}"
+                )
 
                 st.text_area("Notas internas", height=55, key=f"notas_{uf.name}")
 
@@ -3512,6 +3580,11 @@ with tab_bills:
                 with st.spinner("Procesando..."):
                     try:
                         partner_id = False
+                        # 0. Proveedor seleccionado vía búsqueda por nombre/CUIT (sin-CUIT branch)
+                        _ov_id = st.session_state.get(f"partner_override_{uf.name}")
+                        if _ov_id:
+                            partner_id = _ov_id
+                            st.caption(f"Proveedor seleccionado: {st.session_state.get(f'partner_name_{uf.name}','')}")
                         # 1. Buscar por CUIT ingresado en el form
                         if cuit_i and cuit_i.strip():
                             _found = search_partner_by_cuit(models_url, uid, api_key, cuit_i.strip())
@@ -3569,18 +3642,13 @@ with tab_bills:
                         if _latam_num and re.match(r"^[A-Za-z]\d", _latam_num):
                             _latam_num = _latam_num[1:]
 
-                        # 8. Monto neto: usar total si es Monotributo y neto está vacío
-                        _neto_val = extracted.get("neto") or None
-                        if not _neto_val:
-                            _neto_val = extracted.get("total") or None
-
                         move_id = create_vendor_bill(models, uid, api_key,
                             partner_id=partner_id, ref=ref_i,
                             invoice_date=fecha_i or False,
                             invoice_date_due=fecha_vto_i or None,
                             filename=uf.name, file_bytes=file_bytes, mimetype=mimetype,
                             account_id=account_id_sel,
-                            amount_neto=_neto_val,
+                            amount_neto=amount_i if amount_i else None,
                             analytic_account_id=analytic_id_sel,
                             product_id=product_id_sel,
                             l10n_latam_document_number=_latam_num or None)
