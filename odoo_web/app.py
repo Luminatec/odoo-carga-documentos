@@ -2007,6 +2007,18 @@ def get_ar_accounts(_models_url, uid, api_key, account_type=None):
     except Exception:
         return []
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_all_partners_names(_models_url, uid, api_key):
+    """Lista de (id, name) de todos los contactos activos en Odoo."""
+    try:
+        m = xmlrpc.client.ServerProxy(_models_url, allow_none=True)
+        rows = m.execute_kw(ODOO_DB, uid, api_key, "res.partner", "search_read",
+            [[["active", "=", True], ["is_company", "=", True]]],
+            {"fields": ["id", "name"], "order": "name asc", "limit": 800})
+        return [(r["id"], r["name"]) for r in rows]
+    except Exception:
+        return []
+
 def create_full_partner(models, uid, api_key, vals_dict):
     """
     Crea un res.partner completo en Odoo.
@@ -4680,6 +4692,10 @@ with tab_contacts:
     _ct_acct_rec_map = {n: i for i, n in _ct_accts_rec}
     _ct_acct_pay_map = {n: i for i, n in _ct_accts_pay}
 
+    # Cargar lista de partners para referido
+    _ct_all_partners = get_all_partners_names(models_url, uid, api_key)
+    _ct_partner_names = ["— Sin referido —"] + [n for _, n in _ct_all_partners]
+
     with st.form("ct_form"):
         # ── Persona / Empresa ──────────────────────────────────────────────
         _ct_company_type = st.radio(
@@ -4743,10 +4759,11 @@ with tab_contacts:
         _ct_pl_opts   = ["— Predeterminado —"] + list(_plist_map.keys())
         _ct_pl_sel    = _ct_v3.selectbox("Lista de precios", _ct_pl_opts)
         # Referido — solo para clientes
-        _ct_referido  = st.text_input(
+        _ct_referido = st.selectbox(
             "Referido por (cliente)",
-            placeholder="Escribí el nombre del referido y presioná Tab",
-            help="Ingresá el nombre del contacto que refirió a este cliente",
+            options=_ct_partner_names,
+            index=0,
+            help="Contacto de Odoo que refirió a este cliente",
         )
 
         # ── Compras ────────────────────────────────────────────────────────
@@ -4844,17 +4861,9 @@ with tab_contacts:
                     if _ct_notes.strip():
                         _ct_vals["comment"] = _ct_notes.strip()
 
-                    # Referido (buscar por nombre si se ingresó)
-                    if _ct_referido.strip():
-                        try:
-                            _ref_res = search_partners(
-                                models_url, uid, api_key, _ct_referido.strip(), limit=1)
-                            if _ref_res:
-                                _ct_vals["ref"] = _ref_res[0][1]  # nombre del partner encontrado
-                            else:
-                                _ct_vals["ref"] = _ct_referido.strip()
-                        except Exception:
-                            _ct_vals["ref"] = _ct_referido.strip()
+                    # Referido
+                    if _ct_referido and _ct_referido != "— Sin referido —":
+                        _ct_vals["ref"] = _ct_referido
 
                     # Cuentas contables
                     if _ct_acct_rec_sel != "— Predeterminada —" and _ct_acct_rec_sel in _ct_acct_rec_map:
