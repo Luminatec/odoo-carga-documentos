@@ -2450,156 +2450,227 @@ def extract_oc_fields(file_bytes):
     return fields, all_tables, text
 
 
-def extract_excel_oc_fields(file_bytes):
+def extract_excel_oc_fields(file_bytes, filename=""):
     """
-    Parser para Órdenes de Compra en formato Excel.
-    Intenta bot primero, luego parser openpyxl.
-    Retorna (fields_dict) con estructura compatible con oc_fields.
+    Parser flexible para pedidos en Excel (.xls / .xlsx).
+    Soporta múltiples formatos de cliente: CANT./CANTIDAD/QTY, IMP.UNIT./PRECIO, etc.
+    También extrae metadata (CUIT, razón social, fecha) de las filas de encabezado.
     """
-    _bot = _bot_extract(
-        file_bytes, "oc.xlsx",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "oc")
-    if _bot.get("lineas") or _bot.get("numero_oc"):
-        _bot["_source"] = "bot"
-        return _bot
+    # ── intentar bot primero (solo xlsx) ─────────────────────────────────
+    _fname = (filename or "oc.xlsx").lower()
+    if _fname.endswith(".xlsx"):
+        _bot = _bot_extract(
+            file_bytes, "oc.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "oc")
+        if _bot.get("lineas") or _bot.get("numero_oc"):
+            _bot["_source"] = "bot"
+            return _bot
 
     fields = {
-        "cuit": "", "numero_oc": "", "fecha": "", "fecha_iso": "",
+        "cuit": "", "cliente": "", "numero_oc": "", "fecha": "", "fecha_iso": "",
         "condiciones_pago": "", "dias_pago": None,
         "lineas": [],
         "subtotal_neto": "", "iva_21": "", "iva_105": "", "total": "",
         "fuente": "excel",
     }
+
+    # ── cargar el workbook (xls o xlsx) ──────────────────────────────────
+    all_rows = []
     try:
-        import openpyxl
-        wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
-        ws = wb.active
+        if _fname.endswith(".xls"):
+            import xlrd
+            wb = xlrd.open_workbook(file_contents=file_bytes)
+            ws = wb.sheet_by_index(0)
+            # Convertir a lista de tuplas igual que openpyxl
+            for r in range(ws.nrows):
+                row = []
+                for c in range(ws.ncols):
+                    cell = ws.cell(r, c)
+                    # xlrd type 0=empty 1=text 2=number 3=date 4=bool 5=error
+                    if cell.ctype == 0:
+                        row.append(None)
+                    elif cell.ctype == 3:
+                        # Fecha serial Excel → string
+                        try:
+                            import datetime
+                            dt = xlrd.xldate_as_datetime(cell.value, wb.datemode)
+                            row.append(dt.strftime("%d/%m/%Y"))
+                        except Exception:
+                            row.append(cell.value)
+                    else:
+                        row.append(cell.value)
+                all_rows.append(tuple(row))
+        else:
+            from openpyxl import load_workbook
+            wb2 = load_workbook(BytesIO(file_bytes), data_only=True)
+            ws2 = wb2.active
+            all_rows = list(ws2.iter_rows(values_only=True))
     except Exception:
         return fields
 
-    # Paso 1: encontrar la primera fila que tenga 'SKU', 'Modelo', 'Pedido' o 'Cantidad'
+    # ── Paso 0: extraer metadata de filas pre-header ──────────────────────
+    # Buscar CUIT, nombre de cliente, fecha, NRO PEDIDO en filas libres
+    _cuit_re = re.compile(r"(\d{2}-\d{8}-\d|\d{11})")
+    _fecha_re = re.compile(r"(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})")
+    for row in all_rows[:20]:
+        vals = [str(v or "").strip() for v in row]
+        joined = " ".join(vals)
+        # CUIT
+        if not fields["cuit"]:
+            _cm = _cuit_re.search(joined)
+            if _cm:
+                fields["cuit"] = re.sub(r"[\s\-]", "", _cm.group(1))
+        # Fecha
+        if not fields["fecha"]:
+            _fm = _fecha_re.search(joined)
+            if _fm:
+                fields["fecha"] = _fm.group(1)
+        # Cliente: buscar patrón "CLIENTE <valor>" en celdas adyacentes
+        for ci, v in enumerate(vals):
+            vl = v.lower()
+            if vl in ("cliente", "razon social", "razón social", "cliente:") and ci + 1 < len(vals):
+                _cname = vals[ci + 1].strip()
+                if _cname and not fields["cliente"]:
+                    fields["cliente"] = _cname
+            if vl in ("fecha", "fecha:", "date") and ci + 1 < len(vals):
+                _fv = vals[ci + 1].strip()
+                if _fv and not fields["fecha"]:
+                    fields["fecha"] = _fv
+            if vl.startswith("nro") and "pedido" in vl and ci + 1 < len(vals):
+                _nv = vals[ci + 1].strip()
+                if _nv:
+                    fields["numero_oc"] = _nv
+        # Si la fecha quedó como float (Excel serial) convertirla
+        if fields["fecha"] and not fields["fecha_iso"]:
+            try:
+                _ffl = float(str(fields["fecha"]))
+                import xlrd as _xlrd2
+                import datetime as _dt2
+                _fdt = _xlrd2.xldate_as_datetime(_ffl, 0)
+                fields["fecha"] = _fdt.strftime("%d/%m/%Y")
+                fields["fecha_iso"] = _fdt.strftime("%Y-%m-%d")
+            except Exception:
+                pass
+
+    # ── Paso 1: detectar fila de encabezado de productos ─────────────────
+    # Aliases de columnas — normalizamos quitando puntos, espacios y acentos
+    def _norm(s):
+        s = str(s or "").lower().strip()
+        s = s.replace(".", "").replace("á","a").replace("é","e").replace("í","i")
+        s  = s.replace("ó","o").replace("ú","u").replace("  "," ")
+        return s
+
+    # SKU / código
+    _SKU_KW    = {"cod", "code", "codigo", "sku", "ref", "referencia", "art", "articulo"}
+    # Descripción / modelo / producto
+    _PROD_KW   = {"producto", "productos", "descripcion", "descripcion", "detalle",
+                  "modelo", "model", "nombre", "item", "articulo", "art", "denominacion"}
+    # Cantidad pedida
+    _QTY_KW    = {"cant", "cantidad", "qty", "pedido", "unidades", "u", "ctd",
+                  "cant pedida", "cantidad pedida", "order qty", "pedir"}
+    # Precio unitario
+    _PRICE_KW  = {"imp unit", "precio unit", "precio unitario", "p unit", "unitario",
+                  "precio", "pvp", "price", "valor unit", "valor unitario",
+                  "imp unit s/iva", "prec unit"}
+    # Subtotal / importe total
+    _TOTAL_KW  = {"imp total", "total", "subtotal", "importe", "monto",
+                  "imp tot", "total linea", "subtot"}
+    # Observaciones
+    _OBS_KW    = {"obs", "observaciones", "observacion", "nota", "notas", "comment"}
+
     col_map = {}
     hdr_row_idx = None
-    all_rows = list(ws.iter_rows(values_only=True))
-    # Palabras que identifican una fila de encabezado (sin importar el orden de columnas)
-    _HDR_WORDS = {
-        'sku', 'ean', 'ean13',
-        'pedido', 'cantidad', 'qty',
-        'modelo', 'model',
-        'producto', 'descripcion', 'descripción', 'nombre',
-        'precio', 'pvp', 'unitario',
-        'codigo', 'código',
-    }
-    for ri, row in enumerate(all_rows[:25]):
-        vals = [str(c or "").strip().lower() for c in row]
-        if sum(1 for v in vals if v in _HDR_WORDS) >= 2:
+    for ri, row in enumerate(all_rows[:30]):
+        norms = [_norm(c) for c in row]
+        hits = sum(1 for n in norms if (
+            n in _SKU_KW or n in _PROD_KW or n in _QTY_KW or
+            n in _PRICE_KW or n in _TOTAL_KW
+        ))
+        if hits >= 2:
             hdr_row_idx = ri
-            for ci, h in enumerate(vals):
-                if h == 'sku':
-                    col_map['sku'] = ci
-                elif h in ('ean', 'ean13', 'codigo', 'código'):
-                    if 'ean' not in col_map:
-                        col_map['ean'] = ci
-                elif h in ('modelo', 'model', 'nombre', 'producto', 'descripcion', 'descripción'):
-                    if 'modelo' not in col_map:
-                        col_map['modelo'] = ci
-                elif h == 'iva':
-                    col_map['iva'] = ci
-                elif h in ('unitario', 'precio unitario', 'p. unitario', 'precio unit'):
-                    # Precio unitario tiene prioridad sobre subtotales
-                    col_map['precio_unit'] = ci
-                elif h == 'precio' or h in ('precio unitario', 'precio unit', 'p. unitario', 'unitario'):
-                    if 'precio_unit' not in col_map:
-                        col_map['precio_unit'] = ci
-                elif 'precio s/iva' in h or 'precio sin' in h or ('precio' in h and 'iva' in h and 'total' not in h):
-                    if 'precio' not in col_map:
-                        col_map['precio'] = ci
-                elif h == 'pvp' and 'precio' not in col_map:
-                    col_map['pvp'] = ci
-                elif h in ('pedido', 'cantidad', 'qty'):
-                    col_map['pedido'] = ci
-                elif 'subtotal' in h or ('precio' in h and 'total' in h and 'c/iva' not in h):
-                    if 'subtotal' not in col_map:
-                        col_map['subtotal'] = ci
-                elif 'caracteristic' in h or 'descripci' in h or 'detalle' in h:
-                    if 'descripcion' not in col_map:
-                        col_map['descripcion'] = ci
+            for ci, n in enumerate(norms):
+                if n in _SKU_KW and "sku" not in col_map:
+                    col_map["sku"] = ci
+                if n in _PROD_KW and "modelo" not in col_map:
+                    col_map["modelo"] = ci
+                if n in _QTY_KW and "pedido" not in col_map:
+                    col_map["pedido"] = ci
+                if n in _PRICE_KW and "precio_unit" not in col_map:
+                    col_map["precio_unit"] = ci
+                if n in _TOTAL_KW and "subtotal" not in col_map:
+                    col_map["subtotal"] = ci
+                if n in _OBS_KW and "obs" not in col_map:
+                    col_map["obs"] = ci
             break
 
-    if 'pedido' not in col_map:
+    if "pedido" not in col_map and "modelo" not in col_map:
         return fields
 
-    # Prioridad de precio: columna 'unitario' > 'precio s/iva' > PVP
-    precio_col = (col_map.get('precio_unit')
-                  or col_map.get('precio')
-                  or col_map.get('pvp'))
+    # Si no hay columna de cantidad pero hay modelo + precio, tomar cantidad = 1
+    _has_qty = "pedido" in col_map
 
-    # Paso 2: leer filas de datos (desde después del header)
-    _header_kws = {'sku', 'modelo', 'model', 'ean', 'pvp', 'iva', 'pedido', 'cantidad',
-                   'stock', 'unitario', 'descripcion', 'descripción', 'total', 'subtotal'}
+    # ── Paso 2: leer filas de datos ───────────────────────────────────────
+    _skip_norms = _SKU_KW | _PROD_KW | _QTY_KW | _PRICE_KW | _TOTAL_KW | _OBS_KW
     for row in all_rows[hdr_row_idx + 1:]:
-        if not any(c is not None for c in row):
+        if not any(c not in (None, "", 0, 0.0) for c in row):
             continue
-        def _gcell(ci):
+
+        def _gc(ci):
             return row[ci] if ci is not None and ci < len(row) else None
 
-        sku_val    = str(_gcell(col_map.get('sku'))    or "").strip()
-        modelo_val = str(_gcell(col_map.get('modelo')) or "").strip()
-        desc_val   = str(_gcell(col_map.get('descripcion')) or "").strip()
+        sku_val    = str(_gc(col_map.get("sku"))    or "").strip()
+        modelo_val = str(_gc(col_map.get("modelo")) or "").strip()
+        obs_val    = str(_gc(col_map.get("obs"))    or "").strip()
 
-        # Saltar filas que son totales/sub-headers o completamente vacías de identificador
-        _ident = sku_val or modelo_val or desc_val
-        if not _ident or _ident.lower() in _header_kws:
+        _ident = sku_val or modelo_val
+        if not _ident:
+            continue
+        # Saltar si es otra fila de totales o sub-encabezado
+        if _norm(_ident) in _skip_norms:
+            continue
+        # Saltar filas de totales/descuentos (sin ident numérico ni alfanumérico de producto)
+        _ident_up = _ident.upper()
+        if any(kw in _ident_up for kw in ("TOTAL", "SUBTOTAL", "DESCUENTO", "DESC.", "IVA", "PLAZO", "EXPRESO", "TEL:", "CALLE")):
             continue
 
-        pedido_raw = _gcell(col_map.get('pedido'))
-        if pedido_raw is None:
-            continue
+        # Cantidad
+        if _has_qty:
+            try:
+                qty = float(str(_gc(col_map["pedido"]) or "0").replace(",", ".").strip())
+            except Exception:
+                qty = 0.0
+            if qty <= 0:
+                continue
+        else:
+            qty = 1.0
+
+        # Precio unitario
         try:
-            pedido_qty = float(str(pedido_raw).replace(",", ".").strip())
-        except Exception:
-            continue
-        if pedido_qty <= 0:
-            continue
-
-        ean_val    = str(_gcell(col_map.get('ean')) or "").strip()
-
-        iva_raw = _gcell(col_map.get('iva'))
-        try:
-            iva_f = float(str(iva_raw or "0.21").replace(",", ".").strip())
-            iva_pct = round(iva_f * 100, 1) if iva_f < 1 else round(iva_f, 1)
-        except Exception:
-            iva_pct = 21.0
-
-        precio_raw = _gcell(precio_col)
-        try:
-            precio_unit = float(str(precio_raw or "0").replace(",", ".").strip())
+            precio_unit = float(str(_gc(col_map.get("precio_unit")) or "0").replace(",", ".").strip())
         except Exception:
             precio_unit = 0.0
 
-        subtotal_raw = _gcell(col_map.get('subtotal'))
+        # Subtotal
         try:
-            subtotal = float(str(subtotal_raw or "0").replace(",", ".").strip())
+            subtotal = float(str(_gc(col_map.get("subtotal")) or "0").replace(",", ".").strip())
             if subtotal <= 0:
-                subtotal = precio_unit * pedido_qty
+                subtotal = precio_unit * qty
         except Exception:
-            subtotal = precio_unit * pedido_qty
+            subtotal = precio_unit * qty
 
-        # modelo y descripcion se guardan por separado para mejorar la busqueda en Odoo
         fields["lineas"].append({
             "codigo":      sku_val,
             "modelo":      modelo_val,
-            "descripcion": (desc_val or modelo_val or sku_val)[:200],
-            "ean":         ean_val,
-            "cantidad":    pedido_qty,
+            "descripcion": (modelo_val or sku_val)[:200],
+            "ean":         "",
+            "cantidad":    qty,
             "precio_unit": precio_unit,
-            "iva_pct":     iva_pct,
+            "iva_pct":     21.0,
             "subtotal":    subtotal,
+            "obs":         obs_val,
         })
 
     return fields
-
 
 def classify_document(text, carpeta_id=""):
     """
@@ -3717,7 +3788,7 @@ with tab_orders:
         if ext in ("xlsx","xls"):
             # ── Parseo inteligente de Excel de pedido ─────────────────────
             with st.spinner("Leyendo Excel..."):
-                oc_fields_xl = extract_excel_oc_fields(file_bytes)
+                oc_fields_xl = extract_excel_oc_fields(file_bytes, filename=uf.name)
             _lineas_xl = oc_fields_xl.get("lineas", [])
             if _lineas_xl:
                 st.caption(f"✅ {len(_lineas_xl)} productos con pedido > 0 detectados automáticamente.")
@@ -3732,6 +3803,9 @@ with tab_orders:
             for _k, _dv in [(_cuit_key_xl,""), (_pid_key_xl, None), (_pnm_key_xl,"")]:
                 if _k not in st.session_state:
                     st.session_state[_k] = _dv
+            # Pre-llenar CUIT si lo extrajo el parser
+            if not st.session_state[_cuit_key_xl] and oc_fields_xl.get("cuit"):
+                st.session_state[_cuit_key_xl] = oc_fields_xl["cuit"]
 
             # ── Búsqueda de cliente por CUIT o razón social ───────────────
             _xl_pid = st.session_state[_pid_key_xl]
