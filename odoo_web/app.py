@@ -4500,14 +4500,8 @@ with tab_orders:
                 st.session_state[_ss_overrides] = {}
 
             if _lineas_oc:
-                # Header row
-                _hc = st.columns([1, 3, 1, 2, 3])
-                for _hcol, _htxt in zip(_hc, ["Código", "Descripción", "Cant.", "Precio unit.", "Match Odoo"]):
-                    _hcol.markdown(f"<small><b>{_htxt}</b></small>", unsafe_allow_html=True)
-                st.divider()
-
+                # Build enriched list from current overrides/cache
                 for _li, _ln in enumerate(_lineas_oc):
-                    # Cache candidates (limit=5) para el dropdown
                     _cands_key = f"oc_cands_{uf.name}_{_li}"
                     if _cands_key not in st.session_state:
                         _cands = search_product_by_code_or_name(
@@ -4519,72 +4513,90 @@ with tab_orders:
                                  _ln.get("modelo","")).strip()
                             ),
                             ean13=_ln.get("ean13",""),
-                            limit=5,
+                            limit=1,
                         )
                         st.session_state[_cands_key] = _cands
                     _cands = st.session_state.get(_cands_key) or []
-
-                    # Override or auto
                     _override = st.session_state[_ss_overrides].get(_li)
                     _op = _override if _override is not None else (_cands[0] if _cands else None)
-
-                    # Build selectbox options dict  {label: product_dict}
-                    _no_match_lbl = f"⚠️ Sin match [{_ln.get('codigo','')}]"
-                    _seen_ids = set()
-                    _cand_opts = {}
-                    for _cr in _cands:
-                        _lbl = f"{_cr['name']}  [{_cr.get('default_code','')}]"
-                        if _cr["id"] not in _seen_ids:
-                            _cand_opts[_lbl] = _cr
-                            _seen_ids.add(_cr["id"])
-                    # Ensure current override appears even if not in candidates
-                    _cur_op_lbl = None
-                    if _op:
-                        _cur_op_lbl = f"{_op['name']}  [{_op.get('default_code','')}]"
-                        if _op["id"] not in _seen_ids:
-                            _cand_opts = {_cur_op_lbl: _op, **_cand_opts}
-                    _opt_keys = [_no_match_lbl] + list(_cand_opts.keys())
-                    _cur_idx = (_opt_keys.index(_cur_op_lbl)
-                                if _cur_op_lbl and _cur_op_lbl in _opt_keys else 0)
-
-                    # Row columns
-                    _rc = st.columns([1, 3, 1, 2, 3])
-                    _rc[0].markdown(f"`{_ln.get('codigo','')}`")
-                    _desc_parts = [x for x in [
-                        _ln.get("descripcion",""),
-                        _ln.get("marca",""),
-                        _ln.get("modelo",""),
-                    ] if x]
-                    _rc[1].markdown(" · ".join(_desc_parts) if _desc_parts else "—")
-                    _rc[2].markdown(str(int(_ln.get("cantidad",0))))
-                    _rc[3].markdown(fmt_ars(_ln.get("precio_unit",0)))
-
-                    _sel_lbl = _rc[4].selectbox(
-                        "Match Odoo",
-                        options=_opt_keys,
-                        index=_cur_idx,
-                        key=f"sel_match_{uf.name}_{_li}",
-                        label_visibility="collapsed",
-                    )
-                    # Update override when user changes selection
-                    _sel_op = _cand_opts.get(_sel_lbl) if _sel_lbl != _no_match_lbl else None
-                    _sel_id = (_sel_op or {}).get("id")
-                    _cur_id = (_op or {}).get("id")
-                    if _sel_id != _cur_id:
-                        st.session_state[_ss_overrides][_li] = _sel_op
-                        st.rerun()
-
-                    _final_op = _sel_op
-                    _cost   = float(_final_op["standard_price"]) if _final_op else 0.0
-                    _price  = safe_float(_ln.get("precio_unit", 0))
+                    _cost  = float(_op["standard_price"]) if _op else 0.0
+                    _price = safe_float(_ln.get("precio_unit", 0))
                     _margin = ((_price - _cost) / _price * 100) if _price > 0 else 0.0
-                    _enriched.append({**_ln,
-                        "odoo_product": _final_op,
-                        "cost": _cost,
-                        "margin_pct": _margin,
+                    _enriched.append({**_ln, "odoo_product": _op, "cost": _cost, "margin_pct": _margin})
+
+                # Table data
+                _df_rows = []
+                for _el in _enriched:
+                    _desc_full = " · ".join(x for x in [
+                        _el.get("descripcion",""), _el.get("marca",""), _el.get("modelo","")
+                    ] if x)
+                    _match_txt = (_el["odoo_product"]["name"] if _el.get("odoo_product") else "")
+                    _df_rows.append({
+                        "Código":       _el.get("codigo",""),
+                        "Descripción":  _desc_full,
+                        "Cant.":        int(_el.get("cantidad",0)),
+                        "Precio unit.": fmt_ars(_el.get("precio_unit",0)),
+                        "Subtotal":     fmt_ars(_el.get("subtotal",0)),
+                        "Match Odoo":   _match_txt,
                     })
-                    if _li < len(_lineas_oc) - 1:
-                        st.divider()
+                _prev_matches = [r["Match Odoo"] for r in _df_rows]
+
+                _edited_df = st.data_editor(
+                    pd.DataFrame(_df_rows),
+                    column_config={
+                        "Código":       st.column_config.TextColumn(disabled=True, width="small"),
+                        "Descripción":  st.column_config.TextColumn(disabled=True),
+                        "Cant.":        st.column_config.NumberColumn(disabled=True, width="small"),
+                        "Precio unit.": st.column_config.TextColumn(disabled=True, width="medium"),
+                        "Subtotal":     st.column_config.TextColumn(disabled=True, width="medium"),
+                        "Match Odoo":   st.column_config.TextColumn(
+                            "Match Odoo ✏️",
+                            help="Escribí nombre o código Odoo para reasignar",
+                            width="large",
+                        ),
+                    },
+                    use_container_width=True,
+                    hide_index=True,
+                    key=f"oc_editor_{uf.name}",
+                )
+
+                # Detect Match Odoo changes → search & update overrides
+                _needs_rerun = False
+                for _idx, _erow in _edited_df.iterrows():
+                    _new_txt = str(_erow.get("Match Odoo","") or "").strip()
+                    _old_txt = _prev_matches[_idx] if _idx < len(_prev_matches) else ""
+                    if _new_txt == _old_txt:
+                        continue
+                    if not _new_txt:
+                        st.session_state[_ss_overrides][_idx] = None
+                        st.session_state.pop(f"oc_cands_{uf.name}_{_idx}", None)
+                        _needs_rerun = True
+                    else:
+                        _sr = search_product_by_code_or_name(
+                            models_url, uid, api_key,
+                            code=_new_txt, name_keywords=_new_txt, limit=6)
+                        if len(_sr) == 1:
+                            st.session_state[_ss_overrides][_idx] = _sr[0]
+                            st.session_state[f"oc_cands_{uf.name}_{_idx}"] = _sr
+                            _needs_rerun = True
+                        elif len(_sr) > 1:
+                            _res_opts = {
+                                f"{r['name']}  [{r.get('default_code','')}]": r for r in _sr}
+                            st.warning(f"Fila {_idx+1} — múltiples resultados para «{_new_txt}»:")
+                            _chosen_lbl2 = st.selectbox(
+                                "Seleccioná el producto correcto",
+                                list(_res_opts.keys()),
+                                key=f"oc_res_{uf.name}_{_idx}",
+                                label_visibility="collapsed",
+                            )
+                            if st.button("✅ Confirmar", key=f"oc_res_btn_{uf.name}_{_idx}"):
+                                st.session_state[_ss_overrides][_idx] = _res_opts[_chosen_lbl2]
+                                st.session_state[f"oc_cands_{uf.name}_{_idx}"] = _sr
+                                _needs_rerun = True
+                        else:
+                            st.warning(f"Fila {_idx+1}: sin resultados para «{_new_txt}» — intentá otro término.")
+                if _needs_rerun:
+                    st.rerun()
             else:
                 st.info("No se detectaron líneas de productos automáticamente.")
 
