@@ -6635,6 +6635,21 @@ with tab_chat:
         return {"type": "text", "text": str(b)}
 
     def _odoo_pdf(doc_id, report="account.report_invoice_with_payments"):
+        import base64 as _b64p
+        # Metodo 1: buscar adjunto PDF ya generado en Odoo (ir.attachment)
+        try:
+            _atts = models.execute_kw(ODOO_DB, uid, api_key,
+                "ir.attachment", "search_read",
+                [[["res_model", "=", "account.move"],
+                  ["res_id", "=", doc_id],
+                  ["mimetype", "=", "application/pdf"]]],
+                {"fields": ["id", "name", "datas"], "limit": 1,
+                 "order": "id desc"})
+            if _atts and _atts[0].get("datas"):
+                return _b64p.b64decode(_atts[0]["datas"]), None
+        except Exception:
+            pass
+        # Metodo 2: sesion HTTP (funciona si el usuario ingreso con password real)
         try:
             import requests as _rq
             _s = _rq.Session()
@@ -6645,14 +6660,16 @@ with tab_chat:
                                  "login": st.session_state.get("user_email", ""),
                                  "password": api_key}},
                 timeout=15)
-            if not _auth.json().get("result", {}).get("uid"):
-                return None, "Auth HTTP fallida"
-            _r = _s.get(f"{ODOO_URL}/report/pdf/{report}/{doc_id}", timeout=90)
-            if _r.status_code == 200 and _r.content[:4] == b"%PDF":
-                return _r.content, None
-            return None, f"HTTP {_r.status_code}"
-        except Exception as _e:
-            return None, str(_e)
+            _uid_r = (_auth.json().get("result") or {}).get("uid")
+            if _uid_r:
+                _r = _s.get(f"{ODOO_URL}/report/pdf/{report}/{doc_id}", timeout=90)
+                if _r.status_code == 200 and _r.content[:4] == b"%PDF":
+                    return _r.content, None
+        except Exception:
+            pass
+        # Metodo 3: devolver link directo a Odoo para que el usuario lo descargue
+        _odoo_link = f"{ODOO_URL}/odoo/accounting/customer-invoices/{doc_id}"
+        return None, f"PDF_LINK:{_odoo_link}"
 
     def _odoo_xlsx(model, domain, fields, filename="export.xlsx"):
         try:
@@ -6734,6 +6751,9 @@ with tab_chat:
                 _fname = _dname if _dname.endswith(".pdf") else f"{_dname}.pdf"
                 st.session_state.chat_dl.append({"name": _fname, "data": _pdf, "mime": "application/pdf"})
                 return f"PDF '{_fname}' generado ({len(_pdf):,} bytes). Disponible para descargar."
+            if _err and _err.startswith("PDF_LINK:"):
+                _link = _err.replace("PDF_LINK:", "")
+                return f"No pude generar el PDF automaticamente (requiere password real, no API key). Podés descargarlo directamente desde Odoo: {_link}"
             return f"No se pudo generar el PDF: {_err}"
         elif name == "odoo_export_xlsx":
             _xb, _fn, _err = _odoo_xlsx(inp["model"], inp["domain"], inp["fields"],
