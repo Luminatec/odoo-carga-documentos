@@ -4726,6 +4726,14 @@ with tab_orders:
                             })
                         _ref_oc = _oc_num_i or oc_fields.get("numero_oc","")
                         _fec_oc = _oc_fec_i or oc_fields.get("fecha_iso","") or None
+                        if _oc_ref_sel != "— Sin referido —" and _oc_ref_sel in _oc_ref_map:
+                            try:
+                                models.execute_kw(ODOO_DB, uid, api_key,
+                                    "res.partner", "write",
+                                    [[_partner_id_oc],
+                                     {"x_studio_referido_1": _oc_ref_map[_oc_ref_sel]}])
+                            except Exception:
+                                pass
                         order_id = create_sale_order(
                             models, uid, api_key,
                             partner_id       = _partner_id_oc,
