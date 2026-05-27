@@ -1328,7 +1328,7 @@ Factura:
 """ + text
 
     resp = client.messages.create(
-        model="claude-haiku-4-5-20251001",
+        model="claude-sonnet-4-6",
         max_tokens=512,
         messages=[{"role": "user", "content": _prompt}]
     )
@@ -6688,10 +6688,26 @@ with tab_chat:
         {
             "name": "odoo_search",
             "description": (
-                "Busca registros en Odoo. Modelos: account.move (facturas), "
-                "res.partner (socios/clientes), account.payment (pagos), "
-                "purchase.order (ordenes de compra), product.product (productos). "
-                "Para saldo pendiente usá account.move con payment_state in ['not_paid','partial']."
+                "Busca registros en Odoo. Modelos disponibles:\n"
+                "- account.move: facturas (campos: id, name, partner_id, invoice_date, amount_total, "
+                "state, move_type, payment_state, invoice_origin, ref). "
+                "move_type: out_invoice=FC venta, in_invoice=FC compra, out_refund=NC venta, in_refund=NC compra. "
+                "state=posted para confirmadas. payment_state: not_paid, partial, paid, in_payment.\n"
+                "- account.move.line: lineas de factura (campos: id, move_id, name, product_id, "
+                "quantity, price_unit, price_subtotal, account_id). "
+                "Usar para buscar por producto dentro de facturas.\n"
+                "- res.partner: socios/clientes/proveedores (campos: id, name, vat, email, phone, "
+                "customer_rank, supplier_rank, is_company, category_id).\n"
+                "- account.payment: pagos (campos: id, name, partner_id, amount, date, "
+                "payment_type, state, journal_id).\n"
+                "- product.product: variantes de producto (campos: id, name, default_code, "
+                "list_price, standard_price, categ_id, active).\n"
+                "- product.template: plantillas de producto (campos: id, name, default_code, "
+                "list_price, type, categ_id, active).\n"
+                "- purchase.order: ordenes de compra (campos: id, name, partner_id, date_order, "
+                "amount_total, state).\n"
+                "- stock.move: movimientos de stock.\n"
+                "Para saldo pendiente: account.move con payment_state in ['not_paid','partial']."
             ),
             "input_schema": {
                 "type": "object",
@@ -6772,25 +6788,44 @@ with tab_chat:
         _today = _dtc.date.today().isoformat()
         _system = "\n".join([
             "Sos el asistente inteligente de Luminatec, conectado a Odoo en tiempo real.",
-            "Podes buscar facturas, socios, pagos y cualquier registro.",
-            "Podes generar PDFs de facturas y exportar listas a Excel.",
+            "Podés buscar facturas, socios, pagos, productos y cualquier registro.",
+            "Podés generar PDFs de facturas y exportar listas a Excel.",
             "",
-            "REGLAS DE BUSQUEDA POR NOMBRE:",
-            "1. Cuando el usuario menciona un socio/cliente/proveedor, PRIMERO busca en",
-            "   res.partner con domain [['name','ilike','NOMBRE']], fields ['id','name','customer_rank'],",
-            "   order='customer_rank desc', limit 10.",
-            "2. Si encontras UNO solo, procede directamente con ese partner_id.",
-            "3. Si encontras VARIOS, listalos ordenados por customer_rank (mayor primero) con el formato:",
-            "   NOMBRE (ID XXXX) — uno por linea con guion. Luego pregunta cual es el correcto.",
-            "   Ejemplo:",
-            "   - CASTILLO SACIFIA SRL (ID 120379)",
-            "   - CASTILLO HERMANOS (ID 84210)",
-            "   Cual es el que buscas?",
-            "4. Si no encontras ninguno, decilo y sugeri variantes del nombre.",
-            "5. Con el partner confirmado, busca facturas en account.move por",
-            "   partner_id (ID numerico) y state=posted.",
+            "== ESTRATEGIA DE BUSQUEDA — SIEMPRE SEGUILA ==",
             "",
-            "Siempre responde en castellano. Se conciso.",
+            "BUSQUEDA POR CLIENTE/PROVEEDOR:",
+            "1. Buscá en res.partner: domain [['name','ilike','NOMBRE']], fields ['id','name','customer_rank','vat'], order='customer_rank desc', limit 10.",
+            "2. Si hay UNO, usalo directamente. Si hay VARIOS, listalos con formato:",
+            "   - NOMBRE EMPRESA (ID XXXXX) — uno por línea. Pedí que confirmen.",
+            "3. Si no encontrás nada, probá variantes: truncá el nombre, sacá palabras cortas,",
+            "   o buscá por CUIT si lo tenés.",
+            "4. Con el partner_id confirmado, buscá en account.move con",
+            "   [['partner_id','=',ID],['state','=','posted']].",
+            "",
+            "BUSQUEDA POR PRODUCTO (código o nombre como LFANT, PERUG, etc.):",
+            "1. Primero buscá el producto: product.product domain [['default_code','ilike','COD']]",
+            "   o [['name','ilike','NOMBRE']], fields ['id','name','default_code'], limit 10.",
+            "2. Si no encontrás por default_code, probá buscar en account.move.line:",
+            "   domain [['name','ilike','COD'],['move_id.state','=','posted']],",
+            "   fields ['id','move_id','name','product_id','quantity','price_subtotal'], limit 20.",
+            "3. También podés buscar: [['product_id.default_code','ilike','COD']]",
+            "   o [['product_id.name','ilike','NOMBRE']].",
+            "4. Una vez que tenés los move_id de las líneas, podés buscar las facturas completas.",
+            "",
+            "BUSQUEDA POR NUMERO DE FACTURA:",
+            "1. Buscá en account.move: domain [['name','ilike','NUMERO'],['state','=','posted']],",
+            "   fields ['id','name','partner_id','invoice_date','amount_total','payment_state'].",
+            "",
+            "REGLAS GENERALES:",
+            "- NUNCA te rindas en el primer intento fallido. Probá al menos 2 estrategias distintas.",
+            "- Si una búsqueda da vacío, ajustá el domain y reintentá automáticamente.",
+            "- Usá ilike para búsquedas parciales, nunca '=' para nombres.",
+            "- Para la última factura: order='invoice_date desc', limit 1.",
+            "- Para facturas pendientes: payment_state in ['not_paid','partial'].",
+            "- Cuando mostrás facturas, incluí: número, fecha, monto total, estado de pago.",
+            "- Si el usuario pide el PDF de una factura específica, usá odoo_get_pdf con su ID.",
+            "- Si pide exportar a Excel, usá odoo_export_xlsx.",
+            "- Respondé siempre en castellano. Sé conciso pero completo.",
             f"Fecha hoy: {_today}",
         ])
         _ublocks = []
@@ -6802,7 +6837,7 @@ with tab_chat:
                  for m in st.session_state.chat_msgs]
         for _ in range(10):
             _resp = _client.messages.create(
-                model="claude-haiku-4-5-20251001",
+                model="claude-sonnet-4-6",
                 max_tokens=4096,
                 system=_system,
                 tools=_tools,
