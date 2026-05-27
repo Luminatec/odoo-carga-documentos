@@ -6625,6 +6625,7 @@ with tab_chat:
     # Session state
     if "chat_msgs" not in st.session_state: st.session_state.chat_msgs = []
     if "chat_dl"   not in st.session_state: st.session_state.chat_dl   = []
+    if "chat_qr"   not in st.session_state: st.session_state.chat_qr   = []  # quick replies
 
     def _blk_to_dict(b):
         if isinstance(b, dict): return b
@@ -6756,10 +6757,15 @@ with tab_chat:
             "",
             "REGLAS DE BUSQUEDA POR NOMBRE:",
             "1. Cuando el usuario menciona un socio/cliente/proveedor, PRIMERO busca en",
-            "   res.partner con domain [['name','ilike','NOMBRE']], fields ['id','name'], limit 10.",
+            "   res.partner con domain [['name','ilike','NOMBRE']], fields ['id','name','customer_rank'],",
+            "   order='customer_rank desc', limit 10.",
             "2. Si encontras UNO solo, procede directamente con ese partner_id.",
-            "3. Si encontras VARIOS, lista las opciones y pregunta cual es el correcto.",
-            "   Ejemplo: 'Encontre varios: CASTILLO SACIFIA (ID 120379), CASTILLO HNOS (ID 84210). Cual?'",
+            "3. Si encontras VARIOS, listalos ordenados por customer_rank (mayor primero) con el formato:",
+            "   NOMBRE (ID XXXX) — uno por linea con guion. Luego pregunta cual es el correcto.",
+            "   Ejemplo:",
+            "   - CASTILLO SACIFIA SRL (ID 120379)",
+            "   - CASTILLO HERMANOS (ID 84210)",
+            "   Cual es el que buscas?",
             "4. Si no encontras ninguno, decilo y sugeri variantes del nombre.",
             "5. Con el partner confirmado, busca facturas en account.move por",
             "   partner_id (ID numerico) y state=posted.",
@@ -6798,6 +6804,18 @@ with tab_chat:
                  else [{"type": "text", "text": str(m["content"])}])]}
             for m in _msgs
         ]
+        # Extraer opciones clickeables de la ultima respuesta del asistente
+        import re as _re
+        st.session_state.chat_qr = []
+        for _lm in reversed(st.session_state.chat_msgs):
+            if _lm.get("role") == "assistant":
+                _ltexts = [b["text"] for b in _lm.get("content", [])
+                           if isinstance(b, dict) and b.get("type") == "text"]
+                _ltext = " ".join(_ltexts)
+                _qr_matches = _re.findall(r"[-*]?\s*(.+?)\s+\(ID\s+(\d+)\)", _ltext)
+                if len(_qr_matches) > 1:
+                    st.session_state.chat_qr = [{"label": n.strip(), "id": int(i)} for n, i in _qr_matches]
+                break
 
     # Downloads pendientes
     if st.session_state.chat_dl:
@@ -6835,6 +6853,20 @@ with tab_chat:
                         st.json(_tc.get("input", {}))
                 if _texts:
                     st.markdown("\n".join(_texts))
+
+    # Quick reply buttons (opciones clickeables)
+    if st.session_state.chat_qr:
+        st.markdown("**Selecciona uno:**")
+        _qr_cols = st.columns(min(len(st.session_state.chat_qr), 3))
+        for _qi, _qr in enumerate(st.session_state.chat_qr):
+            if _qr_cols[_qi % 3].button(
+                _qr["label"], key=f"qr_{_qi}_{_qr['id']}", use_container_width=True
+            ):
+                _sel_msg = f"{_qr['label']} (ID {_qr['id']})"
+                st.session_state.chat_qr = []
+                with st.spinner("Pensando..."):
+                    _run_agent(_sel_msg)
+                st.rerun()
 
     # Input y upload
     st.divider()
