@@ -6606,141 +6606,273 @@ with tab_recibos:
 # TAB ASISTENTE — Chat Claude-Odoo
 # ═══════════════════════════════════════════════════
 with tab_chat:
-    import os as _os_chat
-    import requests as _req_chat
-    import json as _json_chat
+    import json   as _jc
+    import base64 as _b64c
+    import io     as _ioc
+    import datetime as _dtc
 
     st.subheader("🤖 Asistente Luminatec")
-    st.caption(
-        "Hacé preguntas sobre facturas, pagos, saldos, carpetas de importación o cualquier "
-        "dato de Odoo. El asistente puede consultar y, con tu confirmación, crear registros.")
+    st.caption("Preguntá sobre facturas, saldos, socios. Pedí PDFs o exportes Excel. Adjuntá archivos para analizarlos.")
 
-    _chat_bot_url   = _os_chat.getenv("BOT_URL", "").rstrip("/")
-    _chat_bot_token = _os_chat.getenv("CHAT_TOKEN", "")
+    _ant_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+    if not _ant_key:
+        st.warning("⚠️ Falta `ANTHROPIC_API_KEY` en los Secrets de Streamlit Cloud.")
+        st.stop()
 
-    if not _chat_bot_url or not _chat_bot_token:
-        st.warning(
-            "⚠️ El Asistente no está configurado. "
-            "Agregá `BOT_URL` y `CHAT_TOKEN` en los Secrets de Streamlit Cloud.")
-    else:
-        # ── Session state ──────────────────────────────────────────────────────
-        if "chat_history"  not in st.session_state: st.session_state.chat_history  = []
-        if "chat_pending"  not in st.session_state: st.session_state.chat_pending  = None
-        if "chat_user_id"  not in st.session_state:
-            st.session_state.chat_user_id = st.session_state.get("user_email", "user")
+    # ── Session state ──────────────────────────────────────────────────────────
+    if "chat_msgs" not in st.session_state: st.session_state.chat_msgs = []
+    if "chat_dl"   not in st.session_state: st.session_state.chat_dl   = []
 
-        # ── Helpers ────────────────────────────────────────────────────────────
-        def _chat_send(message):
-            """Envía mensaje al bot y actualiza historial + pending."""
+    # ── Helper: serializar bloque de contenido Claude → dict ──────────────────
+    def _blk_to_dict(b):
+        if isinstance(b, dict): return b
+        t = getattr(b, "type", None)
+        if t == "text":          return {"type": "text", "text": b.text}
+        if t == "tool_use":      return {"type": "tool_use", "id": b.id, "name": b.name, "input": b.input}
+        if t == "tool_result":   return b.__dict__
+        return {"type": "text", "text": str(b)}
+
+    # ── Generar PDF desde Odoo vía sesión HTTP ─────────────────────────────────
+    def _odoo_pdf(doc_id, report="account.report_invoice_with_payments"):
+        try:
+            import requests as _rq
+            _s = _rq.Session()
+            _auth = _s.post(f"{ODOO_URL}/web/session/authenticate",
+                json={"jsonrpc":"2.0","method":"call","id":1,
+                      "params":{"db":ODOO_DB,
+                                "login": st.session_state.get("user_email",""),
+                                "password": api_key}},
+                timeout=15)
+            if not _auth.json().get("result", {}).get("uid"):
+                return None, "Autenticación HTTP fallida"
+            _r = _s.get(f"{ODOO_URL}/report/pdf/{report}/{doc_id}", timeout=90)
+            if _r.status_code == 200 and _r.content[:4] == b"%PDF":
+                return _r.content, None
+            return None, f"HTTP {_r.status_code}"
+        except Exception as _e:
+            return None, str(_e)
+
+    # ── Generar XLSX desde Odoo ────────────────────────────────────────────────
+    def _odoo_xlsx(model, domain, fields, filename="export.xlsx"):
+        try:
+            import pandas as _pd
+            recs = models.execute_kw(ODOO_DB, uid, api_key, model, "search_read",
+                [domain], {"fields": fields, "limit": 1000, "order": "id desc"})
+            df = _pd.DataFrame(recs)
+            buf = _ioc.BytesIO()
+            with _pd.ExcelWriter(buf, engine="openpyxl") as _w:
+                df.to_excel(_w, index=False)
+            return buf.getvalue(), filename, None
+        except Exception as _e:
+            return None, filename, str(_e)
+
+    # ── Definición de herramientas ─────────────────────────────────────────────
+    _tools = [
+        {
+            "name": "odoo_search",
+            "description": (
+                "Busca registros en Odoo. Modelos comunes: account.move (facturas), "
+                "res.partner (socios/clientes), account.payment (pagos), "
+                "purchase.order (órdenes de compra), product.product (productos). "
+                "Para saldo pendiente de un socio usá account.move con payment_state in ['not_paid','partial']."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "model":  {"type": "string"},
+                    "domain": {"type": "array",  "description": "Lista de condiciones Odoo, ej: [['move_type','=','out_invoice'],['state','=','posted']]"},
+                    "fields": {"type": "array",  "items": {"type": "string"}},
+                    "limit":  {"type": "integer","default": 10},
+                    "order":  {"type": "string", "default": ""}
+                },
+                "required": ["model", "domain", "fields"]
+            }
+        },
+        {
+            "name": "odoo_get_pdf",
+            "description": "Genera el PDF de una factura de Odoo y lo deja disponible para descargar.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "doc_id":   {"type": "integer", "description": "ID del documento en Odoo"},
+                    "doc_name": {"type": "string",  "description": "Nombre para el archivo, ej: FCE-A_00011-00000779"}
+                },
+                "required": ["doc_id"]
+            }
+        },
+        {
+            "name": "odoo_export_xlsx",
+            "description": "Exporta un listado de registros de Odoo a un archivo Excel descargable.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "model":    {"type": "string"},
+                    "domain":   {"type": "array"},
+                    "fields":   {"type": "array", "items": {"type": "string"}},
+                    "filename": {"type": "string", "description": "Nombre del archivo, ej: facturas_mayo_2026.xlsx"}
+                },
+                "required": ["model", "domain", "fields", "filename"]
+            }
+        }
+    ]
+
+    # ── Ejecutar herramienta ───────────────────────────────────────────────────
+    def _exec_tool(name, inp):
+        if name == "odoo_search":
             try:
-                r = _req_chat.post(
-                    f"{_chat_bot_url}/chat",
-                    json={
-                        "message": message,
-                        "user_id": st.session_state.chat_user_id,
-                        "history": st.session_state.chat_history,
-                    },
-                    headers={"X-Chat-Token": _chat_bot_token},
-                    timeout=60,
-                )
-                r.raise_for_status()
-                data = r.json()
-                st.session_state.chat_history = data.get("history", st.session_state.chat_history)
-                st.session_state.chat_pending = data.get("pending")   # None o dict con token
-                return data.get("answer", "")
+                recs = models.execute_kw(ODOO_DB, uid, api_key,
+                    inp["model"], "search_read",
+                    [inp["domain"]],
+                    {"fields": inp["fields"], "limit": inp.get("limit", 10), "order": inp.get("order", "")})
+                return _jc.dumps(recs, ensure_ascii=False, default=str)
             except Exception as _e:
-                return f"❌ Error al contactar al asistente: {_e}"
+                return f"Error búsqueda: {_e}"
 
-        def _chat_approve():
-            """Aprueba la acción pendiente."""
-            pending = st.session_state.chat_pending
-            if not pending:
-                return
-            try:
-                r = _req_chat.post(
-                    f"{_chat_bot_url}/chat/approve",
-                    json={"token": pending.get("token")},
-                    headers={"X-Chat-Token": _chat_bot_token},
-                    timeout=30,
-                )
-                r.raise_for_status()
-                data = r.json()
-                st.session_state.chat_history = data.get("history", st.session_state.chat_history)
-                st.session_state.chat_pending = None
-            except Exception as _e:
-                st.error(f"Error al aprobar: {_e}")
+        elif name == "odoo_get_pdf":
+            _did  = inp["doc_id"]
+            _dname = inp.get("doc_name", f"documento_{_did}").replace("/", "-").replace(" ", "_")
+            _pdf, _err = _odoo_pdf(_did)
+            if _pdf:
+                _fname = _dname if _dname.endswith(".pdf") else f"{_dname}.pdf"
+                st.session_state.chat_dl.append(
+                    {"name": _fname, "data": _pdf, "mime": "application/pdf"})
+                return f"PDF '{_fname}' generado ({len(_pdf):,} bytes). Disponible para descargar arriba."
+            return f"No se pudo generar el PDF: {_err}"
 
-        def _chat_cancel():
-            """Cancela la acción pendiente."""
-            pending = st.session_state.chat_pending
-            if not pending:
-                return
-            try:
-                r = _req_chat.post(
-                    f"{_chat_bot_url}/chat/cancel",
-                    json={"token": pending.get("token")},
-                    headers={"X-Chat-Token": _chat_bot_token},
-                    timeout=15,
-                )
-                r.raise_for_status()
-                data = r.json()
-                st.session_state.chat_history = data.get("history", st.session_state.chat_history)
-            except Exception as _e:
-                st.error(f"Error al cancelar: {_e}")
-            st.session_state.chat_pending = None
+        elif name == "odoo_export_xlsx":
+            _xb, _fn, _err = _odoo_xlsx(inp["model"], inp["domain"], inp["fields"],
+                                         filename=inp.get("filename", "export.xlsx"))
+            if _xb:
+                st.session_state.chat_dl.append(
+                    {"name": _fn, "data": _xb,
+                     "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"})
+                return f"Excel '{_fn}' generado. Disponible para descargar arriba."
+            return f"No se pudo generar el Excel: {_err}"
 
-        # ── Render historial de mensajes ────────────────────────────────────────
-        _chat_container = st.container()
-        with _chat_container:
-            for _msg in st.session_state.chat_history:
-                _role = _msg.get("role", "assistant")
-                _content = _msg.get("content", "")
-                if not _content:
-                    continue
-                if _role == "user":
-                    with st.chat_message("user"):
-                        st.markdown(_content)
-                else:
-                    with st.chat_message("assistant", avatar="🤖"):
-                        st.markdown(_content)
+        return "Herramienta desconocida"
 
-        # ── Acción pendiente de aprobación ─────────────────────────────────────
-        _pending = st.session_state.chat_pending
-        if _pending:
-            st.divider()
-            st.warning(
-                f"⚠️ **Acción pendiente de confirmación:** "
-                f"{_pending.get('description', 'El asistente quiere realizar una acción en Odoo.')}")
-            _ap_col, _cn_col = st.columns(2)
-            if _ap_col.button("✅ Confirmar", type="primary", key="chat_approve_btn",
-                               use_container_width=True):
-                _chat_approve()
-                st.rerun()
-            if _cn_col.button("❌ Cancelar", key="chat_cancel_btn",
-                               use_container_width=True):
-                _chat_cancel()
-                st.rerun()
+    # ── Loop agente ────────────────────────────────────────────────────────────
+    def _run_agent(user_text, file_blocks=None):
+        import anthropic as _ac2
+        _client = _ac2.Anthropic(api_key=_ant_key)
+        _system = (
+            "Sos el asistente inteligente de Luminatec, conectado a Odoo en tiempo real. "
+            "Podés buscar facturas, socios, pagos y cualquier registro. "
+            "Podés generar PDFs de facturas y exportar listas a Excel. "
+            "Cuando busques la última factura de alguien, usá account.move, "
+            "filtrá por partner_id.name ilike y state='posted', order invoice_date desc, limit 1. "
+            "Siempre respondé en español. Sé conciso. "
+            f"Fecha hoy: {_dtc.date.today().isoformat()}"
+        )
+        # Construir mensaje de usuario
+        _ublocks = []
+        if file_blocks:
+            _ublocks.extend(file_blocks)
+        _ublocks.append({"type": "text", "text": user_text})
+        st.session_state.chat_msgs.append({"role": "user", "content": _ublocks})
+        _msgs = [{"role": m["role"], "content": m["content"]}
+                 for m in st.session_state.chat_msgs]
 
-        # ── Input de chat ──────────────────────────────────────────────────────
+        for _ in range(10):
+            _resp = _client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=4096,
+                system=_system,
+                tools=_tools,
+                messages=_msgs,
+            )
+            _msgs.append({"role": "assistant", "content": _resp.content})
+            if _resp.stop_reason != "tool_use":
+                break
+            _results = []
+            for _blk in _resp.content:
+                if _blk.type == "tool_use":
+                    _out = _exec_tool(_blk.name, _blk.input)
+                    _results.append({"type": "tool_result", "tool_use_id": _blk.id, "content": _out})
+            _msgs.append({"role": "user", "content": _results})
+
+        # Serializar y guardar historial
+        st.session_state.chat_msgs = [
+            {"role": m["role"],
+             "content": [_blk_to_dict(b) for b in (m["content"] if isinstance(m["content"], list) else [{"type":"text","text":str(m["content"])}])]}
+            for m in _msgs
+        ]
+
+    # ── Render descargas pendientes ────────────────────────────────────────────
+    if st.session_state.chat_dl:
+        _dl_cols = st.columns(min(len(st.session_state.chat_dl), 4))
+        for _i, _dl in enumerate(st.session_state.chat_dl):
+            _dl_cols[_i % 4].download_button(
+                label=f"⬇️ {_dl['name']}",
+                data=_dl["data"],
+                file_name=_dl["name"],
+                mime=_dl["mime"],
+                key=f"dl_{_i}_{_dl['name']}"
+            )
         st.divider()
-        _col_input, _col_new = st.columns([5, 1])
-        with _col_new:
-            if st.button("🔄 Nueva", key="chat_new_conv", use_container_width=True,
-                         help="Reiniciar conversación"):
-                st.session_state.chat_history = []
-                st.session_state.chat_pending = None
-                st.rerun()
 
-        _user_input = st.chat_input(
-            "Preguntá algo, por ejemplo: ¿Cuál es el saldo pendiente de PETDUR?",
-            key="chat_input_box")
+    # ── Render historial ───────────────────────────────────────────────────────
+    for _m in st.session_state.chat_msgs:
+        _role    = _m.get("role", "assistant")
+        _content = _m.get("content", [])
+        if not isinstance(_content, list):
+            _content = [{"type": "text", "text": str(_content)}]
 
-        if _user_input:
-            # Agregar mensaje del usuario al historial local para render inmediato
-            st.session_state.chat_history.append({"role": "user", "content": _user_input})
-            with st.spinner("El asistente está pensando..."):
-                _answer = _chat_send(_user_input)
+        _texts      = [b["text"]  for b in _content if isinstance(b, dict) and b.get("type") == "text"  and b.get("text", "").strip()]
+        _tool_calls = [b          for b in _content if isinstance(b, dict) and b.get("type") == "tool_use"]
+
+        if not _texts and not _tool_calls:
+            continue
+
+        if _role == "user":
+            if _texts:
+                with st.chat_message("user"):
+                    st.markdown("\n".join(_texts))
+        else:
+            with st.chat_message("assistant", avatar="🤖"):
+                for _tc in _tool_calls:
+                    _tc_name = _tc.get("name", "tool")
+                    _tc_inp  = _tc.get("input", {})
+                    with st.expander(f"🔧 `{_tc_name}`", expanded=False):
+                        st.json(_tc_inp)
+                if _texts:
+                    st.markdown("\n".join(_texts))
+
+    # ── Input + upload ─────────────────────────────────────────────────────────
+    st.divider()
+    _cu1, _cu2 = st.columns([5, 1])
+    with _cu1:
+        _chat_upload = st.file_uploader(
+            "Adjuntar", type=["pdf", "xlsx", "xls", "png", "jpg", "jpeg"],
+            key=f"chat_up_{len(st.session_state.chat_msgs)}",
+            label_visibility="collapsed")
+    with _cu2:
+        if st.button("🔄 Nueva", key="chat_new_btn", use_container_width=True):
+            st.session_state.chat_msgs = []
+            st.session_state.chat_dl   = []
             st.rerun()
+
+    _chat_in = st.chat_input("Preguntá algo, ej: ¿Facturas pendientes de PETDUR? / Descargame la última factura de Castillo")
+
+    if _chat_in:
+        _fblocks = []
+        if _chat_upload:
+            _fb = _chat_upload.read()
+            _fn = _chat_upload.name.lower()
+            if _fn.endswith(".pdf"):
+                _fblocks.append({"type": "document", "source": {
+                    "type": "base64", "media_type": "application/pdf",
+                    "data": _b64c.b64encode(_fb).decode()}})
+            elif _fn.endswith((".png", ".jpg", ".jpeg")):
+                _mime2 = "image/png" if _fn.endswith(".png") else "image/jpeg"
+                _fblocks.append({"type": "image", "source": {
+                    "type": "base64", "media_type": _mime2,
+                    "data": _b64c.b64encode(_fb).decode()}})
+            else:
+                _fblocks.append({"type": "text", "text": f"[Archivo adjunto: {_chat_upload.name}]"})
+        with st.spinner("🤖 Pensando..."):
+            _run_agent(_chat_in, _fblocks or None)
+        st.rerun()
 
 
 # ═══════════════════════════════════════════════════
