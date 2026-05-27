@@ -4311,10 +4311,15 @@ with tab_orders:
             _xl_total = _xl_neto + _xl_iva
             if _xl_enriched:
                 st.markdown("##### 💰 Resumen financiero")
+                def _fin_card_xl(lbl, val):
+                    return (f'<div style="border-left:3px solid #e63946;padding:5px 10px;'
+                            f'background:#fff8f8;border-radius:4px">'
+                            f'<div style="font-size:11px;color:#888;margin-bottom:2px">{lbl}</div>'
+                            f'<div style="font-size:15px;font-weight:700;color:#e63946">{fmt_ars(val)}</div></div>')
                 _xlrf1, _xlrf2, _xlrf3 = st.columns(3)
-                _xlrf1.metric("Neto s/IVA",    fmt_ars(_xl_neto))
-                _xlrf2.metric("IVA",           fmt_ars(_xl_iva))
-                _xlrf3.metric("Total c/IVA",   fmt_ars(_xl_total))
+                _xlrf1.markdown(_fin_card_xl("Neto s/IVA",  _xl_neto), unsafe_allow_html=True)
+                _xlrf2.markdown(_fin_card_xl("IVA",         _xl_iva),  unsafe_allow_html=True)
+                _xlrf3.markdown(_fin_card_xl("Total c/IVA", _xl_total),unsafe_allow_html=True)
 
             # ── Crear pedido ───────────────────────────────────────────────
             st.markdown("---")
@@ -4466,11 +4471,19 @@ with tab_orders:
                             st.warning("Razón social y CUIT son obligatorios.")
 
             # ── SECCIÓN 2: DATOS DE LA OC ─────────────────────────────────
+            # Forzar sesión con datos nuevos si antes estaba vacío
+            for _oc_fk, _oc_fv in [
+                (f"ocnum_{uf.name}",  oc_fields.get("numero_oc", "")),
+                (f"ocfec_{uf.name}",  oc_fields.get("fecha_iso", "") or oc_fields.get("fecha", "")),
+                (f"occond_{uf.name}", oc_fields.get("condiciones_pago", "")),
+            ]:
+                if _oc_fv and not st.session_state.get(_oc_fk):
+                    st.session_state[_oc_fk] = _oc_fv
             st.markdown("##### 📋 Datos de la Orden de Compra")
             _oc1, _oc2, _oc3 = st.columns(3)
             _oc_num_i  = _oc1.text_input("N° OC",   value=oc_fields.get("numero_oc",""),
                                           key=f"ocnum_{uf.name}")
-            _oc_fec_i  = _oc2.text_input("Fecha",   value=oc_fields.get("fecha_iso",""),
+            _oc_fec_i  = _oc2.text_input("Fecha",   value=oc_fields.get("fecha_iso","") or oc_fields.get("fecha",""),
                                           key=f"ocfec_{uf.name}", placeholder="AAAA-MM-DD")
             _oc_cond_i = _oc3.text_input("Condición de pago",
                                           value=oc_fields.get("condiciones_pago",""),
@@ -4619,11 +4632,18 @@ with tab_orders:
 
             # ── SECCIÓN 4: RESUMEN FINANCIERO ────────────────────────────
             st.markdown("##### 💰 Resumen financiero")
+            def _fin_card(lbl, val, pct=False):
+                color = "#e63946"
+                fval = f"{val:.1f}%" if pct else fmt_ars(val)
+                return (f'<div style="border-left:3px solid {color};padding:5px 10px;'
+                        f'background:#fff8f8;border-radius:4px">'
+                        f'<div style="font-size:11px;color:#888;margin-bottom:2px">{lbl}</div>'
+                        f'<div style="font-size:15px;font-weight:700;color:{color}">{fval}</div></div>')
             _rf1, _rf2, _rf3, _rf4 = st.columns(4)
-            _rf1.metric("Total Neto",   fmt_ars(_show_neto))
-            _rf2.metric("IVA",          fmt_ars(_show_iva))
-            _rf3.metric("Total c/IVA",  fmt_ars(_show_total))
-            _rf4.metric("Margen total", f"{_margin_total:.1f}%")
+            _rf1.markdown(_fin_card("Total Neto",  _show_neto), unsafe_allow_html=True)
+            _rf2.markdown(_fin_card("IVA",         _show_iva),  unsafe_allow_html=True)
+            _rf3.markdown(_fin_card("Total c/IVA", _show_total),unsafe_allow_html=True)
+            _rf4.markdown(_fin_card("Margen total",_margin_total, pct=True), unsafe_allow_html=True)
 
             # ── SECCIÓN 5: PLAZO DE PAGO ──────────────────────────────────
             st.markdown("##### 📅 Plazo de pago")
