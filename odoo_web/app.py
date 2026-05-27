@@ -1005,11 +1005,14 @@ def create_landed_cost(models, uid, api_key, picking_ids, cost_lines):
     return call(models, uid, api_key, "stock.landed.cost", "create", [vals])
 
 def create_sale_order(models, uid, api_key, partner_id, note, lines, filename, file_bytes, mimetype,
-                      client_order_ref=None, payment_term_id=None, date_order=None):
+                      client_order_ref=None, payment_term_id=None, date_order=None,
+                      ejecutivo_field=None, ejecutivo_id=None):
     vals = {"partner_id": partner_id, "note": note or ""}
     if client_order_ref: vals["client_order_ref"] = client_order_ref
     if payment_term_id:  vals["payment_term_id"]  = payment_term_id
     if date_order:       vals["date_order"]        = date_order
+    if ejecutivo_field and ejecutivo_id:
+        vals[ejecutivo_field] = ejecutivo_id
     order_id = call(models, uid, api_key, "sale.order", "create", [vals])
     for ln in lines:
         line_vals = {
@@ -1842,6 +1845,24 @@ def search_product_by_code_or_name(models_url, uid, api_key,
         pass
     return []
 
+
+def get_ejecutivo_field(models_url, uid, api_key):
+    """Detecta el nombre técnico del campo 'Ejecutivo de cuenta' (o similar) en sale.order."""
+    try:
+        _mx = xmlrpc.client.ServerProxy(models_url)
+        fields = _mx.execute_kw(ODOO_DB, uid, api_key,
+            "sale.order", "fields_get", [],
+            {"attributes": ["string", "type"]})
+        keywords = ["ejecutivo", "referido"]
+        for fname, finfo in fields.items():
+            if not fname.startswith("x_"):
+                continue
+            label = finfo.get("string", "").lower()
+            if any(kw in label for kw in keywords):
+                return fname
+        return None
+    except Exception:
+        return None
 
 def get_referidos(models_url, uid, api_key):
     """Devuelve lista de (id, nombre) de partners usados como Referido en Odoo."""
@@ -4738,7 +4759,8 @@ with tab_orders:
             # ── SECCIÓN 7: CREAR PEDIDO ───────────────────────────────────
             st.markdown("---")
 
-            # Campo Referido
+            # Campo Referido / Ejecutivo de cuenta
+            _oc_ejecutivo_field = get_ejecutivo_field(models_url, uid, api_key)
             _oc_referidos  = get_referidos(models_url, uid, api_key)
             _oc_ref_map    = {n: i for i, n in _oc_referidos}
             _oc_ref_opts   = ["— Sin referido —"] + list(_oc_ref_map.keys())
@@ -4786,6 +4808,7 @@ with tab_orders:
                                      {"x_studio_referido_1": _oc_ref_map[_oc_ref_sel]}])
                             except Exception:
                                 pass
+                        _ref_id_oc = _oc_ref_map.get(_oc_ref_sel) if _oc_ref_sel != "— Sin referido —" else None
                         order_id = create_sale_order(
                             models, uid, api_key,
                             partner_id       = _partner_id_oc,
@@ -4797,6 +4820,8 @@ with tab_orders:
                             client_order_ref = _ref_oc or None,
                             payment_term_id  = _pt_choice_id or None,
                             date_order       = _fec_oc,
+                            ejecutivo_field  = _oc_ejecutivo_field,
+                            ejecutivo_id     = _ref_id_oc,
                         )
                         url = odoo_url("sale.order", order_id)
                         st.toast("Pedido creado en Odoo", icon="✅")
