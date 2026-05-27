@@ -6829,7 +6829,7 @@ with tab_chat:
                 with st.chat_message("user"):
                     st.markdown("\n".join(_texts))
         else:
-            with st.chat_message("assistant", avatar="robot"):
+            with st.chat_message("assistant", avatar="🤖"):
                 for _tc in _tool_calls:
                     with st.expander(f"Tool: {_tc.get('name','tool')}", expanded=False):
                         st.json(_tc.get("input", {}))
