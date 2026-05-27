@@ -4680,6 +4680,7 @@ with tab_contacts:
     _ct_acct_rec_map = {n: i for i, n in _ct_accts_rec}
     _ct_acct_pay_map = {n: i for i, n in _ct_accts_pay}
 
+
     with st.form("ct_form"):
         # ── Persona / Empresa ──────────────────────────────────────────────
         _ct_company_type = st.radio(
@@ -4742,6 +4743,7 @@ with tab_contacts:
         _ct_pt_sel    = _ct_v2.selectbox("Términos de pago (ventas)", _ct_pt_opts)
         _ct_pl_opts   = ["— Predeterminado —"] + list(_plist_map.keys())
         _ct_pl_sel    = _ct_v3.selectbox("Lista de precios", _ct_pl_opts)
+
         # ── Compras ────────────────────────────────────────────────────────
         st.markdown("##### 🛒 Compras")
         _ct_p1, _ct_p2 = st.columns(2)
@@ -4836,6 +4838,7 @@ with tab_contacts:
                     # Notas
                     if _ct_notes.strip():
                         _ct_vals["comment"] = _ct_notes.strip()
+
 
                     # Cuentas contables
                     if _ct_acct_rec_sel != "— Predeterminada —" and _ct_acct_rec_sel in _ct_acct_rec_map:
@@ -6611,40 +6614,38 @@ with tab_chat:
     import io     as _ioc
     import datetime as _dtc
 
-    st.subheader("🤖 Asistente Luminatec")
-    st.caption("Preguntá sobre facturas, saldos, socios. Pedí PDFs o exportes Excel. Adjuntá archivos para analizarlos.")
+    st.subheader("Asistente Luminatec")
+    st.caption("Pregunta sobre facturas, saldos, socios. Pedi PDFs o exportes Excel. Adjunta archivos para analizarlos.")
 
     _ant_key = st.secrets.get("ANTHROPIC_API_KEY", "")
     if not _ant_key:
-        st.warning("⚠️ Falta `ANTHROPIC_API_KEY` en los Secrets de Streamlit Cloud.")
+        st.warning("Falta ANTHROPIC_API_KEY en los Secrets de Streamlit Cloud.")
         st.stop()
 
-    # ── Session state ──────────────────────────────────────────────────────────
+    # Session state
     if "chat_msgs" not in st.session_state: st.session_state.chat_msgs = []
     if "chat_dl"   not in st.session_state: st.session_state.chat_dl   = []
 
-    # ── Helper: serializar bloque de contenido Claude → dict ──────────────────
     def _blk_to_dict(b):
         if isinstance(b, dict): return b
         t = getattr(b, "type", None)
-        if t == "text":          return {"type": "text", "text": b.text}
-        if t == "tool_use":      return {"type": "tool_use", "id": b.id, "name": b.name, "input": b.input}
-        if t == "tool_result":   return b.__dict__
+        if t == "text":        return {"type": "text", "text": b.text}
+        if t == "tool_use":    return {"type": "tool_use", "id": b.id, "name": b.name, "input": b.input}
         return {"type": "text", "text": str(b)}
 
-    # ── Generar PDF desde Odoo vía sesión HTTP ─────────────────────────────────
     def _odoo_pdf(doc_id, report="account.report_invoice_with_payments"):
         try:
             import requests as _rq
             _s = _rq.Session()
-            _auth = _s.post(f"{ODOO_URL}/web/session/authenticate",
-                json={"jsonrpc":"2.0","method":"call","id":1,
-                      "params":{"db":ODOO_DB,
-                                "login": st.session_state.get("user_email",""),
-                                "password": api_key}},
+            _auth = _s.post(
+                f"{ODOO_URL}/web/session/authenticate",
+                json={"jsonrpc": "2.0", "method": "call", "id": 1,
+                      "params": {"db": ODOO_DB,
+                                 "login": st.session_state.get("user_email", ""),
+                                 "password": api_key}},
                 timeout=15)
             if not _auth.json().get("result", {}).get("uid"):
-                return None, "Autenticación HTTP fallida"
+                return None, "Auth HTTP fallida"
             _r = _s.get(f"{ODOO_URL}/report/pdf/{report}/{doc_id}", timeout=90)
             if _r.status_code == 200 and _r.content[:4] == b"%PDF":
                 return _r.content, None
@@ -6652,7 +6653,6 @@ with tab_chat:
         except Exception as _e:
             return None, str(_e)
 
-    # ── Generar XLSX desde Odoo ────────────────────────────────────────────────
     def _odoo_xlsx(model, domain, fields, filename="export.xlsx"):
         try:
             import pandas as _pd
@@ -6666,23 +6666,22 @@ with tab_chat:
         except Exception as _e:
             return None, filename, str(_e)
 
-    # ── Definición de herramientas ─────────────────────────────────────────────
     _tools = [
         {
             "name": "odoo_search",
             "description": (
-                "Busca registros en Odoo. Modelos comunes: account.move (facturas), "
+                "Busca registros en Odoo. Modelos: account.move (facturas), "
                 "res.partner (socios/clientes), account.payment (pagos), "
-                "purchase.order (órdenes de compra), product.product (productos). "
-                "Para saldo pendiente de un socio usá account.move con payment_state in ['not_paid','partial']."
+                "purchase.order (ordenes de compra), product.product (productos). "
+                "Para saldo pendiente usá account.move con payment_state in ['not_paid','partial']."
             ),
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "model":  {"type": "string"},
-                    "domain": {"type": "array",  "description": "Lista de condiciones Odoo, ej: [['move_type','=','out_invoice'],['state','=','posted']]"},
-                    "fields": {"type": "array",  "items": {"type": "string"}},
-                    "limit":  {"type": "integer","default": 10},
+                    "domain": {"type": "array", "description": "Condiciones Odoo, ej: [['move_type','=','out_invoice'],['state','=','posted']]"},
+                    "fields": {"type": "array", "items": {"type": "string"}},
+                    "limit":  {"type": "integer", "default": 10},
                     "order":  {"type": "string", "default": ""}
                 },
                 "required": ["model", "domain", "fields"]
@@ -6702,21 +6701,20 @@ with tab_chat:
         },
         {
             "name": "odoo_export_xlsx",
-            "description": "Exporta un listado de registros de Odoo a un archivo Excel descargable.",
+            "description": "Exporta registros de Odoo a Excel descargable.",
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "model":    {"type": "string"},
                     "domain":   {"type": "array"},
                     "fields":   {"type": "array", "items": {"type": "string"}},
-                    "filename": {"type": "string", "description": "Nombre del archivo, ej: facturas_mayo_2026.xlsx"}
+                    "filename": {"type": "string"}
                 },
                 "required": ["model", "domain", "fields", "filename"]
             }
         }
     ]
 
-    # ── Ejecutar herramienta ───────────────────────────────────────────────────
     def _exec_tool(name, inp):
         if name == "odoo_search":
             try:
@@ -6726,45 +6724,49 @@ with tab_chat:
                     {"fields": inp["fields"], "limit": inp.get("limit", 10), "order": inp.get("order", "")})
                 return _jc.dumps(recs, ensure_ascii=False, default=str)
             except Exception as _e:
-                return f"Error búsqueda: {_e}"
-
+                return f"Error busqueda: {_e}"
         elif name == "odoo_get_pdf":
-            _did  = inp["doc_id"]
+            _did   = inp["doc_id"]
             _dname = inp.get("doc_name", f"documento_{_did}").replace("/", "-").replace(" ", "_")
             _pdf, _err = _odoo_pdf(_did)
             if _pdf:
                 _fname = _dname if _dname.endswith(".pdf") else f"{_dname}.pdf"
-                st.session_state.chat_dl.append(
-                    {"name": _fname, "data": _pdf, "mime": "application/pdf"})
-                return f"PDF '{_fname}' generado ({len(_pdf):,} bytes). Disponible para descargar arriba."
+                st.session_state.chat_dl.append({"name": _fname, "data": _pdf, "mime": "application/pdf"})
+                return f"PDF '{_fname}' generado ({len(_pdf):,} bytes). Disponible para descargar."
             return f"No se pudo generar el PDF: {_err}"
-
         elif name == "odoo_export_xlsx":
             _xb, _fn, _err = _odoo_xlsx(inp["model"], inp["domain"], inp["fields"],
                                          filename=inp.get("filename", "export.xlsx"))
             if _xb:
-                st.session_state.chat_dl.append(
-                    {"name": _fn, "data": _xb,
-                     "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"})
-                return f"Excel '{_fn}' generado. Disponible para descargar arriba."
+                st.session_state.chat_dl.append({
+                    "name": _fn, "data": _xb,
+                    "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"})
+                return f"Excel '{_fn}' generado. Disponible para descargar."
             return f"No se pudo generar el Excel: {_err}"
-
         return "Herramienta desconocida"
 
-    # ── Loop agente ────────────────────────────────────────────────────────────
     def _run_agent(user_text, file_blocks=None):
         import anthropic as _ac2
         _client = _ac2.Anthropic(api_key=_ant_key)
-        _system = (
-            "Sos el asistente inteligente de Luminatec, conectado a Odoo en tiempo real. "
-            "Podés buscar facturas, socios, pagos y cualquier registro. "
-            "Podés generar PDFs de facturas y exportar listas a Excel. "
-            "Cuando busques la última factura de alguien, usá account.move, "
-            "filtrá por partner_id.name ilike y state='posted', order invoice_date desc, limit 1. "
-            "Siempre respondé en español. Sé conciso. "
-            f"Fecha hoy: {_dtc.date.today().isoformat()}"
-        )
-        # Construir mensaje de usuario
+        _today = _dtc.date.today().isoformat()
+        _system = "\n".join([
+            "Sos el asistente inteligente de Luminatec, conectado a Odoo en tiempo real.",
+            "Podes buscar facturas, socios, pagos y cualquier registro.",
+            "Podes generar PDFs de facturas y exportar listas a Excel.",
+            "",
+            "REGLAS DE BUSQUEDA POR NOMBRE:",
+            "1. Cuando el usuario menciona un socio/cliente/proveedor, PRIMERO busca en",
+            "   res.partner con domain [['name','ilike','NOMBRE']], fields ['id','name'], limit 10.",
+            "2. Si encontras UNO solo, procede directamente con ese partner_id.",
+            "3. Si encontras VARIOS, lista las opciones y pregunta cual es el correcto.",
+            "   Ejemplo: 'Encontre varios: CASTILLO SACIFIA (ID 120379), CASTILLO HNOS (ID 84210). Cual?'",
+            "4. Si no encontras ninguno, decilo y sugeri variantes del nombre.",
+            "5. Con el partner confirmado, busca facturas en account.move por",
+            "   partner_id (ID numerico) y state=posted.",
+            "",
+            "Siempre responde en castellano. Se conciso.",
+            f"Fecha hoy: {_today}",
+        ])
         _ublocks = []
         if file_blocks:
             _ublocks.extend(file_blocks)
@@ -6772,7 +6774,6 @@ with tab_chat:
         st.session_state.chat_msgs.append({"role": "user", "content": _ublocks})
         _msgs = [{"role": m["role"], "content": m["content"]}
                  for m in st.session_state.chat_msgs]
-
         for _ in range(10):
             _resp = _client.messages.create(
                 model="claude-haiku-4-5-20251001",
@@ -6790,20 +6791,20 @@ with tab_chat:
                     _out = _exec_tool(_blk.name, _blk.input)
                     _results.append({"type": "tool_result", "tool_use_id": _blk.id, "content": _out})
             _msgs.append({"role": "user", "content": _results})
-
-        # Serializar y guardar historial
         st.session_state.chat_msgs = [
             {"role": m["role"],
-             "content": [_blk_to_dict(b) for b in (m["content"] if isinstance(m["content"], list) else [{"type":"text","text":str(m["content"])}])]}
+             "content": [_blk_to_dict(b) for b in (
+                 m["content"] if isinstance(m["content"], list)
+                 else [{"type": "text", "text": str(m["content"])}])]}
             for m in _msgs
         ]
 
-    # ── Render descargas pendientes ────────────────────────────────────────────
+    # Downloads pendientes
     if st.session_state.chat_dl:
         _dl_cols = st.columns(min(len(st.session_state.chat_dl), 4))
         for _i, _dl in enumerate(st.session_state.chat_dl):
             _dl_cols[_i % 4].download_button(
-                label=f"⬇️ {_dl['name']}",
+                label=f"Descargar {_dl['name']}",
                 data=_dl["data"],
                 file_name=_dl["name"],
                 mime=_dl["mime"],
@@ -6811,34 +6812,31 @@ with tab_chat:
             )
         st.divider()
 
-    # ── Render historial ───────────────────────────────────────────────────────
+    # Historial de mensajes
     for _m in st.session_state.chat_msgs:
         _role    = _m.get("role", "assistant")
         _content = _m.get("content", [])
         if not isinstance(_content, list):
             _content = [{"type": "text", "text": str(_content)}]
-
-        _texts      = [b["text"]  for b in _content if isinstance(b, dict) and b.get("type") == "text"  and b.get("text", "").strip()]
-        _tool_calls = [b          for b in _content if isinstance(b, dict) and b.get("type") == "tool_use"]
-
+        _texts      = [b["text"] for b in _content
+                       if isinstance(b, dict) and b.get("type") == "text" and b.get("text", "").strip()]
+        _tool_calls = [b for b in _content
+                       if isinstance(b, dict) and b.get("type") == "tool_use"]
         if not _texts and not _tool_calls:
             continue
-
         if _role == "user":
             if _texts:
                 with st.chat_message("user"):
                     st.markdown("\n".join(_texts))
         else:
-            with st.chat_message("assistant", avatar="🤖"):
+            with st.chat_message("assistant", avatar="robot"):
                 for _tc in _tool_calls:
-                    _tc_name = _tc.get("name", "tool")
-                    _tc_inp  = _tc.get("input", {})
-                    with st.expander(f"🔧 `{_tc_name}`", expanded=False):
-                        st.json(_tc_inp)
+                    with st.expander(f"Tool: {_tc.get('name','tool')}", expanded=False):
+                        st.json(_tc.get("input", {}))
                 if _texts:
                     st.markdown("\n".join(_texts))
 
-    # ── Input + upload ─────────────────────────────────────────────────────────
+    # Input y upload
     st.divider()
     _cu1, _cu2 = st.columns([5, 1])
     with _cu1:
@@ -6847,12 +6845,12 @@ with tab_chat:
             key=f"chat_up_{len(st.session_state.chat_msgs)}",
             label_visibility="collapsed")
     with _cu2:
-        if st.button("🔄 Nueva", key="chat_new_btn", use_container_width=True):
+        if st.button("Nueva", key="chat_new_btn", use_container_width=True):
             st.session_state.chat_msgs = []
             st.session_state.chat_dl   = []
             st.rerun()
 
-    _chat_in = st.chat_input("Preguntá algo, ej: ¿Facturas pendientes de PETDUR? / Descargame la última factura de Castillo")
+    _chat_in = st.chat_input("Pregunta algo, ej: Facturas pendientes de PETDUR / Descargame la ultima factura de Castillo")
 
     if _chat_in:
         _fblocks = []
@@ -6870,7 +6868,7 @@ with tab_chat:
                     "data": _b64c.b64encode(_fb).decode()}})
             else:
                 _fblocks.append({"type": "text", "text": f"[Archivo adjunto: {_chat_upload.name}]"})
-        with st.spinner("🤖 Pensando..."):
+        with st.spinner("Pensando..."):
             _run_agent(_chat_in, _fblocks or None)
         st.rerun()
 
