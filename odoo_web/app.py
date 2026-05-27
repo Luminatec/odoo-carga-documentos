@@ -6760,21 +6760,44 @@ with tab_recibos:
                         if not _already and _cret.get("importe", 0) > 0:
                             _new_uid = st.session_state[_ded_cnt_key] + 1
                             st.session_state[_ded_cnt_key] = _new_uid
-                            _cret_concepto = _cret.get("concepto", "Retención IIBB")
-                            # Buscar cuenta automáticamente por "ingresos brutos" o "iibb"
+                            _cret_concepto_pdf = _cret.get("concepto", "")
+                            # Construir lista de cuentas igual que el widget para calcular índice
                             _rc_accts_pre = get_all_accounts(models_url, uid, api_key)
+                            _rc_accts_pre_s = sorted(
+                                _rc_accts_pre,
+                                key=lambda x: (1 if "(copia)" in x[1].lower() else 0, x[1]))
+                            _rc_acct_opts_pre = ["— Seleccionar concepto —"] + [lbl for _, lbl in _rc_accts_pre_s]
+                            # Buscar cuenta por "ingresos brutos" / "iibb" / "retenc"
                             _ret_acct_id  = None
-                            for _aid, _albl in _rc_accts_pre:
+                            _ret_acct_lbl = ""
+                            _ret_acct_idx = 0
+                            _kws_ret = ["ingresos brutos", "iibb", "retenc"]
+                            # Primero intentar matchear con el concepto del PDF
+                            _concepto_low = _cret_concepto_pdf.lower()
+                            for _aid, _albl in _rc_accts_pre_s:
                                 _albl_low = _albl.lower()
-                                if ("ingresos brutos" in _albl_low or "iibb" in _albl_low
-                                        or "retenc" in _albl_low) and "(copia)" not in _albl_low:
-                                    _ret_acct_id = _aid
+                                if "(copia)" in _albl_low:
+                                    continue
+                                # Match exacto con palabras del concepto PDF
+                                if any(kw in _concepto_low and kw in _albl_low for kw in _kws_ret):
+                                    _ret_acct_id  = _aid
+                                    _ret_acct_lbl = _albl
                                     break
+                            # Fallback: cualquier cuenta de retención
+                            if not _ret_acct_id:
+                                for _aid, _albl in _rc_accts_pre_s:
+                                    _albl_low = _albl.lower()
+                                    if any(kw in _albl_low for kw in _kws_ret) and "(copia)" not in _albl_low:
+                                        _ret_acct_id  = _aid
+                                        _ret_acct_lbl = _albl
+                                        break
+                            if _ret_acct_lbl and _ret_acct_lbl in _rc_acct_opts_pre:
+                                _ret_acct_idx = _rc_acct_opts_pre.index(_ret_acct_lbl)
                             st.session_state[_ded_key].append({
                                 "uid":           _new_uid,
                                 "monto":         float(_cret["importe"]),
-                                "concepto_idx":  0,
-                                "concepto":      _cret_concepto,
+                                "concepto_idx":  _ret_acct_idx,
+                                "concepto":      _ret_acct_lbl,
                                 "account_id":    _ret_acct_id,
                                 "_ret_filename": _cret_fname,
                                 "_ret_auto":     True,
