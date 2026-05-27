@@ -3664,10 +3664,12 @@ def register_customer_payment(models, uid, api_key,
             except Exception:
                 pass
 
+            _wh_errors = []
             for _wh in withholdings:
                 _wh_amt = float(_wh.get("monto") or _wh.get("amount") or 0)
                 if _wh_amt <= 0 or not _ret_journal_id:
                     continue
+                # Pago outbound en el grupo: reduce el neto aplicado a la factura
                 _wh_vals = {
                     "payment_type":     "outbound",
                     "partner_type":     "customer",
@@ -3679,18 +3681,14 @@ def register_customer_payment(models, uid, api_key,
                     "memo":             _wh.get("concepto") or "Retención",
                     "payment_group_id": group_id,
                 }
-                # Si tiene cuenta específica, intentar usarla como write-off
-                if _wh.get("account_id"):
-                    try:
-                        _wh_vals["writeoff_account_id"] = _wh["account_id"]
-                        _wh_vals["payment_difference_handling"] = "reconcile"
-                    except Exception:
-                        pass
                 try:
                     models.execute_kw(ODOO_DB, uid, api_key,
                         "account.payment", "create", [_wh_vals])
-                except Exception:
-                    pass  # No bloquear si falla el pago de retención
+                except Exception as _whe:
+                    _wh_errors.append(str(_whe))
+            if _wh_errors:
+                # Retornar los errores como advertencia (el recibo principal ya quedó)
+                return True, f"__WH_WARN__{'|'.join(_wh_errors)}"
 
         # 4. Confirmar el grupo
         # Nota: post() retorna None en esta instalacion, lo que causa un error
@@ -7029,13 +7027,21 @@ with tab_recibos:
                                         cheques=_rc_cheque_vals if _rc_cheque_vals else None,
                                         withholdings=_rc_withholdings)
                                 if _rc_ok:
+                                    _wh_warn = isinstance(_rc_res, str) and _rc_res.startswith("__WH_WARN__")
                                     st.toast(
                                         f"Recibo registrado para {_rc_pname} — ARS {fmt_ars(_rc_neto)}", icon="✅")
                                     search_partners_by_cuits.clear()
                                     get_customer_unpaid_invoices.clear()
-                                    st.info(
-                                        "Presioná 🔄 Actualizar para ver "
-                                        "el estado actualizado.")
+                                    if _wh_warn:
+                                        _wh_detail = _rc_res.replace("__WH_WARN__", "")
+                                        st.warning(
+                                            f"⚠️ Recibo registrado, pero **no se pudo crear el pago de retención** "
+                                            f"en Odoo. Registralo manualmente.\n\n"
+                                            f"Detalle: `{_wh_detail}`")
+                                    else:
+                                        st.info(
+                                            "Presioná 🔄 Actualizar para ver "
+                                            "el estado actualizado.")
                                 else:
                                     st.error(f"Error al registrar en Odoo: {_rc_res}")
 
