@@ -4500,103 +4500,91 @@ with tab_orders:
                 st.session_state[_ss_overrides] = {}
 
             if _lineas_oc:
+                # Header row
+                _hc = st.columns([1, 3, 1, 2, 3])
+                for _hcol, _htxt in zip(_hc, ["Código", "Descripción", "Cant.", "Precio unit.", "Match Odoo"]):
+                    _hcol.markdown(f"<small><b>{_htxt}</b></small>", unsafe_allow_html=True)
+                st.divider()
+
                 for _li, _ln in enumerate(_lineas_oc):
-                    _override = st.session_state[_ss_overrides].get(_li)
-                    if _override:
-                        _op = _override
-                    else:
-                        _prods = search_product_by_code_or_name(
+                    # Cache candidates (limit=5) para el dropdown
+                    _cands_key = f"oc_cands_{uf.name}_{_li}"
+                    if _cands_key not in st.session_state:
+                        _cands = search_product_by_code_or_name(
                             models_url, uid, api_key,
                             code=_ln.get("codigo",""),
-                            name_keywords=_ln.get("descripcion",""),
+                            name_keywords=(
+                                (_ln.get("descripcion","") + " " +
+                                 _ln.get("marca","") + " " +
+                                 _ln.get("modelo","")).strip()
+                            ),
                             ean13=_ln.get("ean13",""),
-                            limit=1,
+                            limit=5,
                         )
-                        _op = _prods[0] if _prods else None
-                    _cost  = float(_op["standard_price"]) if _op else 0.0
-                    _price = safe_float(_ln.get("precio_unit", 0))
+                        st.session_state[_cands_key] = _cands
+                    _cands = st.session_state.get(_cands_key) or []
+
+                    # Override or auto
+                    _override = st.session_state[_ss_overrides].get(_li)
+                    _op = _override if _override is not None else (_cands[0] if _cands else None)
+
+                    # Build selectbox options dict  {label: product_dict}
+                    _no_match_lbl = f"⚠️ Sin match [{_ln.get('codigo','')}]"
+                    _seen_ids = set()
+                    _cand_opts = {}
+                    for _cr in _cands:
+                        _lbl = f"{_cr['name']}  [{_cr.get('default_code','')}]"
+                        if _cr["id"] not in _seen_ids:
+                            _cand_opts[_lbl] = _cr
+                            _seen_ids.add(_cr["id"])
+                    # Ensure current override appears even if not in candidates
+                    _cur_op_lbl = None
+                    if _op:
+                        _cur_op_lbl = f"{_op['name']}  [{_op.get('default_code','')}]"
+                        if _op["id"] not in _seen_ids:
+                            _cand_opts = {_cur_op_lbl: _op, **_cand_opts}
+                    _opt_keys = [_no_match_lbl] + list(_cand_opts.keys())
+                    _cur_idx = (_opt_keys.index(_cur_op_lbl)
+                                if _cur_op_lbl and _cur_op_lbl in _opt_keys else 0)
+
+                    # Row columns
+                    _rc = st.columns([1, 3, 1, 2, 3])
+                    _rc[0].markdown(f"`{_ln.get('codigo','')}`")
+                    _desc_parts = [x for x in [
+                        _ln.get("descripcion",""),
+                        _ln.get("marca",""),
+                        _ln.get("modelo",""),
+                    ] if x]
+                    _rc[1].markdown(" · ".join(_desc_parts) if _desc_parts else "—")
+                    _rc[2].markdown(str(int(_ln.get("cantidad",0))))
+                    _rc[3].markdown(fmt_ars(_ln.get("precio_unit",0)))
+
+                    _sel_lbl = _rc[4].selectbox(
+                        "Match Odoo",
+                        options=_opt_keys,
+                        index=_cur_idx,
+                        key=f"sel_match_{uf.name}_{_li}",
+                        label_visibility="collapsed",
+                    )
+                    # Update override when user changes selection
+                    _sel_op = _cand_opts.get(_sel_lbl) if _sel_lbl != _no_match_lbl else None
+                    _sel_id = (_sel_op or {}).get("id")
+                    _cur_id = (_op or {}).get("id")
+                    if _sel_id != _cur_id:
+                        st.session_state[_ss_overrides][_li] = _sel_op
+                        st.rerun()
+
+                    _final_op = _sel_op
+                    _cost   = float(_final_op["standard_price"]) if _final_op else 0.0
+                    _price  = safe_float(_ln.get("precio_unit", 0))
                     _margin = ((_price - _cost) / _price * 100) if _price > 0 else 0.0
                     _enriched.append({**_ln,
-                        "odoo_product": _op,
+                        "odoo_product": _final_op,
                         "cost": _cost,
                         "margin_pct": _margin,
                     })
-
-                def _fmt_cost(v):
-                    """Igual que fmt_ars pero muestra $ 0,00 para costo cero."""
-                    try:
-                        s = "{:,.2f}".format(float(v))
-                        return "$ " + s.replace(",", "X").replace(".", ",").replace("X", ".")
-                    except Exception:
-                        return "$ 0,00"
-
-                _df_rows = []
-                for _el in _enriched:
-                    _df_rows.append({
-                        "Código":        _el.get("codigo",""),
-                        "Descripción":   _el.get("descripcion",""),
-                        "Cant.":         _el.get("cantidad",0),
-                        "Precio unit.":  fmt_ars(_el.get("precio_unit",0)),
-                        "IVA %":         _el.get("iva_pct","21"),
-                        "Subtotal":      fmt_ars(_el.get("subtotal",0)),
-                        "Costo Odoo":    _fmt_cost(_el.get("cost",0)),
-                        "Margen %":      f"{_el.get('margin_pct',0):.1f}%",
-                        "Match Odoo":    (_el["odoo_product"]["name"]
-                                          if _el.get("odoo_product")
-                                          else f"⚠️ [{_el.get('codigo','')}]"),
-                    })
-                st.dataframe(pd.DataFrame(_df_rows), use_container_width=True, hide_index=True)
-                st.caption("✏️ ¿Algún match incorrecto? Expandí el panel de abajo para corregirlo.")
-
-                # ── Edición / reasignación de match para todas las líneas ───────
-                _n_unmatched = sum(1 for el in _enriched if not el.get("odoo_product"))
-                _exp_label = (
-                    f"🔍 {_n_unmatched} producto(s) sin match — asignar manualmente"
-                    if _n_unmatched > 0
-                    else "✏️ Editar asignaciones de productos"
-                )
-                with st.expander(_exp_label, expanded=(_n_unmatched > 0)):
-                    st.caption("Escribí nombre o código Odoo para reasignar cualquier línea.")
-                    for _li2, _el2 in enumerate(_enriched):
-                            _cur_match = (_el2.get("odoo_product") or {}).get("name","")
-                            _cur_code  = (_el2.get("odoo_product") or {}).get("default_code","")
-                            _match_str = f"{_cur_match} [{_cur_code}]" if _cur_match else "⚠️ Sin match"
-                            st.caption(
-                                f"**{_el2.get('descripcion','')}** · "
-                                f"Código OC: `{_el2.get('codigo','')}` · "
-                                f"Match actual: *{_match_str}*"
-                            )
-                            _sk_q   = f"mq_{uf.name}_{_li2}"
-                            _sk_sel = f"ms_{uf.name}_{_li2}"
-                            _sk_btn = f"mc_{uf.name}_{_li2}"
-                            _mq = st.text_input(
-                                "Reasignar — buscar en Odoo (nombre o código)",
-                                key=_sk_q,
-                                placeholder="Ej: G2110  o  LCANO00015",
-                            )
-                            if _mq and len(_mq) >= 2:
-                                _res = search_product_by_code_or_name(
-                                    models_url, uid, api_key,
-                                    code=_mq,
-                                    name_keywords=_mq,
-                                    limit=8,
-                                )
-                                if _res:
-                                    _opts_labels = [
-                                        f"{r['name']}  [{r.get('default_code','')}]"
-                                        for r in _res
-                                    ]
-                                    _chosen_lbl = st.selectbox(
-                                        "Resultados", _opts_labels, key=_sk_sel
-                                    )
-                                    _chosen_idx = _opts_labels.index(_chosen_lbl)
-                                    if st.button("✅ Confirmar asignación", key=_sk_btn):
-                                        st.session_state[_ss_overrides][_li2] = _res[_chosen_idx]
-                                        st.rerun()
-                                else:
-                                    st.caption("Sin resultados — probá con otro término.")
-                            if _li2 < len(_enriched) - 1:
-                                st.divider()
+                    if _li < len(_lineas_oc) - 1:
+                        st.divider()
             else:
                 st.info("No se detectaron líneas de productos automáticamente.")
 
