@@ -4680,18 +4680,6 @@ with tab_contacts:
     _ct_acct_rec_map = {n: i for i, n in _ct_accts_rec}
     _ct_acct_pay_map = {n: i for i, n in _ct_accts_pay}
 
-    # Cargar empresas activas para campo Referente (is_company=True)
-    try:
-        _ct_all_partners = models.execute_kw(
-            ODOO_DB, uid, api_key, "res.partner", "search_read",
-            [[["active", "=", True], ["is_company", "=", True]]],
-            {"fields": ["id", "name"], "order": "name asc", "limit": 2000})
-        _ct_all_partners = [(r["id"], r["name"]) for r in _ct_all_partners]
-    except Exception:
-        _ct_all_partners = []
-    _ct_partner_names  = ["— Sin referente —"] + [n for _, n in _ct_all_partners]
-    _ct_partner_id_map = {n: i for i, n in _ct_all_partners}  # name → id
-
     with st.form("ct_form"):
         # ── Persona / Empresa ──────────────────────────────────────────────
         _ct_company_type = st.radio(
@@ -4754,14 +4742,6 @@ with tab_contacts:
         _ct_pt_sel    = _ct_v2.selectbox("Términos de pago (ventas)", _ct_pt_opts)
         _ct_pl_opts   = ["— Predeterminado —"] + list(_plist_map.keys())
         _ct_pl_sel    = _ct_v3.selectbox("Lista de precios", _ct_pl_opts)
-        # Referente comercial
-        _ct_referido = st.selectbox(
-            "Referente",
-            options=_ct_partner_names,
-            index=0,
-            help="Contacto de Odoo que actúa como referente comercial",
-        )
-
         # ── Compras ────────────────────────────────────────────────────────
         st.markdown("##### 🛒 Compras")
         _ct_p1, _ct_p2 = st.columns(2)
@@ -4856,12 +4836,6 @@ with tab_contacts:
                     # Notas
                     if _ct_notes.strip():
                         _ct_vals["comment"] = _ct_notes.strip()
-
-                    # Referente (Many2one → referrer_id)
-                    if _ct_referido and _ct_referido != "— Sin referente —":
-                        _ref_pid = _ct_partner_id_map.get(_ct_referido)
-                        if _ref_pid:
-                            _ct_vals["referrer_id"] = _ref_pid
 
                     # Cuentas contables
                     if _ct_acct_rec_sel != "— Predeterminada —" and _ct_acct_rec_sel in _ct_acct_rec_map:
