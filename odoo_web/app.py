@@ -1835,6 +1835,26 @@ def search_product_by_code_or_name(models_url, uid, api_key,
     return []
 
 
+def get_referidos(models_url, uid, api_key):
+    """Devuelve lista de (id, nombre) de partners usados como Referido en Odoo."""
+    try:
+        _mx = xmlrpc.client.ServerProxy(models_url)
+        groups = _mx.execute_kw(
+            ODOO_DB, uid, api_key,
+            "res.partner", "read_group",
+            [[["x_studio_referido_1", "!=", False]],
+             ["x_studio_referido_1"],
+             ["x_studio_referido_1"]],
+            {})
+        result = []
+        for g in groups:
+            val = g.get("x_studio_referido_1")
+            if val and isinstance(val, (list, tuple)) and len(val) == 2:
+                result.append((val[0], val[1]))
+        return sorted(result, key=lambda x: x[1])
+    except Exception:
+        return []
+
 def create_partner(models, uid, api_key, name, vat, street="", phone="", email_addr=""):
     """Crea un nuevo cliente en Odoo y retorna su ID."""
     vals = {"name": name, "customer_rank": 1, "is_company": True}
@@ -4792,14 +4812,16 @@ with tab_contacts:
     _ct_users    = get_odoo_users(models_url, uid, api_key)
     _ct_pts      = get_all_payment_terms(models_url, uid, api_key)   # [(id,name)]
     _ct_plists   = get_pricelists(models_url, uid, api_key)
-    _ct_cuit_tid = get_cuit_id_type(models_url, uid, api_key)
+    _ct_cuit_tid  = get_cuit_id_type(models_url, uid, api_key)
+    _ct_referidos = get_referidos(models_url, uid, api_key)
 
     # helpers: map name→id
     _state_map  = {n: i for i, n in _ct_states}
     _afip_map   = {n: i for i, n in _ct_afip}
     _user_map   = {n: i for i, n in _ct_users}
     _pt_map     = {n: i for i, n in _ct_pts}
-    _plist_map  = {n: i for i, n in _ct_plists}
+    _plist_map    = {n: i for i, n in _ct_plists}
+    _referido_map = {n: i for i, n in _ct_referidos}
 
     # Default provincia
     _def_prov = ""
@@ -4891,6 +4913,13 @@ with tab_contacts:
         _ct_pl_opts   = ["— Predeterminado —"] + list(_plist_map.keys())
         _ct_pl_sel    = _ct_v3.selectbox("Lista de precios", _ct_pl_opts)
 
+        _ct_ref_opts  = ["— Sin referido —"] + list(_referido_map.keys())
+        _ct_ref_sel   = st.selectbox(
+            "Referido",
+            _ct_ref_opts,
+            help="Quien refirio a este contacto",
+        )
+
         # ── Compras ────────────────────────────────────────────────────────
         st.markdown("##### 🛒 Compras")
         _ct_p1, _ct_p2 = st.columns(2)
@@ -4975,6 +5004,8 @@ with tab_contacts:
                         _ct_vals["property_payment_term_id"] = _pt_map[_ct_pt_sel]
                     if _ct_pl_sel != "— Predeterminado —":
                         _ct_vals["property_product_pricelist"] = _plist_map[_ct_pl_sel]
+                    if _ct_ref_sel != "— Sin referido —" and _ct_ref_sel in _referido_map:
+                        _ct_vals["x_studio_referido_1"] = _referido_map[_ct_ref_sel]
 
                     # Compras
                     if _ct_pt_purch_sel != "— Sin plazo —":
