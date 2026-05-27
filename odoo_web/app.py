@@ -4729,6 +4729,30 @@ with tab_orders:
 
             # ── SECCIÓN 7: CREAR PEDIDO ───────────────────────────────────
             st.markdown("---")
+
+            # Campo Referido
+            _oc_referidos  = get_referidos(models_url, uid, api_key)
+            _oc_ref_map    = {n: i for i, n in _oc_referidos}
+            _oc_ref_opts   = ["— Sin referido —"] + list(_oc_ref_map.keys())
+            _oc_ref_default = 0
+            if _partner_id_oc and _oc_ref_map:
+                try:
+                    _oc_pdata = models.execute_kw(ODOO_DB, uid, api_key,
+                        "res.partner", "read", [[_partner_id_oc]],
+                        {"fields": ["x_studio_referido_1"]})[0]
+                    _oc_existing = _oc_pdata.get("x_studio_referido_1")
+                    if _oc_existing and isinstance(_oc_existing, (list, tuple)):
+                        _rname = _oc_existing[1]
+                        if _rname in _oc_ref_opts:
+                            _oc_ref_default = _oc_ref_opts.index(_rname)
+                except Exception:
+                    pass
+            _oc_ref_sel = st.selectbox(
+                "Referido", _oc_ref_opts, index=_oc_ref_default,
+                key=f"oc_ref_{uf.name}",
+                help="Quién refirió a este cliente",
+            )
+
             _btn_disabled = not bool(_partner_id_oc)
             if _btn_disabled:
                 st.caption("🔒 Identificá o creá el cliente para habilitar la creación del pedido.")
