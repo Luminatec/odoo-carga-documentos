@@ -1038,6 +1038,14 @@ def create_sale_order(models, uid, api_key, partner_id, note, lines, filename, f
         call(models, uid, api_key, "sale.order", "action_confirm", [[order_id]])
     except Exception:
         pass  # si falla la confirmación el pedido queda en draft pero no bloquea
+    # Cancelar los pickings de entrega auto-generados: el inventario se mueve con el remito
+    try:
+        _pick_ids = call(models, uid, api_key, "stock.picking", "search",
+                         [[("sale_id", "=", order_id), ("picking_type_code", "=", "outgoing")]])
+        if _pick_ids:
+            call(models, uid, api_key, "stock.picking", "action_cancel", [_pick_ids])
+    except Exception:
+        pass  # no bloquear si falla la cancelación del picking
     return order_id
 
 def _to_float(v):
