@@ -2207,6 +2207,90 @@ def extract_image_oc_fields(file_bytes):
     return result, {}, text
 
 
+
+def _claude_api_extract_oc(file_bytes: bytes, mime_type: str = "application/pdf") -> dict:
+    """
+    Fallback: usa Claude API directamente para extraer campos de un pedido/OC.
+    Se usa cuando BOT_URL no esta configurado o el bot falla.
+    """
+    import base64 as _b64c2, os as _os2, json as _jc2
+    _ant_key2 = _os2.getenv("ANTHROPIC_API_KEY", "")
+    if not _ant_key2:
+        return {}
+    try:
+        import anthropic as _ac2
+        _client2 = _ac2.Anthropic(api_key=_ant_key2)
+        _prompt2 = (
+            "Analiza este documento (puede ser un pedido, orden de compra, relacion de pedidos, "
+            "presupuesto o cualquier formato de solicitud de productos). "
+            "Extrae los datos y devuelve SOLO un JSON con exactamente estos campos:\n"
+            "{\n"
+            '  "cuit": "CUIT del cliente/empresa que hace el pedido (solo digitos, sin guiones), vacio si no aparece",\n'
+            '  "cliente_nombre": "nombre o razon social del cliente que hace el pedido",\n'
+            '  "numero_oc": "numero de pedido, orden de compra u orden",\n'
+            '  "fecha": "fecha del documento en formato DD/MM/YYYY",\n'
+            '  "condiciones_pago": "texto de condicion o plazo de pago",\n'
+            '  "dias_pago": numero entero de dias de pago o null,\n'
+            '  "total": "monto total como texto (ej: 17.690.000)",\n'
+            '  "lineas": [\n'
+            '    {\n'
+            '      "codigo": "codigo interno del producto",\n'
+            '      "descripcion": "articulo o descripcion",\n'
+            '      "marca": "marca",\n'
+            '      "modelo": "modelo",\n'
+            '      "cantidad": cantidad como numero entero,\n'
+            '      "precio_unit": precio unitario como numero flotante,\n'
+            '      "subtotal": total de la linea como numero flotante\n'
+            '    }\n'
+            '  ]\n'
+            "}"
+        )
+        _resp2 = _client2.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=2048,
+            messages=[{"role": "user", "content": [
+                {"type": "document", "source": {
+                    "type": "base64", "media_type": mime_type,
+                    "data": _b64c2.b64encode(file_bytes).decode()}},
+                {"type": "text", "text": _prompt2}
+            ]}]
+        )
+        _text2 = _resp2.content[0].text.strip()
+        _js2 = re.search(r'\{[\s\S]*\}', _text2)
+        if not _js2:
+            return {}
+        _data2 = _jc2.loads(_js2.group())
+        result2 = {
+            "cuit": str(_data2.get("cuit", "") or "").replace("-","").replace(" ",""),
+            "cliente_nombre": str(_data2.get("cliente_nombre", "") or ""),
+            "numero_oc": str(_data2.get("numero_oc", "") or ""),
+            "fecha": str(_data2.get("fecha", "") or ""),
+            "fecha_iso": "",
+            "condiciones_pago": str(_data2.get("condiciones_pago", "") or ""),
+            "dias_pago": _data2.get("dias_pago"),
+            "total": str(_data2.get("total", "") or ""),
+            "lineas": [],
+            "_source": "claude_api",
+        }
+        # parse fecha_iso
+        _fm2 = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", result2["fecha"])
+        if _fm2:
+            result2["fecha_iso"] = f"{_fm2.group(3)}-{_fm2.group(2).zfill(2)}-{_fm2.group(1).zfill(2)}"
+        for _ln2 in (_data2.get("lineas") or []):
+            result2["lineas"].append({
+                "codigo":      str(_ln2.get("codigo", "") or ""),
+                "descripcion": str(_ln2.get("descripcion", "") or ""),
+                "marca":       str(_ln2.get("marca", "") or ""),
+                "modelo":      str(_ln2.get("modelo", "") or ""),
+                "cantidad":    float(_ln2.get("cantidad") or 0),
+                "precio_unit": float(_ln2.get("precio_unit") or 0),
+                "subtotal":    float(_ln2.get("subtotal") or 0),
+                "iva_pct":     21.0,
+            })
+        return result2
+    except Exception:
+        return {}
+
 def extract_oc_fields(file_bytes):
     """
     Parser para Órdenes de Compra de clientes (formato heterogéneo).
@@ -2223,6 +2307,17 @@ def extract_oc_fields(file_bytes):
         except Exception:
             _raw = ""
         return _bot, [], _raw
+
+    # Fallback: Claude API directo (cuando BOT_URL no esta configurado)
+    _claude_r = _claude_api_extract_oc(file_bytes)
+    if _claude_r.get("numero_oc") or _claude_r.get("lineas"):
+        try:
+            import pdfplumber
+            with pdfplumber.open(BytesIO(file_bytes)) as _pdf:
+                _raw = "\n".join(p.extract_text() or "" for p in _pdf.pages)
+        except Exception:
+            _raw = ""
+        return _claude_r, [], _raw
 
     try:
         import pdfplumber
@@ -4288,22 +4383,44 @@ with tab_orders:
             # CUIT editable en tiempo real (fuera del form), igual que en Facturas
             _oc_cuit_key = f"oc_cuit_edit_{uf.name}"
             _oc_cuit_detected = oc_fields.get("cuit", "")
+            _oc_name_detected = oc_fields.get("cliente_nombre", "")
             if _oc_cuit_key not in st.session_state:
-                st.session_state[_oc_cuit_key] = _oc_cuit_detected
+                # Pre-llenar con nombre si no hay CUIT
+                st.session_state[_oc_cuit_key] = _oc_cuit_detected or _oc_name_detected
             _oc_cuit = st.text_input(
-                "CUIT del cliente",
+                "CUIT o razon social del cliente",
                 key=_oc_cuit_key,
-                placeholder="30-12345678-9",
-                help="Detectado del documento. Corregilo si es necesario.",
+                placeholder="30-12345678-9  o  COPPEL S.A.",
+                help="Detectado del documento. Podés buscar por CUIT o nombre.",
             ).strip()
             _oc_cuit_norm = _oc_cuit.replace("-","").replace(" ","")
 
-            # Lookup por CUIT si todavía no tenemos partner resuelto
+            # Lookup por CUIT o nombre si todavía no tenemos partner resuelto
             if _oc_cuit and not st.session_state[_ss_pid]:
-                _partner_oc = search_partner_by_cuit(models_url, uid, api_key, _oc_cuit)
+                # Intentar por CUIT primero
+                _partner_oc = search_partner_by_cuit(models_url, uid, api_key, _oc_cuit) if len(_oc_cuit_norm) >= 10 else None
                 if _partner_oc:
                     st.session_state[_ss_pid]   = _partner_oc[0]
                     st.session_state[_ss_pname] = _partner_oc[1]
+                elif len(_oc_cuit) >= 3:
+                    # Fallback: buscar por nombre
+                    _oc_cands = search_partner_by_cuit_or_name(models_url, uid, api_key, _oc_cuit, limit=6)
+                    if len(_oc_cands) == 1:
+                        st.session_state[_ss_pid]   = _oc_cands[0]["id"]
+                        st.session_state[_ss_pname] = _oc_cands[0]["name"]
+                    elif len(_oc_cands) > 1:
+                        _oc_opt_map = {f"{r['name']}  [{r.get('vat') or '—'}]": r for r in _oc_cands}
+                        _occ1, _occ2 = st.columns([4, 1])
+                        with _occ1:
+                            _oc_sel_lbl = st.selectbox("Resultados", list(_oc_opt_map.keys()),
+                                key=f"oc_sel_{uf.name}", label_visibility="collapsed")
+                        with _occ2:
+                            st.write("")
+                            if st.button("Usar", key=f"oc_use_{uf.name}"):
+                                _ch = _oc_opt_map[_oc_sel_lbl]
+                                st.session_state[_ss_pid]   = _ch["id"]
+                                st.session_state[_ss_pname] = _ch["name"]
+                                st.rerun()
 
             _partner_id_oc   = st.session_state[_ss_pid]
             _partner_name_oc = st.session_state[_ss_pname]
