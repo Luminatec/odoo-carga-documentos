@@ -6885,6 +6885,36 @@ with tab_chat:
                 },
                 "required": ["model", "domain", "fields", "filename"]
             }
+        },
+        {
+            "name": "odoo_aggregate",
+            "description": (
+                "Agrega datos de Odoo con SUM/COUNT/AVG directamente en el servidor (read_group). "
+                "Ideal para totales: cuanto se facturo en un periodo, cantidad de facturas, "
+                "suma de pagos, etc. Devuelve un solo registro con los totales calculados. "
+                "Ejemplo: para total facturado en Mayo usar model='account.move', "
+                "domain=[['move_type','=','out_invoice'],['state','=','posted'],"
+                "['invoice_date','>=','2026-05-01'],['invoice_date','<=','2026-05-31']], "
+                "aggregate_fields=['amount_total:sum','id:count']."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "model":            {"type": "string"},
+                    "domain":           {"type": "array"},
+                    "aggregate_fields": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Campos con funcion: 'amount_total:sum', 'id:count', 'amount_total:avg'"
+                    },
+                    "group_by": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Opcional: agrupar por campo, ej: ['partner_id'] o ['invoice_date:month']"
+                    }
+                },
+                "required": ["model", "domain", "aggregate_fields"]
+            }
         }
     ]
 
@@ -6919,9 +6949,54 @@ with tab_chat:
                     "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"})
                 return f"Excel '{_fn}' generado. Disponible para descargar."
             return f"No se pudo generar el Excel: {_err}"
+        elif name == "odoo_aggregate":
+            try:
+                _agg_fields = inp.get("aggregate_fields", [])
+                _group_by   = inp.get("group_by", [])
+                # Parsear campos de agregacion: "amount_total:sum" → ("amount_total", "sum")
+                _spec_fields = []
+                _spec_agg    = {}
+                for _af in _agg_fields:
+                    if ":" in _af:
+                        _fn, _func = _af.rsplit(":", 1)
+                        _spec_fields.append(_fn)
+                        _spec_agg[_fn] = _func
+                    else:
+                        _spec_fields.append(_af)
+                _all_fields = list(set(_spec_fields + _group_by))
+                _rg = models.execute_kw(ODOO_DB, uid, api_key,
+                    inp["model"], "read_group",
+                    [inp["domain"], _all_fields, _group_by or []],
+                    {"lazy": False})
+                # Simplificar resultado
+                _out_rows = []
+                for _row in _rg:
+                    _out_row = {}
+                    for _fn in _spec_fields:
+                        _out_row[_fn] = _row.get(_fn)
+                        if _fn + "_count" in _row:
+                            _out_row[_fn + "_count"] = _row[_fn + "_count"]
+                    for _gb in _group_by:
+                        _gb_base = _gb.split(":")[0]
+                        if _gb_base in _row:
+                            _out_row[_gb_base] = _row[_gb_base]
+                    _out_row["__count"] = _row.get("__count", 0)
+                    _out_rows.append(_out_row)
+                return _jc.dumps(_out_rows, ensure_ascii=False, default=str)
+            except Exception as _ae:
+                return f"Error agregacion: {_ae}"
         return "Herramienta desconocida"
 
     def _run_agent(user_text, file_blocks=None):
+        try:
+         _run_agent_inner(user_text, file_blocks)
+        except Exception as _outer_err:
+            st.session_state.chat_msgs.append({
+                "role": "assistant",
+                "content": [{"type": "text", "text": f"⚠️ Error inesperado: {_outer_err}"}]
+            })
+
+    def _run_agent_inner(user_text, file_blocks=None):
         import anthropic as _ac2
         _client = _ac2.Anthropic(api_key=_ant_key)
         _today = _dtc.date.today().isoformat()
@@ -6956,6 +7031,8 @@ with tab_chat:
             "   fields ['id','name','partner_id','invoice_date','amount_total','payment_state'].",
             "",
             "REGLAS GENERALES:",
+            "- Para preguntas de TOTALES o CANTIDADES (cuanto se facturo, cuantas facturas, etc.)",
+            "  SIEMPRE usa odoo_aggregate con read_group en lugar de odoo_search. Es mas rapido y exacto.",
             "- NUNCA te rindas en el primer intento fallido. Probá al menos 2 estrategias distintas.",
             "- Si una búsqueda da vacío, ajustá el domain y reintentá automáticamente.",
             "- Usá ilike para búsquedas parciales, nunca '=' para nombres.",
@@ -7024,6 +7101,7 @@ with tab_chat:
                 if len(_qr_matches) > 1:
                     st.session_state.chat_qr = [{"label": n.strip(), "id": int(i)} for n, i in _qr_matches]
                 break
+
 
     # Downloads pendientes
     if st.session_state.chat_dl:
