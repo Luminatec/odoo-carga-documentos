@@ -3640,47 +3640,74 @@ def register_customer_payment(models, uid, api_key,
             "account.payment", "create", [pay_vals])
 
         # 3c. Pagos adicionales por retenciones (en el mismo grupo)
-        # Cada retención se registra como un pago inbound de monto negativo
-        # usando un diario de tipo "general" (Misc / Retenciones).
         if withholdings:
-            # Buscar diario para retenciones: "retenc" > "misc" > "general" > cualquier general
-            _ret_journal_id = None
+            # Cargar todos los diarios generales/cash una sola vez
+            _all_jrnls = []
             try:
-                _jrnls = models.execute_kw(ODOO_DB, uid, api_key,
+                _all_jrnls = models.execute_kw(ODOO_DB, uid, api_key,
                     "account.journal", "search_read",
                     [[("type", "in", ["general", "cash"])]],
-                    {"fields": ["id", "name"], "limit": 50})
-                _pref = ["retenc", "retencion", "iibb", "misc", "varios", "general", "op"]
-                for _pword in _pref:
-                    for _j in _jrnls:
-                        if _pword in _j["name"].lower():
-                            _ret_journal_id = _j["id"]
-                            break
-                    if _ret_journal_id:
-                        break
-                # Fallback: primer diario general disponible
-                if not _ret_journal_id and _jrnls:
-                    _ret_journal_id = _jrnls[0]["id"]
+                    {"fields": ["id", "name"], "limit": 100})
             except Exception:
                 pass
 
-            # Buscar payment_method_line_id para el diario de retenciones
-            _wh_pml_id = None
-            if _ret_journal_id:
-                try:
-                    _wh_pml_lines = models.execute_kw(ODOO_DB, uid, api_key,
-                        "account.payment.method.line", "search_read",
-                        [[["journal_id", "=", _ret_journal_id]]],
-                        {"fields": ["id", "name"], "limit": 1})
-                    _wh_pml_id = _wh_pml_lines[0]["id"] if _wh_pml_lines else None
-                except Exception:
-                    pass
+            def _find_journal_for_wh(concepto_str):
+                """Elige el diario más específico para la retención dada su descripción."""
+                _clow = (concepto_str or "").lower()
+                # Provincias argentinas para matchear en nombre de diario
+                _provs = [
+                    "misiones", "buenos aires", "cordoba", "córdoba",
+                    "santa fe", "mendoza", "corrientes", "chaco",
+                    "formosa", "salta", "jujuy", "tucuman", "tucumán",
+                    "catamarca", "rioja", "san juan", "san luis",
+                    "neuquen", "neuquén", "rio negro", "chubut",
+                    "santa cruz", "entre rios", "la pampa", "tierra del fuego",
+                ]
+                # 1. Diario que coincide en provincia + "retenc"/"iibb"
+                for _prov in _provs:
+                    if _prov in _clow:
+                        for _j in _all_jrnls:
+                            _jlow = _j["name"].lower()
+                            if _prov in _jlow and ("retenc" in _jlow or "iibb" in _jlow):
+                                return _j["id"]
+                # 2. Diario que coincide solo en provincia
+                for _prov in _provs:
+                    if _prov in _clow:
+                        for _j in _all_jrnls:
+                            if _prov in _j["name"].lower():
+                                return _j["id"]
+                # 3. Cualquier diario con "retenc" o "iibb"
+                for _kw in ["retenc", "retencion", "iibb"]:
+                    for _j in _all_jrnls:
+                        if _kw in _j["name"].lower():
+                            return _j["id"]
+                # 4. Fallback misc/general
+                for _kw in ["misc", "varios", "general", "op"]:
+                    for _j in _all_jrnls:
+                        if _kw in _j["name"].lower():
+                            return _j["id"]
+                return _all_jrnls[0]["id"] if _all_jrnls else None
 
             _wh_errors = []
             for _wh in withholdings:
                 _wh_amt = float(_wh.get("monto") or _wh.get("amount") or 0)
-                if _wh_amt <= 0 or not _ret_journal_id:
+                if _wh_amt <= 0:
                     continue
+                # Diario específico según provincia/concepto de esta retención
+                _ret_journal_id = _find_journal_for_wh(_wh.get("concepto", ""))
+                if not _ret_journal_id:
+                    _wh_errors.append(f"Sin diario para retención: {_wh.get('concepto','')}")
+                    continue
+                # payment_method_line_id para este diario
+                _wh_pml_id = None
+                try:
+                    _wh_pml_lines = models.execute_kw(ODOO_DB, uid, api_key,
+                        "account.payment.method.line", "search_read",
+                        [[["journal_id", "=", _ret_journal_id]]],
+                        {"fields": ["id"], "limit": 1})
+                    _wh_pml_id = _wh_pml_lines[0]["id"] if _wh_pml_lines else None
+                except Exception:
+                    pass
                 # Pago outbound en el grupo: reduce el neto aplicado a la factura
                 _wh_vals = {
                     "payment_type":     "outbound",
@@ -6961,8 +6988,19 @@ with tab_recibos:
                             st.error("El importe neto debe ser mayor a cero.")
                         else:
                             _rc_date_str = _rc_date.strftime("%Y-%m-%d")
-                            # Obtener currency_id de la primera factura seleccionada
-                            _rc_cur_id = 1  # ARS por defecto
+                            # Obtener currency_id: primero buscar ARS dinámicamente
+                            _rc_cur_id = None
+                            try:
+                                _ars_cur = models.execute_kw(ODOO_DB, uid, api_key,
+                                    "res.currency", "search_read",
+                                    [[("name", "=", "ARS"), ("active", "in", [True, False])]],
+                                    {"fields": ["id"], "limit": 1})
+                                if _ars_cur:
+                                    _rc_cur_id = _ars_cur[0]["id"]
+                            except Exception:
+                                pass
+                            if not _rc_cur_id:
+                                _rc_cur_id = 1  # fallback
                             if _rcsel_ids and _rc_invs:
                                 _rci_first = next(
                                     (i for i in _rc_invs
