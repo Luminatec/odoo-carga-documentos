@@ -3664,6 +3664,18 @@ def register_customer_payment(models, uid, api_key,
             except Exception:
                 pass
 
+            # Buscar payment_method_line_id para el diario de retenciones
+            _wh_pml_id = None
+            if _ret_journal_id:
+                try:
+                    _wh_pml_lines = models.execute_kw(ODOO_DB, uid, api_key,
+                        "account.payment.method.line", "search_read",
+                        [[["journal_id", "=", _ret_journal_id]]],
+                        {"fields": ["id", "name"], "limit": 1})
+                    _wh_pml_id = _wh_pml_lines[0]["id"] if _wh_pml_lines else None
+                except Exception:
+                    pass
+
             _wh_errors = []
             for _wh in withholdings:
                 _wh_amt = float(_wh.get("monto") or _wh.get("amount") or 0)
@@ -3681,6 +3693,8 @@ def register_customer_payment(models, uid, api_key,
                     "memo":             _wh.get("concepto") or "Retención",
                     "payment_group_id": group_id,
                 }
+                if _wh_pml_id:
+                    _wh_vals["payment_method_line_id"] = _wh_pml_id
                 try:
                     models.execute_kw(ODOO_DB, uid, api_key,
                         "account.payment", "create", [_wh_vals])
