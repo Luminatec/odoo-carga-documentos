@@ -6346,6 +6346,48 @@ with tab_recibos:
         except Exception:
             return 0.0
 
+    def _rc_parse_retencion(file_bytes):
+        """Parsea PDF de retención de IIBB y retorna dict con los datos clave."""
+        try:
+            import pdfplumber
+            text = ""
+            with pdfplumber.open(BytesIO(file_bytes)) as pdf:
+                text = (pdf.pages[0].extract_text() or "") if pdf.pages else ""
+            if not text:
+                return None
+            result = {}
+            # Nombre emisor: primera línea significativa
+            lines = [l.strip() for l in text.splitlines() if l.strip()]
+            result["nombre"] = lines[0] if lines else ""
+            # CUIT emisor: primer CUIT en el texto (antes de "Razón social")
+            _m = re.search(r"C\.U\.I\.T\.:\s*([\d\-]+)", text)
+            if _m:
+                result["cuit"] = _m.group(1).replace("-", "").replace(" ", "").strip()
+            # Fecha
+            _m = re.search(r"Fecha:\s*(\d{2}/\d{2}/\d{4})", text)
+            if _m:
+                _p = _m.group(1).split("/")
+                result["fecha"] = _m.group(1)
+                result["fecha_iso"] = f"{_p[2]}-{_p[1]}-{_p[0]}"
+            # Nro certificado
+            _m = re.search(r"Nro\.\s*de\s*certificado:\s*(.+)", text)
+            if _m: result["nro_certificado"] = _m.group(1).strip()
+            # Nro pago
+            _m = re.search(r"Pago:\s*(.+)", text)
+            if _m: result["nro_pago"] = _m.group(1).strip()
+            # Concepto
+            _m = re.search(r"Concepto del pago:\s*(.+)", text)
+            if _m: result["concepto"] = _m.group(1).strip()
+            # Importe retenido
+            _m = re.search(r"Importe retenido:\s*([\d.,]+)", text)
+            if _m: result["importe"] = _rc_parse_monto(_m.group(1))
+            # Importe sujeto
+            _m = re.search(r"Importe pagado sujeto a retenci[oó]n:\s*([\d.,]+)", text)
+            if _m: result["importe_sujeto"] = _rc_parse_monto(_m.group(1))
+            return result if result.get("cuit") and result.get("importe") else None
+        except Exception as _e:
+            return None
+
     def _rc_parse_cheques(file_bytes, filename):
         fname = filename.lower()
         if fname.endswith(".csv"):
@@ -6404,14 +6446,17 @@ with tab_recibos:
                 cuit = cuit.replace("-", "").replace(" ", "").strip()
                 if not cuit or len(cuit) < 8:
                     continue
+                # Normalizar fecha: el xlsx trae '2026-06-19 00:00:12' → tomar solo YYYY-MM-DD
+                _fp_raw = str(parts[4]).strip()
+                _fp = _fp_raw[:10] if len(_fp_raw) >= 10 else _fp_raw
                 rows.append({
                     "nro":       str(parts[0]),
                     "nombre":    nombre.strip(),
                     "cuit":      cuit,
-                    "fecha_pago": str(parts[4]),
+                    "fecha_pago": _fp,
                     "importe":   _rc_parse_monto(str(parts[6])),
                     "estado":    str(parts[7]),
-                    "banco":     str(parts[8]),
+                    "banco":     str(parts[8]).strip(),
                 })
             return rows
         else:
@@ -6422,11 +6467,47 @@ with tab_recibos:
     _RC_JOURNAL_ID = 73
     _rc_all_banks  = get_all_banks(models_url, uid, api_key)
 
-    # ── uploader ────────────────────────────────────────────────────────────
-    _rc_file = st.file_uploader(
-        "Subí el archivo de cheques exportado del home banking (CSV o XLSX)",
+    # ── Uploaders ────────────────────────────────────────────────────────────
+    _rcu_col1, _rcu_col2 = st.columns([3, 2])
+    _rc_file = _rcu_col1.file_uploader(
+        "📄 Cheques (CSV o XLSX del home banking)",
         type=["csv", "xlsx", "xls"], key="rc_file_uploader",
         help="Descargalo desde tu home banking y subilo sin modificar.")
+    _rc_ret_files = _rcu_col2.file_uploader(
+        "🔖 Retenciones (PDF)",
+        type=["pdf"], key="rc_ret_uploader",
+        accept_multiple_files=True,
+        help="Subí uno o más comprobantes de retención de IIBB o Ganancias.")
+
+    # ── Parsear retenciones subidas ────────────────────────────────────────
+    # Guardamos en session_state para que no se pierdan al reruns
+    if "rc_retenciones" not in st.session_state:
+        st.session_state["rc_retenciones"] = {}   # {cuit: [ret_dict, ...]}
+    if _rc_ret_files:
+        for _rf in _rc_ret_files:
+            _rb = _rf.read()
+            _ret = _rc_parse_retencion(_rb)
+            if _ret and _ret.get("cuit"):
+                _rcuit_ret = _ret["cuit"]
+                _ret["_filename"] = _rf.name
+                # Evitar duplicados por nombre de archivo
+                existing = st.session_state["rc_retenciones"].get(_rcuit_ret, [])
+                if not any(r.get("_filename") == _rf.name for r in existing):
+                    existing.append(_ret)
+                    st.session_state["rc_retenciones"][_rcuit_ret] = existing
+            else:
+                st.warning(f"No se pudo parsear la retención en {_rf.name}.")
+
+    # Mostrar retenciones cargadas
+    if st.session_state["rc_retenciones"]:
+        _all_rets = [r for rl in st.session_state["rc_retenciones"].values() for r in rl]
+        st.caption(
+            f"✅ {len(_all_rets)} retención(es) cargada(s): "
+            + ", ".join(f"{r['nombre']} — ARS {fmt_ars(r['importe'])}" for r in _all_rets)
+            + "  ·  [Limpiar]" if _all_rets else "")
+        if st.button("🗑️ Limpiar retenciones cargadas", key="rc_clear_rets"):
+            st.session_state["rc_retenciones"] = {}
+            st.rerun()
 
     if _rc_file is None:
         st.caption(
@@ -6668,6 +6749,40 @@ with tab_recibos:
                     _ded_cnt_key = f"rc_deds_cnt_{_rcuit}"
                     if _ded_key     not in st.session_state: st.session_state[_ded_key]     = []
                     if _ded_cnt_key not in st.session_state: st.session_state[_ded_cnt_key] = 0
+
+                    # ── Auto-agregar retenciones del mismo cliente ─────────
+                    _cuit_rets = st.session_state.get("rc_retenciones", {}).get(_rcuit, [])
+                    for _cret in _cuit_rets:
+                        _cret_fname = _cret.get("_filename", "")
+                        _already = any(
+                            d.get("_ret_filename") == _cret_fname
+                            for d in st.session_state[_ded_key])
+                        if not _already and _cret.get("importe", 0) > 0:
+                            _new_uid = st.session_state[_ded_cnt_key] + 1
+                            st.session_state[_ded_cnt_key] = _new_uid
+                            _cret_concepto = _cret.get("concepto", "Retención IIBB")
+                            # Buscar cuenta automáticamente por "ingresos brutos" o "iibb"
+                            _rc_accts_pre = get_all_accounts(models_url, uid, api_key)
+                            _ret_acct_id  = None
+                            for _aid, _albl in _rc_accts_pre:
+                                _albl_low = _albl.lower()
+                                if ("ingresos brutos" in _albl_low or "iibb" in _albl_low
+                                        or "retenc" in _albl_low) and "(copia)" not in _albl_low:
+                                    _ret_acct_id = _aid
+                                    break
+                            st.session_state[_ded_key].append({
+                                "uid":           _new_uid,
+                                "monto":         float(_cret["importe"]),
+                                "concepto_idx":  0,
+                                "concepto":      _cret_concepto,
+                                "account_id":    _ret_acct_id,
+                                "_ret_filename": _cret_fname,
+                                "_ret_auto":     True,
+                            })
+                            st.toast(
+                                f"Retención de {_cret.get('nombre','')} "
+                                f"(ARS {fmt_ars(_cret['importe'])}) agregada automáticamente.",
+                                icon="🔖")
 
                     # Cargar cuentas para conceptos (reutiliza cache de facturas)
                     _rc_accts_raw = get_all_accounts(models_url, uid, api_key)
