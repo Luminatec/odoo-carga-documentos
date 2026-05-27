@@ -4537,6 +4537,7 @@ with tab_orders:
                         "Cant.":        int(_el.get("cantidad",0)),
                         "Precio unit.": fmt_ars(_el.get("precio_unit",0)),
                         "Subtotal":     fmt_ars(_el.get("subtotal",0)),
+                        "Margen %":     f"{_el.get('margin_pct',0):.1f}%",
                         "Match Odoo":   _match_txt,
                     })
                 _prev_matches = [r["Match Odoo"] for r in _df_rows]
@@ -4549,6 +4550,7 @@ with tab_orders:
                         "Cant.":        st.column_config.NumberColumn(disabled=True, width="small"),
                         "Precio unit.": st.column_config.TextColumn(disabled=True, width="medium"),
                         "Subtotal":     st.column_config.TextColumn(disabled=True, width="medium"),
+                        "Margen %":     st.column_config.TextColumn(disabled=True, width="small"),
                         "Match Odoo":   st.column_config.TextColumn(
                             "Match Odoo ✏️",
                             help="Escribí nombre o código Odoo para reasignar",
