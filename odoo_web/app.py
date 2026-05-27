@@ -6826,6 +6826,20 @@ with tab_chat:
             "- Si el usuario pide el PDF de una factura específica, usá odoo_get_pdf con su ID.",
             "- Si pide exportar a Excel, usá odoo_export_xlsx.",
             "- Respondé siempre en castellano. Sé conciso pero completo.",
+            "",
+            "== CUANDO RECIBES UN DOCUMENTO ADJUNTO (PDF o imagen) ==",
+            "1. Analizalo INMEDIATAMENTE. Identificá qué tipo es:",
+            "   pedido de compra, factura, remito, nota de crédito, presupuesto, etc.",
+            "2. Extraé TODOS los datos clave:",
+            "   - Encabezado: empresa emisora, destinatario, fecha, número de doc, condición de pago.",
+            "   - Si tiene productos: código, descripción, marca, modelo, cantidad, precio unit, total.",
+            "   - Totales: subtotal, IVA, total general.",
+            "3. Presentá los datos en una tabla markdown clara.",
+            "4. ACCIÓN AUTOMÁTICA: buscá en Odoo los datos relevantes sin esperar que te lo pidan.",
+            "   - Si es un pedido de un cliente: buscá ese cliente en res.partner.",
+            "   - Si tiene códigos de producto: buscá cada uno en product.product por default_code.",
+            "   - Si es una factura de proveedor: buscá el proveedor en res.partner.",
+            "5. Ofrecé acciones concretas según el tipo de doc (crear pedido, buscar facturas, etc.).",
             f"Fecha hoy: {_today}",
         ])
         _ublocks = []
@@ -6939,7 +6953,7 @@ with tab_chat:
 
     _chat_in = st.chat_input("Pregunta algo, ej: Facturas pendientes de PETDUR / Descargame la ultima factura de Castillo")
 
-    if _chat_in:
+    if _chat_in or _chat_upload:
         _fblocks = []
         if _chat_upload:
             _fb = _chat_upload.read()
@@ -6955,8 +6969,14 @@ with tab_chat:
                     "data": _b64c.b64encode(_fb).decode()}})
             else:
                 _fblocks.append({"type": "text", "text": f"[Archivo adjunto: {_chat_upload.name}]"})
-        with st.spinner("Pensando..."):
-            _run_agent(_chat_in, _fblocks or None)
+        _user_text = _chat_in if _chat_in else (
+            f"Analizá este documento adjunto ({_chat_upload.name}) y extrae toda la informacion relevante."
+            if _chat_upload else "")
+        if not _user_text:
+            st.rerun()
+        _spin_msg = "Analizando documento..." if (not _chat_in and _chat_upload) else "Pensando..."
+        with st.spinner(_spin_msg):
+            _run_agent(_user_text, _fblocks or None)
         st.rerun()
 
 
