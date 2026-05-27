@@ -3553,7 +3553,8 @@ def get_customer_unpaid_invoices(models_url, uid, api_key, partner_ids_tuple):
 def register_customer_payment(models, uid, api_key,
                                partner_id, amount, currency_id,
                                payment_date, journal_id,
-                               move_ids=None, memo="", cheques=None):
+                               move_ids=None, memo="", cheques=None,
+                               withholdings=None):
     """Registra un recibo de cobro de cliente usando account.payment.group.
     Flujo correcto para Odoo AR (módulo account_payments_group):
       1. Crear account.payment.group con payment_type='receivable'
@@ -3600,11 +3601,17 @@ def register_customer_payment(models, uid, api_key,
         except Exception:
             pml_id = None
 
+        # Si hay retenciones Y cheques, el pago principal debe ser el monto TOTAL
+        # de los cheques. Odoo AR valida: payment.amount == sum(cheques.amount).
+        # Las retenciones se crean como pagos adicionales en el mismo grupo.
+        _cheque_total = sum(float(ch.get("amount") or 0) for ch in (cheques or []))
+        _pay_amount = _cheque_total if (cheques and withholdings) else float(amount)
+
         pay_vals = {
             "payment_type":   "inbound",
             "partner_type":   "customer",
             "partner_id":     partner_id,
-            "amount":         float(amount),
+            "amount":         _pay_amount,
             "currency_id":    currency_id,
             "date":           payment_date,
             "journal_id":     journal_id,
@@ -3631,6 +3638,59 @@ def register_customer_payment(models, uid, api_key,
 
         models.execute_kw(ODOO_DB, uid, api_key,
             "account.payment", "create", [pay_vals])
+
+        # 3c. Pagos adicionales por retenciones (en el mismo grupo)
+        # Cada retención se registra como un pago inbound de monto negativo
+        # usando un diario de tipo "general" (Misc / Retenciones).
+        if withholdings:
+            # Buscar diario para retenciones: "retenc" > "misc" > "general" > cualquier general
+            _ret_journal_id = None
+            try:
+                _jrnls = models.execute_kw(ODOO_DB, uid, api_key,
+                    "account.journal", "search_read",
+                    [[("type", "in", ["general", "cash"])]],
+                    {"fields": ["id", "name"], "limit": 50})
+                _pref = ["retenc", "retencion", "iibb", "misc", "varios", "general", "op"]
+                for _pword in _pref:
+                    for _j in _jrnls:
+                        if _pword in _j["name"].lower():
+                            _ret_journal_id = _j["id"]
+                            break
+                    if _ret_journal_id:
+                        break
+                # Fallback: primer diario general disponible
+                if not _ret_journal_id and _jrnls:
+                    _ret_journal_id = _jrnls[0]["id"]
+            except Exception:
+                pass
+
+            for _wh in withholdings:
+                _wh_amt = float(_wh.get("monto") or _wh.get("amount") or 0)
+                if _wh_amt <= 0 or not _ret_journal_id:
+                    continue
+                _wh_vals = {
+                    "payment_type":     "outbound",
+                    "partner_type":     "customer",
+                    "partner_id":       partner_id,
+                    "amount":           _wh_amt,
+                    "currency_id":      currency_id,
+                    "date":             payment_date,
+                    "journal_id":       _ret_journal_id,
+                    "memo":             _wh.get("concepto") or "Retención",
+                    "payment_group_id": group_id,
+                }
+                # Si tiene cuenta específica, intentar usarla como write-off
+                if _wh.get("account_id"):
+                    try:
+                        _wh_vals["writeoff_account_id"] = _wh["account_id"]
+                        _wh_vals["payment_difference_handling"] = "reconcile"
+                    except Exception:
+                        pass
+                try:
+                    models.execute_kw(ODOO_DB, uid, api_key,
+                        "account.payment", "create", [_wh_vals])
+                except Exception:
+                    pass  # No bloquear si falla el pago de retención
 
         # 4. Confirmar el grupo
         # Nota: post() retorna None en esta instalacion, lo que causa un error
@@ -6953,13 +7013,21 @@ with tab_recibos:
                                         "amount":       float(_rch.get("importe") or 0),
                                     })
                                 with st.spinner("Registrando cobro en Odoo..."):
+                                    # Pasar retenciones como withholdings para que
+                                    # register_customer_payment cree pagos adicionales
+                                    # en el grupo y evite el error de monto vs cheques
+                                    _rc_withholdings = [
+                                        d for d in st.session_state.get(_ded_key, [])
+                                        if float(d.get("monto", 0)) > 0
+                                    ] if _rc_cheque_vals else None
                                     _rc_ok, _rc_res = register_customer_payment(
                                         models, uid, api_key,
                                         _rc_pid, _rc_neto, _rc_cur_id,
                                         _rc_date_str, _rc_jour_id,
                                         move_ids=_rcsel_ids if _rcsel_ids else None,
                                         memo=_rc_memo,
-                                        cheques=_rc_cheque_vals if _rc_cheque_vals else None)
+                                        cheques=_rc_cheque_vals if _rc_cheque_vals else None,
+                                        withholdings=_rc_withholdings)
                                 if _rc_ok:
                                     st.toast(
                                         f"Recibo registrado para {_rc_pname} — ARS {fmt_ars(_rc_neto)}", icon="✅")
