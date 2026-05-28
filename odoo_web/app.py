@@ -2958,19 +2958,30 @@ def extract_excel_oc_fields(file_bytes, filename=""):
     # Cantidad pedida
     _QTY_KW    = {"cant", "cantidad", "qty", "pedido", "unidades", "u", "ctd",
                   "cant pedida", "cantidad pedida", "order qty", "pedir"}
-    # Precio unitario
-    _PRICE_KW  = {"imp unit", "precio unit", "precio unitario", "p unit", "unitario",
-                  "precio", "pvp", "price", "valor unit", "valor unitario",
-                  "imp unit s/iva", "prec unit",
-                  "precio s/iva", "precio sin iva", "precio neto", "neto unit",
-                  "precio s/ iva", "p s/iva"}
+    # Precio unitario — NETO (alta prioridad: sin IVA / minorista / mayorista)
+    _PRICE_KW_NETO = {"imp unit", "precio unit", "precio unitario", "p unit", "unitario",
+                      "precio s/iva", "precio sin iva", "precio neto", "neto unit",
+                      "precio s/ iva", "p s/iva", "imp unit s/iva", "prec unit",
+                      "valor unit", "valor unitario"}
+    # Prefijos de precio neto (para capturar "Precio s/IVA Minorista", "Precio s/IVA Mayorista", etc.)
+    _PRICE_NETO_PREFIXES = ("precio s/iva", "precio sin iva", "precio neto", "neto ",
+                             "precio unit", "p s/iva", "imp unit")
+    # Precio unitario — FALLBACK (PVP, precio genérico)
+    _PRICE_KW_FALLBACK = {"precio", "pvp", "price"}
+    # Unión para hit-count
+    _PRICE_KW  = _PRICE_KW_NETO | _PRICE_KW_FALLBACK
     # Subtotal / importe total
     _TOTAL_KW  = {"imp total", "total", "subtotal", "importe", "monto",
                   "imp tot", "total linea", "subtot",
                   "precio total c/iva", "precio total c/ iva", "total c/iva",
-                  "total con iva", "precio total", "importe total"}
+                  "total con iva", "precio total", "importe total",
+                  "subtotal s/iva", "subtotal sin iva"}
     # Observaciones
     _OBS_KW    = {"obs", "observaciones", "observacion", "nota", "notas", "comment"}
+
+    def _is_price_neto(n):
+        """True si la celda normalizada es precio neto/sin IVA (alta prioridad)."""
+        return n in _PRICE_KW_NETO or any(n.startswith(p) for p in _PRICE_NETO_PREFIXES)
 
     col_map = {}
     hdr_row_idx = None
@@ -2982,6 +2993,7 @@ def extract_excel_oc_fields(file_bytes, filename=""):
         ))
         if hits >= 2:
             hdr_row_idx = ri
+            # Primer paso: mapear todo excepto precio (para precio usamos lógica con prioridad)
             for ci, n in enumerate(norms):
                 if n in _SKU_KW and "sku" not in col_map:
                     col_map["sku"] = ci
@@ -2989,12 +3001,20 @@ def extract_excel_oc_fields(file_bytes, filename=""):
                     col_map["modelo"] = ci
                 if n in _QTY_KW and "pedido" not in col_map:
                     col_map["pedido"] = ci
-                if n in _PRICE_KW and "precio_unit" not in col_map:
-                    col_map["precio_unit"] = ci
                 if n in _TOTAL_KW and "subtotal" not in col_map:
                     col_map["subtotal"] = ci
                 if n in _OBS_KW and "obs" not in col_map:
                     col_map["obs"] = ci
+            # Segundo paso: precio — primero buscar columna neto (sin IVA), luego fallback (pvp)
+            for ci, n in enumerate(norms):
+                if _is_price_neto(n):
+                    col_map["precio_unit"] = ci
+                    break
+            if "precio_unit" not in col_map:
+                for ci, n in enumerate(norms):
+                    if n in _PRICE_KW_FALLBACK:
+                        col_map["precio_unit"] = ci
+                        break
             break
 
     if "pedido" not in col_map and "modelo" not in col_map:
