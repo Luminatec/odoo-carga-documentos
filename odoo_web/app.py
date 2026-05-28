@@ -6622,9 +6622,9 @@ with tab_recibos:
             return 0.0
 
     def _rc_parse_retencion(file_bytes):
-        """Parsea PDF de retención. Soporta formato AFIP estándar y formato SAP multi-página.
-        Retorna LISTA de dicts [{cuit, nombre, importe, fecha, concepto, ...}].
-        Lista vacía si falla o no se reconoce el formato."""
+        """Parsea PDF de retención. Soporta formato AFIP estándar y formato SAP multi-página
+        (Megatone y similares: dos columnas, cert. por página).
+        Retorna LISTA de dicts [{cuit, nombre, importe, fecha, concepto, provincia, ...}]."""
         try:
             import pdfplumber
             results = []
@@ -6634,82 +6634,72 @@ with tab_recibos:
                     if not _txt.strip():
                         continue
                     _r = {}
-                    _clean_lines = [l.strip() for l in _txt.splitlines() if l.strip()]
+                    _lines = [l.strip() for l in _txt.splitlines() if l.strip()]
 
-                    # ── CUIT emisor ──────────────────────────────────────────────
-                    # Tomar el primero que aparece (el del cliente que retiene, no Luminatec)
+                    # ── CUIT emisor ─────────────────────────────────────────
+                    # SAP: primer C.U.I.T. en el texto es el del cliente
+                    # AFIP: igual
                     _m = re.search(r"C\.U\.I\.T\.:\s*([\d\-\s]+)", _txt)
                     if _m:
                         _r["cuit"] = re.sub(r"[^\d]", "", _m.group(1))[:11]
 
-                    # ── Nombre emisor ────────────────────────────────────────────
-                    # Formato AFIP: primera línea significativa
-                    # Formato SAP: línea 3 posiciones antes de "Fecha:" en el bloque del emisor
-                    _fecha_idx = next(
-                        (i for i, l in enumerate(_clean_lines)
-                         if re.match(r"Fecha:\s*\d{2}[./]\d{2}[./]\d{4}", l)), None)
-                    if _fecha_idx is not None and _fecha_idx >= 3:
-                        _r["nombre"] = _clean_lines[_fecha_idx - 3]
-                    else:
-                        _r["nombre"] = _clean_lines[0] if _clean_lines else ""
+                    # ── Nombre emisor ───────────────────────────────────────
+                    # SAP: primera línea tiene "Empresa S.R.L Página: N" → quitar " Página: N"
+                    # AFIP: primera línea es directamente el nombre
+                    _raw_nombre = _lines[0] if _lines else ""
+                    _r["nombre"] = re.sub(r'\s*P[áa]gina:\s*\d+.*$', '', _raw_nombre).strip()
 
-                    # ── Fecha (DD/MM/YYYY o DD.MM.YYYY) ─────────────────────────
+                    # ── Fecha (DD/MM/YYYY o DD.MM.YYYY) ────────────────────
                     _m = re.search(r"Fecha:\s*(\d{2})[./](\d{2})[./](\d{4})", _txt)
                     if _m:
                         _r["fecha"]     = f"{_m.group(1)}/{_m.group(2)}/{_m.group(3)}"
                         _r["fecha_iso"] = f"{_m.group(3)}-{_m.group(2)}-{_m.group(1)}"
 
-                    # ── Nro certificado ──────────────────────────────────────────
-                    # Formato AFIP
+                    # ── Nro certificado ─────────────────────────────────────
+                    # AFIP: "Nro. de certificado: XXXX"
                     _m = re.search(r"Nro\.\s*de\s*certificado:\s*(.+)", _txt)
                     if _m:
                         _r["nro_certificado"] = _m.group(1).strip()
                     else:
-                        # Formato SAP: "Certificado de Retención:\nXXXX-XXXXXXXX"
-                        _m = re.search(
-                            r"Certificado de Retenci[oó]n:\s*\n?\s*([\d\-]+)", _txt)
+                        # SAP: patrón NNNN-NNNNNNNN en el bloque del header
+                        _m = re.search(r"\b(\d{4}-\d{8})\b", _txt)
                         if _m:
-                            _r["nro_certificado"] = _m.group(1).strip()
+                            _r["nro_certificado"] = _m.group(1)
 
-                    # ── Concepto / tipo de retención ─────────────────────────────
-                    # Formato AFIP
+                    # ── Concepto / tipo de retención ────────────────────────
+                    # AFIP: "Concepto del pago: ..."
                     _m = re.search(r"Concepto del pago:\s*(.+)", _txt)
                     if _m:
-                        _r["concepto"] = _m.group(1).strip()
+                        _tipo = _m.group(1).strip()
                     else:
-                        # Formato SAP: "Certificado de Retención:\nNRO\nTIPO\n[Provincia: NN PROV]"
-                        _m = re.search(
-                            r"Certificado de Retenci[oó]n:\s*\n\s*[\d\-]+\s*\n\s*(.+)",
-                            _txt)
-                        if _m:
-                            _tipo = _m.group(1).strip()
-                            # Provincia opcional
-                            _mp = re.search(r"Provincia:\s*\d+\s*(.+)", _txt)
-                            _prov = _mp.group(1).strip() if _mp else ""
-                            _r["provincia"] = _prov
-                            # Construir concepto combinado para matching de journal
-                            _r["concepto"] = f"{_tipo} {_prov}".strip() if _prov else _tipo
-
-                    # Fallback concepto desde "Este certificado de retención de TYPE es para"
-                    if not _r.get("concepto"):
+                        # SAP: "Este certificado de retención de TIPO es para..."
+                        # Más confiable que parsear el bloque de dos columnas
                         _m = re.search(
                             r"Este certificado de retenci[oó]n de (.+?) es para", _txt)
-                        if _m:
-                            _r["concepto"] = _m.group(1).strip()
+                        _tipo = _m.group(1).strip() if _m else ""
 
-                    # ── Importe retenido ─────────────────────────────────────────
-                    # Formato AFIP: "Importe retenido: X.XXX,XX"
+                    # Provincia (SAP): "Provincia: NN Nombre Provincia"
+                    _mp = re.search(r"Provincia:\s*\d+\s*(.+?)(?=\s*\n|\s*C\.U\.I\.T\.|$)",
+                                    _txt, re.MULTILINE)
+                    _prov = _mp.group(1).strip() if _mp else ""
+                    _r["provincia"] = _prov
+
+                    # Concepto final: tipo + provincia si aplica
+                    _r["concepto"] = f"{_tipo} {_prov}".strip() if _prov else _tipo
+
+                    # ── Importe retenido ────────────────────────────────────
+                    # AFIP: "Importe retenido: X.XXX,XX"
                     _m = re.search(r"Importe retenido:\s*([\d.,]+)", _txt)
                     if _m:
                         _r["importe"] = _rc_parse_monto(_m.group(1))
                     else:
-                        # Formato SAP: línea TOTAL → último número antes de "ARS"
-                        # Ej: " 12.381.348,45 123.813,48 ARS"
+                        # SAP: último número antes de "ARS" (línea TOTAL del resumen)
+                        # Ej: "12.381.348,45 123.813,48 ARS"
                         _ars_nums = re.findall(r"([\d\.]+,\d{2})\s+ARS", _txt)
                         if _ars_nums:
                             _r["importe"] = _rc_parse_monto(_ars_nums[-1])
 
-                    # ── Importe sujeto (opcional) ────────────────────────────────
+                    # ── Importe sujeto (opcional) ───────────────────────────
                     _m = re.search(
                         r"Importe pagado sujeto a retenci[oó]n:\s*([\d.,]+)", _txt)
                     if _m:
