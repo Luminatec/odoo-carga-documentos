@@ -6815,10 +6815,10 @@ with tab_recibos:
                     _rcuit_ret = _ret["cuit"]
                     _ret["_filename"] = _rf.name
                     _existing = st.session_state["rc_retenciones"].get(_rcuit_ret, [])
-                    # Evitar duplicados: mismo archivo + mismo concepto
-                    _dup_key = f"{_rf.name}|{_ret.get('concepto','')}"
+                    # Evitar duplicados: mismo concepto + mismo importe (independiente del archivo)
+                    _dup_key = f"{_ret.get('concepto','')}|{_ret.get('importe',0)}"
                     if not any(
-                        f"{r.get('_filename','')}|{r.get('concepto','')}" == _dup_key
+                        f"{r.get('concepto','')}|{r.get('importe',0)}" == _dup_key
                         for r in _existing
                     ):
                         _existing.append(_ret)
@@ -7083,10 +7083,10 @@ with tab_recibos:
                     for _cret in _cuit_rets:
                         _cret_fname = _cret.get("_filename", "")
                         _cret_concepto_key = _cret.get("concepto", "")
-                        # Deduplicar por archivo + concepto (un PDF puede tener varias retenciones)
+                        # Deduplicar por concepto + importe (evita duplicar aunque venga de otro archivo)
                         _already = any(
-                            d.get("_ret_filename") == _cret_fname and
-                            d.get("_ret_concepto_pdf") == _cret_concepto_key
+                            d.get("_ret_concepto_pdf") == _cret_concepto_key and
+                            abs(d.get("monto", 0) - _cret.get("importe", 0)) < 0.01
                             for d in st.session_state[_ded_key])
                         if not _already and _cret.get("importe", 0) > 0:
                             _new_uid = st.session_state[_ded_cnt_key] + 1
@@ -7102,23 +7102,87 @@ with tab_recibos:
                             _ret_acct_id  = None
                             _ret_acct_lbl = ""
                             _ret_acct_idx = 0
-                            _kws_ret = ["ingresos brutos", "iibb", "retenc"]
-                            # Primero intentar matchear con el concepto del PDF
                             _concepto_low = _cret_concepto_pdf.lower()
-                            for _aid, _albl in _rc_accts_pre_s:
-                                _albl_low = _albl.lower()
-                                if "(copia)" in _albl_low:
-                                    continue
-                                # Match exacto con palabras del concepto PDF
-                                if any(kw in _concepto_low and kw in _albl_low for kw in _kws_ret):
-                                    _ret_acct_id  = _aid
-                                    _ret_acct_lbl = _albl
+                            # Mapeo de variantes de provincia (concepto PDF → palabras clave en cuenta Odoo)
+                            _prov_map = [
+                                (["buenos aires", "bsas", "pba", "bs as", "bs.as"],
+                                 ["buenos aires", "bsas", "pba", "bs as"]),
+                                (["santa fe", "santa fé", "stfe"],
+                                 ["santa fe", "santa fé", "stfe"]),
+                                (["cordoba", "córdoba", "cba"],
+                                 ["cordoba", "córdoba", "cba"]),
+                                (["caba", "ciudad autón", "ciudad auton", "c.a.b.a"],
+                                 ["caba", "ciudad"]),
+                                (["mendoza", "mdz"], ["mendoza", "mdz"]),
+                                (["tucuman", "tucumán"], ["tucuman", "tucumán"]),
+                                (["entre rios", "entre ríos"], ["entre rios", "entre ríos"]),
+                                (["salta"], ["salta"]),
+                                (["misiones"], ["misiones"]),
+                                (["chaco"], ["chaco"]),
+                                (["neuquen", "neuquén"], ["neuquen", "neuquén"]),
+                                (["rio negro", "río negro"], ["rio negro", "río negro"]),
+                            ]
+                            _is_iibb = "iibb" in _concepto_low or "ingresos brutos" in _concepto_low
+                            _is_patronal = any(k in _concepto_low for k in
+                                               ["cont.pat", "patronal", "contribucion", "contribución",
+                                                "suss", "rg1784"])
+                            _is_ganancias = "ganancia" in _concepto_low
+                            # Detectar provincia del concepto PDF
+                            _prov_acct_kws = []
+                            for _prov_in, _prov_out in _prov_map:
+                                if any(pk in _concepto_low for pk in _prov_in):
+                                    _prov_acct_kws = _prov_out
                                     break
+                            # 1er intento: IIBB + provincia específica
+                            if _is_iibb and _prov_acct_kws:
+                                for _aid, _albl in _rc_accts_pre_s:
+                                    _albl_low = _albl.lower()
+                                    if "(copia)" in _albl_low:
+                                        continue
+                                    _iibb_ok = "iibb" in _albl_low or "ingresos brutos" in _albl_low
+                                    _prov_ok  = any(pk in _albl_low for pk in _prov_acct_kws)
+                                    if _iibb_ok and _prov_ok:
+                                        _ret_acct_id  = _aid
+                                        _ret_acct_lbl = _albl
+                                        break
+                            # 2do intento: Contribuciones Patronales
+                            if not _ret_acct_id and _is_patronal:
+                                for _aid, _albl in _rc_accts_pre_s:
+                                    _albl_low = _albl.lower()
+                                    if "(copia)" in _albl_low:
+                                        continue
+                                    if any(k in _albl_low for k in
+                                           ["patronal", "contribucion", "contribución", "suss"]):
+                                        _ret_acct_id  = _aid
+                                        _ret_acct_lbl = _albl
+                                        break
+                            # 3er intento: Ganancias
+                            if not _ret_acct_id and _is_ganancias:
+                                for _aid, _albl in _rc_accts_pre_s:
+                                    _albl_low = _albl.lower()
+                                    if "(copia)" in _albl_low:
+                                        continue
+                                    if "ganancia" in _albl_low:
+                                        _ret_acct_id  = _aid
+                                        _ret_acct_lbl = _albl
+                                        break
+                            # 4to intento: IIBB sin provincia (cualquier IIBB)
+                            if not _ret_acct_id and _is_iibb:
+                                for _aid, _albl in _rc_accts_pre_s:
+                                    _albl_low = _albl.lower()
+                                    if "(copia)" in _albl_low:
+                                        continue
+                                    if "iibb" in _albl_low or "ingresos brutos" in _albl_low:
+                                        _ret_acct_id  = _aid
+                                        _ret_acct_lbl = _albl
+                                        break
                             # Fallback: cualquier cuenta de retención
                             if not _ret_acct_id:
                                 for _aid, _albl in _rc_accts_pre_s:
                                     _albl_low = _albl.lower()
-                                    if any(kw in _albl_low for kw in _kws_ret) and "(copia)" not in _albl_low:
+                                    if any(kw in _albl_low for kw in
+                                           ["retenc", "ingresos brutos", "iibb"]) \
+                                            and "(copia)" not in _albl_low:
                                         _ret_acct_id  = _aid
                                         _ret_acct_lbl = _albl
                                         break
