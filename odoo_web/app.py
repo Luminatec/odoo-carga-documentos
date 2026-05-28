@@ -177,7 +177,9 @@ _DEFAULTS = {
     "carpeta_po":    None,
     "carpeta_bills": [],
     "carpeta_lc_id": None,
-    "etapas":        {k: False for k, *_ in _cfg.ETAPAS_DEF},
+    "etapas":          {k: False for k, *_ in _cfg.ETAPAS_DEF},
+    "processed_files": {},   # hash -> {filename, tipo, resultado, hora}
+    "error_log":       [],   # entries from show_odoo_error / show_odoo_warning
 }
 for _k, _v in _DEFAULTS.items():
     if _k not in st.session_state:

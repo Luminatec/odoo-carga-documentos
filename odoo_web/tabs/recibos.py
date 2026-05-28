@@ -14,6 +14,10 @@ from odoo_client import (
     get_customer_unpaid_invoices,
     get_customer_pending_credit_notes,
     register_customer_payment,
+    show_odoo_warning,
+    check_duplicate_file,
+    register_processed_file,
+    search_registered_payments,
 )
 
 
@@ -237,7 +241,7 @@ def render(models, uid, api_key, models_url, is_admin):
                         _existing.append(_ret)
                         st.session_state["rc_retenciones"][_rcuit_ret] = _existing
             else:
-                st.warning(f"No se pudo parsear la retención en {_rf.name}.")
+                show_odoo_warning(f"No se pudo parsear la retención en {_rf.name}.", "parsear retención")
 
     # Mostrar retenciones cargadas
     if st.session_state["rc_retenciones"]:
@@ -256,6 +260,13 @@ def render(models, uid, api_key, models_url, is_admin):
             "y generar los recibos de cobro en Odoo.")
     else:
         _rc_bytes   = _rc_file.read()
+        # ── Detección de duplicados ───────────────────────────────────
+        _is_dup_rc, _dup_entry_rc = check_duplicate_file(_rc_bytes, _rc_file.name)
+        if _is_dup_rc:
+            st.warning(
+                f"⚠️ **{_rc_file.name}** ya fue procesado en esta sesión "
+                f"({_dup_entry_rc.get('hora','?')}). "
+                "Si querés volver a procesarlo, cerrá sesión y volvé a ingresar.")
         _rc_cheques = _rc_parse_cheques(_rc_bytes, _rc_file.name)
 
         if not _rc_cheques:
@@ -352,9 +363,10 @@ def render(models, uid, api_key, models_url, is_admin):
                         use_container_width=True, hide_index=True)
 
                     if not _rcp_data:
-                        st.warning(
-                            f"CUIT **{_rcuit}** no encontrado en Odoo. "
-                            "Verificá que el cliente esté registrado con ese CUIT en el campo VAT.")
+                        show_odoo_warning(
+                            f"CUIT {_rcuit} no encontrado en Odoo. "
+                            "Verificá que el cliente esté registrado con ese CUIT en el campo VAT.",
+                            "buscar cliente por CUIT")
                         continue
 
                     _rc_pid_cuit, _rc_pname_cuit = _rcp_data
@@ -867,15 +879,18 @@ def render(models, uid, api_key, models_url, is_admin):
                                     _wh_warn = isinstance(_rc_res, str) and _rc_res.startswith("__WH_WARN__")
                                     st.toast(
                                         f"Recibo registrado para {_rc_pname} — ARS {fmt_ars(_rc_neto)}", icon="✅")
+                                    register_processed_file(
+                                        _rc_bytes, _rc_file.name, "Recibo de cobro",
+                                        f"{_rc_pname} ARS {fmt_ars(_rc_neto)}")
                                     search_partners_by_cuits.clear()
                                     get_customer_unpaid_invoices.clear()
                                     get_customer_pending_credit_notes.clear()
                                     if _wh_warn:
                                         _wh_detail = _rc_res.replace("__WH_WARN__", "")
-                                        st.warning(
-                                            f"⚠️ Recibo registrado, pero **no se pudo crear el pago de retención** "
-                                            f"en Odoo. Registralo manualmente.\n\n"
-                                            f"Detalle: `{_wh_detail}`")
+                                        show_odoo_warning(
+                                            f"Recibo registrado, pero no se pudo crear el pago de retención "
+                                            f"en Odoo. Registralo manualmente. Detalle: {_wh_detail}",
+                                            "registrar retención")
                                     else:
                                         st.info(
                                             "Presioná 🔄 Actualizar para ver "
@@ -888,6 +903,58 @@ def render(models, uid, api_key, models_url, is_admin):
         f"Para emitir facturas de venta o gestionar cobros manualmente, "
         f"usá [Odoo Ventas]({_cfg.ODOO_URL}/odoo/accounting/customers/invoices) directamente.")
 
+    # ═══════════════════════════════════════════════════════════════════════
+    # SECCIÓN: Consulta de recibos ya registrados en Odoo
+    # ═══════════════════════════════════════════════════════════════════════
+    with st.expander("🔍 Consultar recibos ya registrados en Odoo", expanded=False):
+        st.caption("Buscá pagos confirmados en Odoo por cliente, rango de fechas o ambos.")
+        _srch_c1, _srch_c2, _srch_c3 = st.columns([2, 1, 1])
+        _srch_partner_name = _srch_c1.text_input(
+            "Nombre del cliente (parcial)", key="srch_rc_partner")
+        _srch_from = _srch_c2.date_input(
+            "Desde", value=None, key="srch_rc_from")
+        _srch_to   = _srch_c3.date_input(
+            "Hasta", value=None, key="srch_rc_to")
+
+        if st.button("🔍 Buscar", key="srch_rc_btn", type="primary"):
+            _srch_pid = None
+            if _srch_partner_name.strip():
+                with st.spinner("Buscando cliente..."):
+                    try:
+                        import xmlrpc.client as _xmlrc
+                        _srch_m = _xmlrc.ServerProxy(models_url, allow_none=True)
+                        _srch_res = _srch_m.execute_kw(
+                            _cfg.ODOO_DB, uid, api_key,
+                            "res.partner", "search_read",
+                            [[("name", "ilike", _srch_partner_name.strip())]],
+                            {"fields": ["id", "name"], "limit": 1})
+                        if _srch_res:
+                            _srch_pid = _srch_res[0]["id"]
+                        else:
+                            st.warning(f"No se encontró cliente con nombre '{_srch_partner_name}'.")
+                    except Exception as _se:
+                        st.error(f"Error al buscar cliente: {_se}")
+
+            with st.spinner("Consultando pagos en Odoo..."):
+                _srch_payments = search_registered_payments(
+                    models_url, uid, api_key,
+                    partner_id=_srch_pid,
+                    date_from=_srch_from,
+                    date_to=_srch_to,
+                )
+
+            if not _srch_payments:
+                st.info("No se encontraron recibos con esos criterios.")
+            else:
+                import pandas as _pd_srch
+                _srch_df = _pd_srch.DataFrame(_srch_payments)
+                _srch_df["importe"] = _srch_df["importe"].apply(fmt_ars)
+                _srch_df["url"] = _srch_df["url"].apply(
+                    lambda u: f"[Abrir]({u})" if u else "")
+                _srch_disp = _srch_df[["fecha","partner","name","importe","estado","url"]].copy()
+                _srch_disp.columns = ["Fecha","Cliente","Referencia","Importe","Estado","Link"]
+                st.dataframe(_srch_disp, use_container_width=True, hide_index=True)
+                st.caption(f"{len(_srch_payments)} recibo(s) encontrado(s).")
 
 
     pass  # end render

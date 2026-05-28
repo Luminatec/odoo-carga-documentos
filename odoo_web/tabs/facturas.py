@@ -23,6 +23,8 @@ from odoo_client import (
     show_odoo_error,
     validate_cuit,
     validate_email,
+    check_duplicate_file,
+    register_processed_file,
 )
 from parsers import extract_pdf_fields, extract_image_fields, extract_excel_oc_fields
 
@@ -43,6 +45,14 @@ def render(models, uid, api_key, models_url, is_admin):
         mimetype   = _cfg.MIMETYPES.get(ext, "application/octet-stream")
         _file_lbl = f"({_uf_idx + 1}/{_total_upfiles}) " if _total_upfiles > 1 else ""
         st.markdown(f"**📎 {_file_lbl}{uf.name}**  `{ext.upper()}`  ({len(file_bytes)//1024} KB)")
+        # ── Detección de duplicados ───────────────────────────────────
+        _is_dup, _dup_entry = check_duplicate_file(file_bytes, uf.name)
+        if _is_dup:
+            st.warning(
+                f"⚠️ **{uf.name}** ya fue procesado en esta sesión "
+                f"({_dup_entry.get('hora','?')} · {_dup_entry.get('resultado','')}). "
+                "Subiste el mismo archivo dos veces.")
+            continue
         if ext in ("xlsx", "xls"):
             # ── Detección temprana: ¿es un Excel de pedido de cliente? ───────
             _oc_check = extract_excel_oc_fields(file_bytes)
@@ -450,6 +460,7 @@ def render(models, uid, api_key, models_url, is_admin):
                         url = odoo_url("account.move", move_id)
                         st.toast("Factura creada en Odoo", icon="✅")
                         st.markdown(f"📎 [Abrir en Odoo]({url})")
+                        register_processed_file(file_bytes, uf.name, "Factura proveedor", f"ID {move_id}")
                         st.session_state.history.append({"tipo":"Factura proveedor",
                             "archivo":uf.name,"id":move_id,"url":url,"estado":"✅","hora":_dt_now.now().strftime("%H:%M")})
                     except OdooError as e:

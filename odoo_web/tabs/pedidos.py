@@ -20,6 +20,9 @@ from odoo_client import (
     create_partner,
     OdooError,
     show_odoo_error,
+    show_odoo_warning,
+    check_duplicate_file,
+    register_processed_file,
 )
 from parsers import extract_image_oc_fields, extract_oc_fields, extract_excel_oc_fields
 
@@ -36,6 +39,14 @@ def render(models, uid, api_key, models_url, is_admin):
         file_bytes = uf.read()
         mimetype   = _cfg.MIMETYPES.get(ext, "application/octet-stream")
         st.markdown(f"**📎 {uf.name}**  `{ext.upper()}`  ({len(file_bytes)//1024} KB)")
+        # ── Detección de duplicados ───────────────────────────────────
+        _is_dup, _dup_entry = check_duplicate_file(file_bytes, uf.name)
+        if _is_dup:
+            st.warning(
+                f"⚠️ **{uf.name}** ya fue procesado en esta sesión "
+                f"({_dup_entry.get('hora','?')} · {_dup_entry.get('resultado','')}). "
+                "Subiste el mismo archivo dos veces.")
+            continue
         if ext in ("xlsx","xls"):
             # ── Parseo inteligente de Excel de pedido ─────────────────────
             with st.spinner("Leyendo Excel..."):
@@ -371,6 +382,7 @@ def render(models, uid, api_key, models_url, is_admin):
                         url = odoo_url("sale.order", _xl_order_id)
                         st.toast("Presupuesto creado en Odoo — pendiente de confirmación", icon="✅")
                         st.markdown(f"📎 [Revisar y confirmar en Odoo]({url})")
+                        register_processed_file(file_bytes, uf.name, "Pedido cliente", f"ID {_xl_order_id}")
                         st.session_state.history.append({"tipo":"Pedido cliente",
                             "archivo":uf.name,"id":_xl_order_id,"url":url,"estado":"✅","hora":_dt_now.now().strftime("%H:%M")})
                     except Exception as _xe:
@@ -390,7 +402,7 @@ def render(models, uid, api_key, models_url, is_admin):
                     st.error("❌ OCR falló — Tesseract puede no estar instalado aún. Intentá en 2 minutos o subí un PDF.")
                 else:
                     if _n_lineas == 0:
-                        st.warning("⚠️ OCR leyó el texto pero no detectó líneas de productos. Revisá el texto crudo y completá a mano si es necesario.")
+                        show_odoo_warning("OCR leyó el texto pero no detectó líneas de productos.", "parsear OC por imagen")
                     else:
                         st.caption(f"🤖 OCR detectó {_n_lineas} línea(s). Revisá antes de confirmar.")
                     with st.expander("🔍 Ver texto bruto detectado por OCR"):
@@ -461,7 +473,7 @@ def render(models, uid, api_key, models_url, is_admin):
                 st.success(f"✅ Cliente: **{_partner_name_oc}** (CUIT {_oc_cuit})")
                 _pt_id, _pt_name = get_customer_payment_terms(models_url, uid, api_key, _partner_id_oc)
             elif _oc_cuit:
-                st.warning(f"⚠️ CUIT **{_oc_cuit}** no encontrado en Odoo.")
+                show_odoo_warning(f"CUIT {_oc_cuit} no encontrado en Odoo.", "buscar cliente por CUIT")
                 st.checkbox("➕ Crear nuevo cliente en Odoo", key=_oc_create_key)
                 _pt_id, _pt_name = None, None
             else:
@@ -686,9 +698,10 @@ def render(models, uid, api_key, models_url, is_admin):
                     and abs(_odoo_dias_est - _oc_dias) > 3
                 )
                 if _hay_disc:
-                    st.warning(
-                        f"⚠️ Discrepancia: la OC indica **{_oc_dias} días** "
-                        f"({_oc_cond_str}), pero el cliente tiene **{_pt_name}** en Odoo."
+                    show_odoo_warning(
+                        f"Discrepancia: la OC indica {_oc_dias} días ({_oc_cond_str}), "
+                        f"pero el cliente tiene {_pt_name} en Odoo.",
+                        "verificar condición de pago"
                     )
                 # Selectbox con todas las opciones del sistema
                 _pt_def_idx = 0
@@ -811,6 +824,7 @@ def render(models, uid, api_key, models_url, is_admin):
                         url = odoo_url("sale.order", order_id)
                         st.toast("Presupuesto creado en Odoo — pendiente de confirmación", icon="✅")
                         st.markdown(f"📎 [Revisar y confirmar en Odoo]({url})")
+                        register_processed_file(file_bytes, uf.name, "Pedido cliente", f"ID {order_id}")
                         st.session_state.history.append({"tipo":"Pedido cliente",
                             "archivo":uf.name,"id":order_id,"url":url,"estado":"✅","hora":_dt_now.now().strftime("%H:%M")})
                     except Exception as _e:

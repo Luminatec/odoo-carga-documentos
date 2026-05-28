@@ -124,6 +124,45 @@ def get_odoo_error_log() -> list:
     return st.session_state.get("error_log", [])
 
 
+# ── Detección de documentos duplicados ───────────────────────────────────────
+
+def _file_hash(file_bytes: bytes) -> str:
+    """SHA-256 de los bytes del archivo, truncado a 16 chars para usar como key."""
+    import hashlib
+    return hashlib.sha256(file_bytes).hexdigest()[:16]
+
+
+def check_duplicate_file(file_bytes: bytes, filename: str) -> tuple[bool, dict]:
+    """Verifica si el archivo ya fue procesado en esta sesion.
+
+    Retorna (is_dup, entry) donde entry es el dict del procesamiento original,
+    o (False, {}) si es nuevo.
+    """
+    h = _file_hash(file_bytes)
+    processed = st.session_state.get("processed_files", {})
+    if h in processed:
+        return True, processed[h]
+    return False, {}
+
+
+def register_processed_file(file_bytes: bytes, filename: str,
+                             tipo: str, resultado: str = "") -> None:
+    """Registra un archivo como procesado en la sesion actual.
+
+    Llamar despues de procesar exitosamente un documento para que
+    futuros uploads del mismo archivo sean detectados como duplicados.
+    """
+    if "processed_files" not in st.session_state:
+        st.session_state["processed_files"] = {}
+    h = _file_hash(file_bytes)
+    st.session_state["processed_files"][h] = {
+        "filename":  filename,
+        "tipo":      tipo,
+        "resultado": resultado,
+        "hora":      _dt_now.now().strftime("%H:%M"),
+    }
+
+
 def get_models_proxy():
     """ServerProxy para account.move, etc. Es stateless — uid y password van por llamada."""
     return xmlrpc.client.ServerProxy(f"{_cfg.ODOO_URL}/xmlrpc/2/object", allow_none=True)
@@ -1884,6 +1923,51 @@ def get_customer_pending_credit_notes(models_url, uid, api_key, partner_ids_tupl
     except Exception as _e:
         st.warning(f"⚠️ Error al cargar notas de crédito pendientes: {_e}")
         return []
+
+@st.cache_data(ttl=60, show_spinner=False)
+def search_registered_payments(models_url, uid, api_key,
+                                partner_id=None, date_from=None, date_to=None,
+                                limit=50):
+    """Busca pagos (recibos) ya registrados en Odoo.
+
+    Filtra en account.payment.group con estado 'posted'.
+    Retorna lista de dicts con id, name, partner, date, amount, state, url.
+    """
+    try:
+        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        domain = [("state", "=", "posted")]
+        if partner_id:
+            domain.append(("partner_id", "=", partner_id))
+        if date_from:
+            domain.append(("payment_date", ">=", str(date_from)))
+        if date_to:
+            domain.append(("payment_date", "<=", str(date_to)))
+        records = m.execute_kw(
+            _cfg.ODOO_DB, uid, api_key,
+            "account.payment.group", "search_read",
+            [domain],
+            {"fields": ["id", "name", "partner_id", "payment_date",
+                        "total_amount", "state", "receiptbook_id"],
+             "order":  "payment_date desc",
+             "limit":  limit},
+        )
+        result = []
+        for r in (records or []):
+            partner_name = r["partner_id"][1] if r.get("partner_id") else "—"
+            result.append({
+                "id":      r["id"],
+                "name":    r.get("name") or f"Pago #{r['id']}",
+                "partner": partner_name,
+                "fecha":   r.get("payment_date") or "—",
+                "importe": r.get("total_amount") or 0,
+                "estado":  r.get("state") or "—",
+                "url":     f"{_cfg.ODOO_URL}/odoo/accounting/payment-groups/{r['id']}",
+            })
+        return result
+    except Exception as e:
+        _logger.error("search_registered_payments: %s", e)
+        return []
+
 
 def register_customer_payment(models, uid, api_key,
                                partner_id, amount, currency_id,

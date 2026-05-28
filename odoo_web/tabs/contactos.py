@@ -20,6 +20,8 @@ from odoo_client import (
     show_odoo_error,
     validate_cuit,
     validate_email,
+    check_duplicate_file,
+    register_processed_file,
 )
 from parsers import extract_arca_fields, parse_alta_cliente_docx
 
