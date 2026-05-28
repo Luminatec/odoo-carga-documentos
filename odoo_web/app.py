@@ -4883,6 +4883,11 @@ with tab_orders:
                 key=f"oc_ref_{uf.name}",
                 help="Quién refirió a este cliente",
             )
+            # DEBUG temporal — mostrar campo detectado para Ejecutivo de cuenta
+            if _oc_ejecutivo_field:
+                st.caption(f"🔍 Debug: campo detectado = `{_oc_ejecutivo_field}` · relation = `{_oc_ejecutivo_relation}`")
+            else:
+                st.caption("🔍 Debug: campo 'Ejecutivo de cuenta' NO detectado en sale.order")
 
             _btn_disabled = not bool(_partner_id_oc)
             if _btn_disabled:
