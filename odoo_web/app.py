@@ -1986,6 +1986,138 @@ def extract_arca_fields(text):
     return f
 
 
+def parse_alta_cliente_docx(file_bytes: bytes) -> dict:
+    """Parsea el formulario interno 'ALTA DE CLIENTE' (.docx).
+    Retorna dict compatible con extract_arca_fields() + campos extra:
+    email, phone, website, iibb, transport_name, transport_address,
+    delivery_address, forma_pago, plazos, tipo_resp_raw."""
+    import zipfile as _zf
+    out = {
+        "nombre": "", "cuit": "", "iibb": "",
+        "street": "", "city": "", "zip_code": "", "province_name": "",
+        "tipo_resp": "RI", "actividad_principal": "",
+        "email": "", "phone": "", "website": "",
+        "transport_name": "", "transport_address": "",
+        "delivery_address": "", "forma_pago": "", "plazos": "",
+        "_source": "formulario_interno",
+    }
+    try:
+        with _zf.ZipFile(BytesIO(file_bytes)) as _z:
+            _xml = _z.read("word/document.xml").decode("utf-8")
+        # Extraer runs de texto en orden
+        _texts = re.findall(r'<w:t[^>]*>([^<]*)</w:t>', _xml)
+        _lines = [t.strip() for t in _texts if t.strip()]
+        _full  = "\n".join(_lines)
+
+        # Palabras reservadas para labels: no tomar como valor
+        _LABELS = {
+            "razón social", "razon social", "cuit", "iibb", "domicilio",
+            "correo electrónico", "correo electronico",
+            "teléfono", "telefono", "int", "celular",
+            "datos logísticos:", "datos logisticos:",
+            "nombre de transporte", "dirección transporte", "direccion transporte",
+            "web", "horario", "solicitud de turno:",
+            "domicilio entrega final", "facturación:", "facturacion:",
+            "tipo iva", "forma de pago", "mipymes fce", "plazos acordados",
+            "si/no", "alta de cliente", "fecha:",
+        }
+
+        def _next_val(idx, lines, max_look=5):
+            """Retorna el primer texto no-label después de lines[idx]."""
+            for _j in range(idx + 1, min(idx + max_look, len(lines))):
+                _c = lines[_j].strip()
+                if _c and _c.lower() not in _LABELS:
+                    return _c
+            return ""
+
+        for _i, _l in enumerate(_lines):
+            _ll = _l.lower().strip()
+
+            # Razón Social
+            if re.match(r"^raz[oó]n\s+social$", _ll):
+                out["nombre"] = _next_val(_i, _lines)
+
+            # CUIT
+            elif _ll == "cuit" and not out["cuit"]:
+                _v = _next_val(_i, _lines)
+                _digits = re.sub(r"[^\d]", "", _v)
+                if len(_digits) == 11:
+                    out["cuit"] = _digits
+
+            # IIBB
+            elif _ll == "iibb":
+                _v = _next_val(_i, _lines)
+                if re.search(r"[\d]", _v):
+                    out["iibb"] = _v
+
+            # Domicilio fiscal (solo la primera ocurrencia simple, no "entrega" ni "transporte")
+            elif re.match(r"^domicilio\s*$", _ll) and not out["street"]:
+                _v = _next_val(_i, _lines)
+                if _v and not re.match(r'^(correo|tel[eé]|datos|nombre|direcci|factur|tipo|forma|plazo|si/no|web)', _v, re.I):
+                    out["street"] = _v
+
+            # Domicilio entrega Final
+            elif re.search(r"domicilio\s+entrega\s+final", _ll):
+                _v = _next_val(_i, _lines)
+                if _v and not re.match(r'^(factur|tipo|forma|plazo|\*)', _v, re.I):
+                    out["delivery_address"] = _v
+
+            # Nombre de transporte
+            elif re.match(r"^nombre\s+de\s+transporte$", _ll):
+                out["transport_name"] = _next_val(_i, _lines)
+
+            # Dirección Transporte
+            elif re.search(r"direcci[oó]n\s+transporte", _ll):
+                _v = _next_val(_i, _lines)
+                if _v and not re.match(r'^(tel[eé]|correo|web|horario)', _v, re.I):
+                    out["transport_address"] = _v
+
+            # TIPO IVA
+            elif re.match(r"^tipo\s+iva$", _ll):
+                _v = _next_val(_i, _lines)
+                if _v:
+                    _vu = _v.upper()
+                    if "MONOTRIBUTO" in _vu or "MONO" in _vu:
+                        out["tipo_resp"] = "MONO"
+                    elif "EXENTO" in _vu:
+                        out["tipo_resp"] = "EX"
+                    else:
+                        out["tipo_resp"] = "RI"
+                    out["tipo_resp_raw"] = _v
+
+            # Forma de Pago
+            elif re.match(r"^forma\s+de\s+pago$", _ll):
+                _v = _next_val(_i, _lines)
+                if _v and not re.match(r'^(mi|plazo|si/no|\*)', _v, re.I):
+                    out["forma_pago"] = _v
+
+            # Plazos acordados
+            elif re.match(r"^plazos\s+acordados$", _ll):
+                _v = _next_val(_i, _lines)
+                if _v and not re.match(r'^\*', _v):
+                    out["plazos"] = _v
+
+        # Email — primer patrón válido en todo el texto
+        _em = re.search(r"[\w\.\-\+]+@[\w\.\-]+\.[a-zA-Z]{2,}", _full)
+        if _em:
+            out["email"] = _em.group(0).strip()
+
+        # Teléfono — primer patrón telefónico argentino
+        _ph = re.search(
+            r"(?:0\d{2,4}[\-\s]?\d{6,8}|\+54[\s\d\-]{8,14}|\d{4}[\-\s]\d{4,8})", _full)
+        if _ph:
+            out["phone"] = _ph.group(0).strip()
+
+        # Sitio web
+        _wb = re.search(r"(?:https?://|www\.)\S+", _full)
+        if _wb:
+            out["website"] = _wb.group(0).strip()
+
+    except Exception:
+        pass
+    return out
+
+
 def fetch_arca_by_cuit(cuit_str: str) -> dict:
     """Consulta datos de un contribuyente en ARCA/AFIP por CUIT.
     Usa la API pública de argentinadatos.com (sin autenticación).
@@ -5114,7 +5246,7 @@ with tab_orders:
 # ═══════════════════════════════════════════════════
 with tab_contacts:
     st.subheader("Alta de Contactos")
-    st.caption("Pre-completá los datos buscando por CUIT en ARCA o subiendo la constancia PDF.")
+    st.caption("Pre-completá los datos buscando por CUIT en ARCA, subiendo la constancia PDF o el formulario interno (.docx).")
 
     # ── Mensaje persistente post-búsqueda ─────────────────────────────────
     if "ct_arca_msg" in st.session_state:
@@ -5150,10 +5282,10 @@ with tab_contacts:
         else:
             st.warning("Ingresá un CUIT para buscar.")
 
-    # ── Constancia PDF (alternativa al buscador) ──────────────────────────
+    # ── Documento (constancia ARCA PDF o formulario interno DOCX) ────────
     _ct_file = st.file_uploader(
-        "O subí la constancia de inscripción ARCA (PDF)",
-        type=["pdf"], key="ct_arca_upload",
+        "O subí la constancia ARCA (PDF) o el formulario Alta Cliente (.docx)",
+        type=["pdf", "docx"], key="ct_arca_upload",
         accept_multiple_files=False,
     )
 
@@ -5161,24 +5293,43 @@ with tab_contacts:
     _arca = {}
     if _ct_file:
         _ct_bytes = _ct_file.read()
-        _ct_pdf_key = f"ct_pdf_{hash(_ct_bytes)}"
-        if _ct_pdf_key not in st.session_state:
-            # PDF nuevo — parsear y actualizar versión de form
-            with st.spinner("Leyendo constancia ARCA..."):
-                try:
-                    import pdfplumber
-                    with pdfplumber.open(BytesIO(_ct_bytes)) as _pdf:
-                        _ct_text = "\n".join(p.extract_text() or "" for p in _pdf.pages)
-                    _arca_pdf = extract_arca_fields(_ct_text)
-                    st.session_state["ct_arca_data"]  = _arca_pdf
-                    st.session_state["ct_arca_source"] = "pdf"
-                    st.session_state["ct_form_ver"] = st.session_state.get("ct_form_ver", 0) + 1
-                    st.session_state[_ct_pdf_key] = True
-                    st.session_state["ct_arca_msg"] = ("success",
-                        f"✅ {_arca_pdf.get('nombre','?')} · CUIT {_arca_pdf.get('cuit','?')}")
-                    st.rerun()
-                except Exception as _ce:
-                    st.warning(f"No se pudo leer el PDF: {_ce}")
+        _ct_file_key = f"ct_pdf_{hash(_ct_bytes)}"
+        if _ct_file_key not in st.session_state:
+            _ct_fname = (_ct_file.name or "").lower()
+            _is_docx  = _ct_fname.endswith(".docx")
+            if _is_docx:
+                # Formulario interno Alta Cliente
+                with st.spinner("Leyendo formulario Alta Cliente..."):
+                    try:
+                        _arca_docx = parse_alta_cliente_docx(_ct_bytes)
+                        st.session_state["ct_arca_data"]  = _arca_docx
+                        st.session_state["ct_arca_source"] = "formulario"
+                        st.session_state["ct_form_ver"] = st.session_state.get("ct_form_ver", 0) + 1
+                        st.session_state[_ct_file_key] = True
+                        _msg_nombre = _arca_docx.get("nombre") or "?"
+                        _msg_cuit   = _arca_docx.get("cuit")   or "?"
+                        st.session_state["ct_arca_msg"] = ("success",
+                            f"✅ Formulario leído: {_msg_nombre} · CUIT {_msg_cuit}")
+                        st.rerun()
+                    except Exception as _ce:
+                        st.warning(f"No se pudo leer el formulario: {_ce}")
+            else:
+                # Constancia ARCA PDF
+                with st.spinner("Leyendo constancia ARCA..."):
+                    try:
+                        import pdfplumber
+                        with pdfplumber.open(BytesIO(_ct_bytes)) as _pdf:
+                            _ct_text = "\n".join(p.extract_text() or "" for p in _pdf.pages)
+                        _arca_pdf = extract_arca_fields(_ct_text)
+                        st.session_state["ct_arca_data"]  = _arca_pdf
+                        st.session_state["ct_arca_source"] = "pdf"
+                        st.session_state["ct_form_ver"] = st.session_state.get("ct_form_ver", 0) + 1
+                        st.session_state[_ct_file_key] = True
+                        st.session_state["ct_arca_msg"] = ("success",
+                            f"✅ {_arca_pdf.get('nombre','?')} · CUIT {_arca_pdf.get('cuit','?')}")
+                        st.rerun()
+                    except Exception as _ce:
+                        st.warning(f"No se pudo leer el PDF: {_ce}")
         _arca = st.session_state.get("ct_arca_data", {})
     else:
         _arca = st.session_state.get("ct_arca_data", {})
@@ -5226,6 +5377,32 @@ with tab_contacts:
     _ct_acct_rec_map = {n: i for i, n in _ct_accts_rec}
     _ct_acct_pay_map = {n: i for i, n in _ct_accts_pay}
 
+    # Default términos de pago desde formulario interno (match por keyword)
+    _def_pt_idx = 0
+    _pt_hint = " ".join(filter(None, [
+        _arca.get("forma_pago", ""), _arca.get("plazos", "")])).lower()
+    if _pt_hint:
+        _pt_names_list = ["— Sin plazo —"] + list(_pt_map.keys())
+        for _pti, _ptn in enumerate(_pt_names_list):
+            # Match numérico (ej: "30" en "30 días") o keyword (ej: "contado")
+            _ptn_low = _ptn.lower()
+            _nums_hint = re.findall(r"\d+", _pt_hint)
+            _nums_pt   = re.findall(r"\d+", _ptn_low)
+            if _nums_hint and _nums_pt and _nums_hint[0] == _nums_pt[0]:
+                _def_pt_idx = _pti; break
+            if any(kw in _ptn_low for kw in ["contado", "inmediato"] if kw in _pt_hint):
+                _def_pt_idx = _pti; break
+
+    # Referencia interna pre-llenada con datos del formulario interno
+    _def_ref_interna = ""
+    _ref_parts = []
+    if _arca.get("iibb"):
+        _ref_parts.append(f"IIBB: {_arca['iibb']}")
+    if _arca.get("transport_name"):
+        _ref_parts.append(f"Transporte: {_arca['transport_name']}")
+    if _arca.get("delivery_address"):
+        _ref_parts.append(f"Entrega: {_arca['delivery_address']}")
+    _def_ref_interna = " | ".join(_ref_parts)
 
     with st.form(f"ct_form_{st.session_state.get('ct_form_ver', 0)}"):
         # ── Persona / Empresa ──────────────────────────────────────────────
@@ -5251,10 +5428,13 @@ with tab_contacts:
             value=_arca.get("cuit", ""),
             placeholder="30-12345678-9")
         _ct_phone = _ct_b1.text_input("Teléfono",
+            value=_arca.get("phone", ""),
             placeholder="+54 351 xxx-xxxx")
         _ct_email = _ct_b2.text_input("Correo electrónico",
+            value=_arca.get("email", ""),
             placeholder="contacto@empresa.com")
         _ct_web   = st.text_input("Sitio web",
+            value=_arca.get("website", ""),
             placeholder="https://www.empresa.com")
 
         # ── Dirección ──────────────────────────────────────────────────────
@@ -5278,7 +5458,9 @@ with tab_contacts:
             _afip_names if _afip_names else ["(no disponible)"],
             index=_def_afip_idx,
         )
-        _ct_ref = _ct_f2.text_input("Referencia interna", placeholder="Ej: Canal Online, Zona Norte")
+        _ct_ref = _ct_f2.text_input("Referencia interna",
+            value=_def_ref_interna,
+            placeholder="Ej: Canal Online, Zona Norte · IIBB: 924-8306909")
 
         # ── Ventas ─────────────────────────────────────────────────────────
         st.markdown("##### 💼 Ventas")
@@ -5286,7 +5468,8 @@ with tab_contacts:
         _ct_user_opts = ["— Sin vendedor —"] + list(_user_map.keys())
         _ct_user_sel  = _ct_v1.selectbox("Vendedor", _ct_user_opts)
         _ct_pt_opts   = ["— Sin plazo —"] + list(_pt_map.keys())
-        _ct_pt_sel    = _ct_v2.selectbox("Términos de pago (ventas)", _ct_pt_opts)
+        _ct_pt_sel    = _ct_v2.selectbox("Términos de pago (ventas)", _ct_pt_opts,
+            index=_def_pt_idx)
         _ct_pl_opts   = ["— Predeterminado —"] + list(_plist_map.keys())
         _ct_pl_sel    = _ct_v3.selectbox("Lista de precios", _ct_pl_opts)
 
