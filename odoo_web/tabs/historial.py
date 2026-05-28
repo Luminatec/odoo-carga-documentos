@@ -13,12 +13,42 @@ def render(models, uid, api_key, models_url, is_admin):
         st.caption("Todavia no se creo ningun documento en Odoo en esta sesion.")
     else:
         import pandas as _pd_hist
+
         _hdf = _pd_hist.DataFrame(_hist)
-        _hcols = [c for c in ["hora", "tipo", "archivo", "estado", "id", "url"] if c in _hdf.columns]
-        _hdf_disp = _hdf[_hcols].copy()
+
+        # ── Filtros ────────────────────────────────────────────────────────
+        _h_tipos = sorted(_hdf["tipo"].unique().tolist()) if "tipo" in _hdf.columns else []
+        _hf1, _hf2 = st.columns([2, 3])
+        _h_tipo_sel = _hf1.multiselect(
+            "Filtrar por tipo", _h_tipos, default=[],
+            key="hist_tipo_filter", placeholder="Todos los tipos")
+        _h_buscar = _hf2.text_input(
+            "🔍 Buscar", key="hist_search",
+            placeholder="archivo, tipo, ID…")
+
+        # Aplicar filtros
+        _hdf_f = _hdf.copy()
+        if _h_tipo_sel:
+            _hdf_f = _hdf_f[_hdf_f["tipo"].isin(_h_tipo_sel)]
+        if _h_buscar.strip():
+            _q = _h_buscar.strip().lower()
+            _mask = _pd_hist.Series([False] * len(_hdf_f), index=_hdf_f.index)
+            for _col in ["archivo", "tipo", "estado"]:
+                if _col in _hdf_f.columns:
+                    _mask |= _hdf_f[_col].astype(str).str.lower().str.contains(_q, na=False)
+            _hdf_f = _hdf_f[_mask]
+
+        _hcols = [c for c in ["hora", "tipo", "archivo", "estado", "id", "url"] if c in _hdf_f.columns]
+        _hdf_disp = _hdf_f[_hcols].copy()
         if "url" in _hdf_disp.columns:
             _hdf_disp["url"] = _hdf_disp["url"].apply(
                 lambda u: "[Abrir](" + u + ")" if u else "")
+
+        _n_total = len(_hdf)
+        _n_shown = len(_hdf_disp)
+        if _n_shown < _n_total:
+            st.caption(f"Mostrando {_n_shown} de {_n_total} documento(s).")
+
         st.dataframe(_hdf_disp, use_container_width=True, hide_index=True)
 
     # ── Archivos subidos esta sesion ───────────────────────────────────────
@@ -42,6 +72,8 @@ def render(models, uid, api_key, models_url, is_admin):
         if st.button("📥 Exportar historial a Excel", key="historial_export"):
             import io as _io
             import pandas as _pd_exp
+            from zoneinfo import ZoneInfo as _ZI
+            from datetime import datetime as _dt
             _buf = _io.BytesIO()
             with _pd_exp.ExcelWriter(_buf, engine="openpyxl") as _writer:
                 if _hist:
@@ -59,8 +91,7 @@ def render(models, uid, api_key, models_url, is_admin):
                         _err_df["Nivel"] = "ERROR"
                     _err_df.to_excel(_writer, sheet_name="Log de errores", index=False)
             _buf.seek(0)
-            from datetime import datetime as _dt
-            _fname = f"historial_{_dt.now().strftime('%Y%m%d_%H%M')}.xlsx"
+            _fname = f"historial_{_dt.now(_ZI('America/Argentina/Buenos_Aires')).strftime('%Y%m%d_%H%M')}.xlsx"
             st.download_button(
                 label="⬇️ Descargar Excel",
                 data=_buf.getvalue(),

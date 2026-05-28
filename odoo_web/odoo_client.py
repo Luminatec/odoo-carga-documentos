@@ -10,10 +10,21 @@ import logging
 import streamlit as st
 from io import BytesIO
 from datetime import datetime as _dt_now
+from zoneinfo import ZoneInfo
 import pandas as pd
 import config as _cfg
 
 _logger = logging.getLogger("lumidoo.odoo_client")
+
+_AR_TZ = ZoneInfo("America/Argentina/Buenos_Aires")
+
+
+def clean_str(s: object) -> str:
+    """Strip whitespace de un valor, devuelve str vacío para None/False."""
+    if s is None or s is False:
+        return ""
+    return str(s).strip()
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # ERROR HANDLING CENTRALIZADO
@@ -82,7 +93,7 @@ def _append_session_log(nivel: str, context: str, message: str) -> None:
     if "error_log" not in st.session_state:
         st.session_state["error_log"] = []
     st.session_state["error_log"].append({
-        "ts":      _dt_now.now().isoformat(timespec="seconds"),
+        "ts":      _dt_now.now(_AR_TZ).isoformat(timespec="seconds"),
         "nivel":   nivel,
         "context": context,
         "error":   message,
@@ -159,7 +170,7 @@ def register_processed_file(file_bytes: bytes, filename: str,
         "filename":  filename,
         "tipo":      tipo,
         "resultado": resultado,
-        "hora":      _dt_now.now().strftime("%H:%M"),
+        "hora":      _dt_now.now(_AR_TZ).strftime("%H:%M"),
     }
 
 

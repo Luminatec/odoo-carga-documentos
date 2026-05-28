@@ -25,6 +25,8 @@ from odoo_client import (
     validate_email,
     check_duplicate_file,
     register_processed_file,
+    _AR_TZ,
+    clean_str,
 )
 from parsers import extract_pdf_fields, extract_image_fields, extract_excel_oc_fields
 
@@ -97,7 +99,7 @@ def render(models, uid, api_key, models_url, is_admin):
                         ok += 1
                         url = odoo_url("account.move", move_id)
                         st.session_state.history.append({"tipo":"Factura proveedor",
-                            "archivo":f"{uf.name}·fila{i+1}","id":move_id,"url":url,"estado":"✅","hora":_dt_now.now().strftime("%H:%M")})
+                            "archivo":f"{uf.name}·fila{i+1}","id":move_id,"url":url,"estado":"✅","hora":_dt_now.now(_AR_TZ).strftime("%H:%M")})
                     except (OdooError, Exception) as e:
                         errs.append(f"Fila {i+1}: {str(e)[:120]}")
                     bar.progress((i+1)/len(df))
@@ -220,7 +222,7 @@ def render(models, uid, api_key, models_url, is_admin):
                         st.markdown("Completá los datos mínimos para dar de alta el proveedor:")
                         _nv_c1, _nv_c2 = st.columns(2)
                         _nv_name  = _nv_c1.text_input("Razón social *",
-                            value=extracted.get("proveedor","")[:80],
+                            value=clean_str(extracted.get("proveedor",""))[:80],
                             placeholder="Nombre en Odoo")
                         _nv_cuit  = _nv_c2.text_input("CUIT *",
                             value=_cuit_raw,
@@ -253,7 +255,7 @@ def render(models, uid, api_key, models_url, is_admin):
                                 _cuit_for_key = _nv_cuit_clean
                                 st.session_state[f"vendor_created_{_cuit_for_key}"] = (_nv_pid, _nv_name.strip())
                                 st.session_state[_create_new_vend_key] = False
-                                st.success(f"✅ Proveedor **{_nv_name}** creado (ID {_nv_pid}). Recargando...")
+                                st.toast(f"Proveedor {_nv_name} creado en Odoo (ID {_nv_pid})", icon="✅")
                                 st.rerun()
                             except Exception as _nv_e:
                                 st.error(f"Error al crear proveedor: {_nv_e}")
@@ -462,7 +464,7 @@ def render(models, uid, api_key, models_url, is_admin):
                         st.markdown(f"📎 [Abrir en Odoo]({url})")
                         register_processed_file(file_bytes, uf.name, "Factura proveedor", f"ID {move_id}")
                         st.session_state.history.append({"tipo":"Factura proveedor",
-                            "archivo":uf.name,"id":move_id,"url":url,"estado":"✅","hora":_dt_now.now().strftime("%H:%M")})
+                            "archivo":uf.name,"id":move_id,"url":url,"estado":"✅","hora":_dt_now.now(_AR_TZ).strftime("%H:%M")})
                     except OdooError as e:
                         show_odoo_error(e, "crear factura")
 

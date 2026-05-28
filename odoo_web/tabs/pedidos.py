@@ -23,6 +23,7 @@ from odoo_client import (
     show_odoo_warning,
     check_duplicate_file,
     register_processed_file,
+    _AR_TZ,
 )
 from parsers import extract_image_oc_fields, extract_oc_fields, extract_excel_oc_fields
 
@@ -384,7 +385,7 @@ def render(models, uid, api_key, models_url, is_admin):
                         st.markdown(f"📎 [Revisar y confirmar en Odoo]({url})")
                         register_processed_file(file_bytes, uf.name, "Pedido cliente", f"ID {_xl_order_id}")
                         st.session_state.history.append({"tipo":"Pedido cliente",
-                            "archivo":uf.name,"id":_xl_order_id,"url":url,"estado":"✅","hora":_dt_now.now().strftime("%H:%M")})
+                            "archivo":uf.name,"id":_xl_order_id,"url":url,"estado":"✅","hora":_dt_now.now(_AR_TZ).strftime("%H:%M")})
                     except Exception as _xe:
                         show_odoo_error(_xe, "crear pedido Excel")
         else:
@@ -497,7 +498,7 @@ def render(models, uid, api_key, models_url, is_admin):
                                 st.session_state[_ss_pid]   = _new_pid
                                 st.session_state[_ss_pname] = nc_name
                                 st.session_state[_oc_create_key] = False
-                                st.success(f"✅ Cliente **{nc_name}** creado en Odoo (ID {_new_pid})")
+                                st.toast(f"Cliente {nc_name} creado en Odoo (ID {_new_pid})", icon="✅")
                                 st.rerun()
                             except Exception as _e:
                                 show_odoo_error(_e, "crear cliente")
@@ -826,7 +827,7 @@ def render(models, uid, api_key, models_url, is_admin):
                         st.markdown(f"📎 [Revisar y confirmar en Odoo]({url})")
                         register_processed_file(file_bytes, uf.name, "Pedido cliente", f"ID {order_id}")
                         st.session_state.history.append({"tipo":"Pedido cliente",
-                            "archivo":uf.name,"id":order_id,"url":url,"estado":"✅","hora":_dt_now.now().strftime("%H:%M")})
+                            "archivo":uf.name,"id":order_id,"url":url,"estado":"✅","hora":_dt_now.now(_AR_TZ).strftime("%H:%M")})
                     except Exception as _e:
                         show_odoo_error(_e, "crear pedido OC")
 

@@ -22,6 +22,8 @@ from odoo_client import (
     validate_email,
     check_duplicate_file,
     register_processed_file,
+    _AR_TZ,
+    clean_str,
 )
 from parsers import extract_arca_fields, parse_alta_cliente_docx
 
@@ -187,30 +189,30 @@ def render(models, uid, api_key, models_url, is_admin):
         st.markdown("##### 🏢 Datos básicos")
         _ct_b1, _ct_b2 = st.columns(2)
         _ct_name  = _ct_b1.text_input("Razón social *",
-            value=_arca.get("nombre", ""),
+            value=clean_str(_arca.get("nombre", "")),
             placeholder="ACME S.A.")
         _ct_cuit  = _ct_b2.text_input("CUIT *",
-            value=_arca.get("cuit", ""),
+            value=clean_str(_arca.get("cuit", "")),
             placeholder="30-12345678-9")
         _ct_phone = _ct_b1.text_input("Teléfono",
-            value=_arca.get("phone", ""),
+            value=clean_str(_arca.get("phone", "")),
             placeholder="+54 351 xxx-xxxx")
         _ct_email = _ct_b2.text_input("Correo electrónico",
-            value=_arca.get("email", ""),
+            value=clean_str(_arca.get("email", "")),
             placeholder="contacto@empresa.com")
         _ct_web   = st.text_input("Sitio web",
-            value=_arca.get("website", ""),
+            value=clean_str(_arca.get("website", "")),
             placeholder="https://www.empresa.com")
 
         # ── Dirección ──────────────────────────────────────────────────────
         st.markdown("##### 📍 Dirección fiscal")
         _ct_d1, _ct_d2, _ct_d3 = st.columns([3, 2, 1])
         _ct_street = _ct_d1.text_input("Calle y número",
-            value=_arca.get("street", ""))
+            value=clean_str(_arca.get("street", "")))
         _ct_city   = _ct_d2.text_input("Ciudad / Localidad",
-            value=_arca.get("city", ""))
+            value=clean_str(_arca.get("city", "")))
         _ct_zip    = _ct_d3.text_input("C.P.",
-            value=_arca.get("zip_code", ""))
+            value=clean_str(_arca.get("zip_code", "")))
         _ct_state_opts = ["— Seleccionar —"] + list(_state_map.keys())
         _ct_state_def  = _ct_state_opts.index(_def_prov) if _def_prov in _ct_state_opts else 0
         _ct_state_sel  = st.selectbox("Provincia", _ct_state_opts, index=_ct_state_def)
@@ -275,7 +277,7 @@ def render(models, uid, api_key, models_url, is_admin):
         # ── Notas ──────────────────────────────────────────────────────────
         st.markdown("##### 📝 Notas internas")
         _ct_notes = st.text_area("Notas", height=60, label_visibility="collapsed",
-            value=_arca.get("actividad_principal", ""))
+            value=clean_str(_arca.get("actividad_principal", "")))
 
         _ct_go = st.form_submit_button("💾 Crear en Odoo", use_container_width=True, type="primary")
 
@@ -375,7 +377,7 @@ def render(models, uid, api_key, models_url, is_admin):
                         "id": _new_pid,
                         "url": _new_url,
                         "estado": "✅",
-                        "hora": _dt_now.now().strftime("%H:%M"),
+                        "hora": _dt_now.now(_AR_TZ).strftime("%H:%M"),
                     })
                 except OdooError as _cte:
                     show_odoo_error(_cte, "crear contacto")
