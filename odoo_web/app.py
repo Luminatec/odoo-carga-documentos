@@ -2150,10 +2150,53 @@ def fetch_arca_by_cuit(cuit_str: str) -> dict:
                         }
             except Exception:
                 pass
-            # Ambos fallaron — devolver error descriptivo
+
+            # ── Intento 3: cuitonline.com (scraping HTML) ──────────────────
+            try:
+                _url3 = f"https://www.cuitonline.com/search.php?q={_cuit_clean}"
+                _r3 = _req.get(_url3, timeout=10,
+                               headers={"User-Agent": "Mozilla/5.0"})
+                if _r3.status_code == 200:
+                    # Buscar el nombre en el HTML: típicamente en <td class="nombre">...</td>
+                    # o en <strong> dentro de tabla de resultados
+                    _nombre3 = ""
+                    _m3 = re.search(
+                        r'(?:class=["\'](?:razonSocial|nombre)["\'][^>]*>|'
+                        r'<td[^>]*>\s*' + re.escape(_cuit_clean) + r'\s*</td>\s*<td[^>]*>)'
+                        r'\s*([^<]{3,80})',
+                        _r3.text, re.I)
+                    if not _m3:
+                        # Fallback: buscar el CUIT formateado y tomar el siguiente td
+                        _cuit_fmt = f"{_cuit_clean[:2]}-{_cuit_clean[2:10]}-{_cuit_clean[10]}"
+                        _m3 = re.search(
+                            r'(?:' + re.escape(_cuit_fmt) + r'|' + re.escape(_cuit_clean) + r')'
+                            r'[^<]*</td>\s*<td[^>]*>\s*([^<]{3,100})',
+                            _r3.text, re.I)
+                    if _m3:
+                        _nombre3 = re.sub(r'\s+', ' ', _m3.group(1)).strip()
+                    if _nombre3:
+                        return {
+                            "nombre": _nombre3, "cuit": _cuit_clean,
+                            "forma_juridica": "", "street": "", "city": "",
+                            "zip_code": "", "province_name": "",
+                            "tipo_resp": "RI", "actividad_principal": "",
+                            "_source": "cuitonline",
+                            "_aviso": "Solo se obtuvo el nombre (completá el resto manualmente).",
+                        }
+            except Exception:
+                pass
+
+            # Los tres intentos fallaron
             _status = _resp.status_code if _resp is not None else "sin respuesta"
-            return {"_error": f"API no encontró el CUIT {_cuit_clean} (HTTP {_status}). "
-                              "Verificá el número o completá los datos manualmente."}
+            return {
+                "_error": (
+                    f"No se encontró el CUIT {_cuit_clean} en ninguna fuente "
+                    f"(argentinadatos HTTP {_status}, TangoFactura y CuitOnline también fallaron). "
+                    f"Podés consultar manualmente en "
+                    f"https://www.cuitonline.com/search.php?q={_cuit_clean}"
+                ),
+                "_cuit_link": f"https://www.cuitonline.com/search.php?q={_cuit_clean}",
+            }
         _data = _resp.json()
 
         _out = {
@@ -5310,6 +5353,11 @@ with tab_contacts:
                 st.rerun()
             elif _api_result and _api_result.get("_error"):
                 st.warning(_api_result["_error"])
+                if _api_result.get("_cuit_link"):
+                    st.markdown(
+                        f"🔍 [Consultar CUIT {_ct_cuit_query.strip()} en CuitOnline]"
+                        f"({_api_result['_cuit_link']})",
+                        unsafe_allow_html=False)
             else:
                 st.warning("No se encontraron datos para ese CUIT. Verificá el número o completá los datos a mano.")
         else:
