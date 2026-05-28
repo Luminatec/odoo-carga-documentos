@@ -38,9 +38,38 @@ def render(models, uid, api_key, models_url, is_admin):
     if not files:
         st.caption("Subí uno o más archivos para empezar.")
     _total_upfiles = len(files) if files else 0
+
+    # ── Vista previa batch (solo con 2+ archivos) ─────────────────────────
+    _show_loop = True
     if _total_upfiles > 1:
-        st.caption(f"📂 {_total_upfiles} archivo(s) cargados — procesando uno por uno.")
-    for _uf_idx, uf in enumerate(files or []):
+        _batch_key = f"batchok_f_{'|'.join(f.name + str(f.size) for f in files)}"
+        if not st.session_state.get(_batch_key):
+            st.markdown(f"#### 📋 Revisá los {_total_upfiles} archivos antes de procesar")
+            _bprev = []
+            for _pf in files:
+                _pe  = _pf.name.rsplit(".", 1)[-1].lower()
+                _tip = "Excel" if _pe in ("xlsx","xls") else ("PDF" if _pe == "pdf" else "Imagen")
+                _dup = next(
+                    (True for v in st.session_state.get("processed_files", {}).values()
+                     if v.get("filename") == _pf.name), False)
+                _bprev.append({
+                    "Archivo":      _pf.name,
+                    "Tamaño":       f"{(_pf.size or 0)//1024} KB",
+                    "Tipo":         _tip,
+                    "¿Ya procesado?": "⚠️ Sí" if _dup else "✅ No",
+                })
+            import pandas as _bpd
+            st.dataframe(_bpd.DataFrame(_bprev), use_container_width=True, hide_index=True)
+            if st.button(f"⬆️ Procesar los {_total_upfiles} archivos",
+                         type="primary", key="batch_confirm_facturas"):
+                st.session_state[_batch_key] = True
+                st.rerun()
+            _show_loop = False
+        else:
+            st.caption(f"📂 {_total_upfiles} archivo(s) — procesando uno por uno.")
+
+    if _show_loop:
+     for _uf_idx, uf in enumerate(files or []):
         st.divider()
         ext        = uf.name.rsplit(".", 1)[-1].lower()
         file_bytes = uf.read()

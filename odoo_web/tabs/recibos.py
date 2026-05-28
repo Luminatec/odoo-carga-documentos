@@ -4,6 +4,7 @@ import re
 from io import BytesIO
 import pandas as pd
 import config as _cfg
+from user_prefs import load_prefs as _load_prefs
 from odoo_client import (
     get_all_accounts,
     normalize_amount,
@@ -18,6 +19,7 @@ from odoo_client import (
     check_duplicate_file,
     register_processed_file,
     search_registered_payments,
+    get_payment_journals,
 )
 
 
@@ -203,8 +205,14 @@ def render(models, uid, api_key, models_url, is_admin):
             st.error("Formato no soportado. Subí un archivo CSV o XLSX del home banking.")
             return []
 
-    # ── Journal fijo: Cheques a depositar (id=73) ─────────────────────────────
-    _RC_JOURNAL_ID = 73
+    # ── Diario de cobros (configurable desde Preferencias) ───────────────────────
+    _prefs_rc = _load_prefs()
+    _pref_jour = _prefs_rc.get("diario_cobros_nombre", "")
+    _all_rc_journals = get_payment_journals(models_url, uid, api_key)
+    _RC_JOURNAL_ID = next(
+        (jid for jid, jname, *_ in _all_rc_journals if jname == _pref_jour),
+        73,  # fallback si no hay preferencia configurada
+    ) if _pref_jour else 73
     _rc_all_banks  = get_all_banks(models_url, uid, api_key)
 
     # ── Uploaders ────────────────────────────────────────────────────────────

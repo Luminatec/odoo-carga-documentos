@@ -65,12 +65,12 @@ def odoo_call(models, uid, api_key, model, method, args, kw=None,
             _logger.warning("OdooNetwork attempt %d/%d %s.%s: %s",
                             attempt + 1, retries + 1, model, method, e)
             if attempt < retries:
-                time.sleep(retry_delay)
+                time.sleep(retry_delay * (2 ** attempt))
         except Exception as e:
             last_exc = e
             _logger.error("OdooUnexpected %s.%s: %s", model, method, e)
             if attempt < retries:
-                time.sleep(retry_delay)
+                time.sleep(retry_delay * (2 ** attempt))
 
     raise OdooError(f"No se pudo conectar a Odoo tras {retries + 1} intentos: {last_exc}") from last_exc
 

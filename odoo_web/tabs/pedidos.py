@@ -4,6 +4,7 @@ import pandas as pd
 import re
 from datetime import datetime as _dt_now
 import config as _cfg
+from user_prefs import load_prefs as _load_prefs
 from odoo_client import (
     create_sale_order,
     odoo_url,
@@ -34,7 +35,37 @@ def render(models, uid, api_key, models_url, is_admin):
         type=["pdf","jpg","jpeg","png","xlsx","xls"], accept_multiple_files=True, key="orders_upload")
     if not files_o:
         st.caption("Subí uno o más archivos para empezar.")
-    for uf in (files_o or []):
+
+    # ── Vista previa batch ────────────────────────────────────────────────
+    _total_o = len(files_o) if files_o else 0
+    _show_loop_o = True
+    if _total_o > 1:
+        _batch_key_o = f"batchok_o_{'|'.join(f.name + str(f.size) for f in files_o)}"
+        if not st.session_state.get(_batch_key_o):
+            st.markdown(f"#### 📋 Revisá los {_total_o} archivos antes de procesar")
+            _bprev_o = []
+            for _pf in files_o:
+                _pe  = _pf.name.rsplit(".", 1)[-1].lower()
+                _tip = "Excel" if _pe in ("xlsx","xls") else ("PDF" if _pe == "pdf" else "Imagen")
+                _dup = next(
+                    (True for v in st.session_state.get("processed_files", {}).values()
+                     if v.get("filename") == _pf.name), False)
+                _bprev_o.append({
+                    "Archivo":        _pf.name,
+                    "Tamaño":         f"{(_pf.size or 0)//1024} KB",
+                    "Tipo":           _tip,
+                    "¿Ya procesado?": "⚠️ Sí" if _dup else "✅ No",
+                })
+            import pandas as _bpd_o
+            st.dataframe(_bpd_o.DataFrame(_bprev_o), use_container_width=True, hide_index=True)
+            if st.button(f"⬆️ Procesar los {_total_o} archivos",
+                         type="primary", key="batch_confirm_pedidos"):
+                st.session_state[_batch_key_o] = True
+                st.rerun()
+            _show_loop_o = False
+
+    if _show_loop_o:
+     for uf in (files_o or []):
         st.divider()
         ext        = uf.name.rsplit(".", 1)[-1].lower()
         file_bytes = uf.read()
@@ -316,6 +347,10 @@ def render(models, uid, api_key, models_url, is_admin):
             _xl_ref_map     = {n: i for i, n in _xl_referidos}
             _xl_ref_opts    = ["— Sin referido —"] + list(_xl_ref_map.keys())
             _xl_ref_default = 0
+            _prefs_ped = _load_prefs()
+            _pref_ref_xl = _prefs_ped.get("referido_nombre", "")
+            if _pref_ref_xl and _pref_ref_xl in _xl_ref_opts:
+                _xl_ref_default = _xl_ref_opts.index(_pref_ref_xl)
             if _xl_pid and _xl_ref_map:
                 try:
                     _xl_pdata = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
@@ -752,6 +787,10 @@ def render(models, uid, api_key, models_url, is_admin):
             _oc_ref_map    = {n: i for i, n in _oc_referidos}
             _oc_ref_opts   = ["— Sin referido —"] + list(_oc_ref_map.keys())
             _oc_ref_default = 0
+            _prefs_oc = _load_prefs()
+            _pref_ref_oc = _prefs_oc.get("referido_nombre", "")
+            if _pref_ref_oc and _pref_ref_oc in _oc_ref_opts:
+                _oc_ref_default = _oc_ref_opts.index(_pref_ref_oc)
             if _partner_id_oc and _oc_ref_map:
                 try:
                     _oc_pdata = models.execute_kw(_cfg.ODOO_DB, uid, api_key,

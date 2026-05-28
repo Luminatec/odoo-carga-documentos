@@ -4,6 +4,7 @@ import re
 from io import BytesIO
 from datetime import datetime as _dt_now
 import config as _cfg
+from user_prefs import load_prefs as _load_prefs
 from odoo_client import (
     odoo_url,
     get_all_payment_terms,
@@ -241,9 +242,14 @@ def render(models, uid, api_key, models_url, is_admin):
         _ct_pl_sel    = _ct_v3.selectbox("Lista de precios", _ct_pl_opts)
 
         _ct_ref_opts  = ["— Sin referido —"] + list(_referido_map.keys())
+        _prefs_ct = _load_prefs()
+        _pref_ref_ct = _prefs_ct.get("referido_nombre", "")
+        _ct_ref_def = (_ct_ref_opts.index(_pref_ref_ct)
+                       if _pref_ref_ct in _ct_ref_opts else 0)
         _ct_ref_sel   = st.selectbox(
             "Referido",
             _ct_ref_opts,
+            index=_ct_ref_def,
             help="Quien refirio a este contacto",
         )
 

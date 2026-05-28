@@ -337,6 +337,52 @@ if not uid or not api_key:
     st.stop()
 
 
+# ── Preferencias del usuario (sidebar) ─────────────────────────────────────
+from user_prefs import load_prefs, save_prefs
+from odoo_client import get_payment_journals as _get_pj
+from odoo_client import get_all_payment_terms as _get_pts
+from odoo_client import get_referidos as _get_refs
+
+with st.sidebar:
+    st.divider()
+    with st.expander("⚙️ Preferencias", expanded=False):
+        _prefs    = load_prefs()
+        _pj_raw   = _get_pj(models_url, uid, api_key)
+        _ref_raw  = _get_refs(models_url, uid, api_key)
+        _pt_raw   = _get_pts(models_url, uid, api_key)
+
+        _pj_opts  = ["— Sin preferencia —"] + [n for _, n, *_ in _pj_raw]
+        _ref_opts = ["— Sin preferencia —"] + [n for _, n in _ref_raw]
+        _pt_opts  = ["— Sin preferencia —"] + [n for _, n in _pt_raw]
+
+        _pj_cur   = _prefs.get("diario_cobros_nombre", "")
+        _ref_cur  = _prefs.get("referido_nombre", "")
+        _pt_cur   = _prefs.get("plazo_pago_nombre", "")
+
+        _pj_def   = _pj_opts.index(_pj_cur)   if _pj_cur  in _pj_opts  else 0
+        _ref_def  = _ref_opts.index(_ref_cur)  if _ref_cur in _ref_opts else 0
+        _pt_def   = _pt_opts.index(_pt_cur)    if _pt_cur  in _pt_opts  else 0
+
+        with st.form("sidebar_prefs_form"):
+            st.caption("Valores pre-seleccionados en cada tab.")
+            _pj_sel  = st.selectbox("Diario de cobros", _pj_opts,
+                index=_pj_def, key="sb_pj",
+                help="Diario usado en Recibos de Cobro")
+            _ref_sel = st.selectbox("Ejecutivo / Referido", _ref_opts,
+                index=_ref_def, key="sb_ref",
+                help="Pre-seleccionado en Pedidos y Contactos")
+            _pt_sel  = st.selectbox("Plazo de pago", _pt_opts,
+                index=_pt_def, key="sb_pt",
+                help="Plazo pre-seleccionado en Pedidos")
+            if st.form_submit_button("💾 Guardar", use_container_width=True):
+                save_prefs({
+                    "diario_cobros_nombre": "" if _pj_sel  == "— Sin preferencia —" else _pj_sel,
+                    "referido_nombre":      "" if _ref_sel == "— Sin preferencia —" else _ref_sel,
+                    "plazo_pago_nombre":    "" if _pt_sel  == "— Sin preferencia —" else _pt_sel,
+                })
+                st.toast("Preferencias guardadas", icon="⚙️")
+
+
 # ═══════════════════════════════════════════════════
 # TABS
 # ═══════════════════════════════════════════════════
