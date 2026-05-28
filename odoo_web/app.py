@@ -3786,18 +3786,20 @@ def get_customer_pending_credit_notes(models_url, uid, api_key, partner_ids_tupl
         rows = m.execute_kw(ODOO_DB, uid, api_key, "account.move", "search_read",
             [[("move_type", "=", "out_refund"),
               ("state", "=", "posted"),
-              ("payment_state", "in", ["not_paid", "partial", "in_payment"]),
               ("partner_id", "child_of", list(partner_ids_tuple))]],
             {"fields": ["id", "name", "invoice_date", "amount_total",
                         "amount_residual", "currency_id", "partner_id"],
-             "order": "invoice_date asc", "limit": 200})
-        # amount_residual en out_refund puede ser negativo en Odoo → tomar valor absoluto
+             "order": "invoice_date asc", "limit": 300})
+        # amount_residual en out_refund puede ser negativo en Odoo → normalizar
+        result = []
         for _r in rows:
-            if (_r.get("amount_residual") or 0) < 0:
-                _r["amount_residual"] = abs(_r["amount_residual"])
-            if (_r.get("amount_total") or 0) < 0:
-                _r["amount_total"] = abs(_r["amount_total"])
-        return rows
+            _res = abs(float(_r.get("amount_residual") or 0))
+            _tot = abs(float(_r.get("amount_total")    or 0))
+            if _res > 0.009:   # solo NCs con saldo pendiente real
+                _r["amount_residual"] = _res
+                _r["amount_total"]    = _tot
+                result.append(_r)
+        return result
     except Exception as _e:
         st.warning(f"⚠️ Error al cargar notas de crédito pendientes: {_e}")
         return []
