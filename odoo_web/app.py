@@ -1848,17 +1848,23 @@ def search_product_by_code_or_name(models_url, uid, api_key,
 
 def get_ejecutivo_field(models_url, uid, api_key):
     """Detecta el nombre técnico y el modelo de relación del campo
-    'Ejecutivo de cuenta' (o similar) en sale.order.
-    Retorna (field_name, relation_model) o (None, None)."""
+    'Ejecutivo de cuenta' / 'Referrer' en sale.order.
+    Retorna (field_name, relation_model) o (None, None).
+    En Odoo 17 AR el campo nativo es 'referrer_id' (Many2one → res.partner).
+    Como fallback busca campos x_ con keywords ejecutivo/referido."""
     try:
         _mx = xmlrpc.client.ServerProxy(models_url)
         fields = _mx.execute_kw(ODOO_DB, uid, api_key,
             "sale.order", "fields_get", [],
             {"attributes": ["string", "type", "relation"]})
-        keywords = ["ejecutivo", "referido"]
+        # 1. Primero: campo nativo conocido
+        if "referrer_id" in fields:
+            finfo = fields["referrer_id"]
+            if finfo.get("type") == "many2one":
+                return "referrer_id", finfo.get("relation", "res.partner")
+        # 2. Fallback: cualquier campo (incluyendo x_) con keywords
+        keywords = ["ejecutivo", "referido", "referrer"]
         for fname, finfo in fields.items():
-            if not fname.startswith("x_"):
-                continue
             label = finfo.get("string", "").lower()
             if any(kw in label for kw in keywords):
                 return fname, finfo.get("relation", "res.partner")
@@ -4883,11 +4889,6 @@ with tab_orders:
                 key=f"oc_ref_{uf.name}",
                 help="Quién refirió a este cliente",
             )
-            # DEBUG temporal — mostrar campo detectado para Ejecutivo de cuenta
-            if _oc_ejecutivo_field:
-                st.caption(f"🔍 Debug: campo detectado = `{_oc_ejecutivo_field}` · relation = `{_oc_ejecutivo_relation}`")
-            else:
-                st.caption("🔍 Debug: campo 'Ejecutivo de cuenta' NO detectado en sale.order")
 
             _btn_disabled = not bool(_partner_id_oc)
             if _btn_disabled:
