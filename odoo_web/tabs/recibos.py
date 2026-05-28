@@ -828,18 +828,22 @@ def render(models, uid, api_key, models_url, is_admin):
                                         "payment_date": _dt,
                                         "amount":       float(_rch.get("importe") or 0),
                                     })
-                                with st.spinner("Registrando cobro en Odoo..."):
-                                    # Pasar retenciones como withholdings para que
-                                    # register_customer_payment cree pagos adicionales
-                                    # en el grupo y evite el error de monto vs cheques
-                                    _rc_withholdings = [
-                                        d for d in st.session_state.get(_ded_key, [])
-                                        if float(d.get("monto", 0)) > 0
-                                    ] if _rc_cheque_vals else None
-                                    # Incluir facturas + notas de crédito seleccionadas
-                                    _rc_all_move_ids = (
-                                        (_rcsel_ids or []) + (_rcncsel_ids or [])
-                                    ) or None
+                                # Preparar datos antes del spinner
+                                _rc_withholdings = [
+                                    d for d in st.session_state.get(_ded_key, [])
+                                    if float(d.get("monto", 0)) > 0
+                                ] if _rc_cheque_vals else None
+                                _rc_all_move_ids = (
+                                    (_rcsel_ids or []) + (_rcncsel_ids or [])
+                                ) or None
+                                with st.status("Registrando cobro en Odoo...", expanded=True) as _rc_status:
+                                    st.write(f"💳 Grupo de pago · ARS {fmt_ars(_rc_neto)}")
+                                    if _rc_cheque_vals:
+                                        st.write(f"🏦 {len(_rc_cheque_vals)} cheque(s) por acreditar")
+                                    if _rc_withholdings:
+                                        st.write(f"📋 {len(_rc_withholdings)} retención(es) a registrar")
+                                    if _rc_all_move_ids:
+                                        st.write(f"🔗 Imputando {len(_rc_all_move_ids)} comprobante(s)")
                                     _rc_ok, _rc_res = register_customer_payment(
                                         models, uid, api_key,
                                         _rc_pid, _rc_neto, _rc_cur_id,
@@ -848,6 +852,14 @@ def render(models, uid, api_key, models_url, is_admin):
                                         memo=_rc_memo,
                                         cheques=_rc_cheque_vals if _rc_cheque_vals else None,
                                         withholdings=_rc_withholdings)
+                                    if _rc_ok:
+                                        _rc_status.update(
+                                            label="✅ Cobro registrado",
+                                            state="complete", expanded=False)
+                                    else:
+                                        _rc_status.update(
+                                            label="❌ Error al registrar",
+                                            state="error", expanded=True)
                                 if _rc_ok:
                                     _wh_warn = isinstance(_rc_res, str) and _rc_res.startswith("__WH_WARN__")
                                     st.toast(

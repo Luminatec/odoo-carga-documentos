@@ -77,10 +77,23 @@ def _clean_odoo_fault(fault_str: str) -> str:
     return lines[-1] if lines else fault_str
 
 
+def _append_session_log(nivel: str, context: str, message: str) -> None:
+    """Agrega una entrada al log de sesión visible en el tab Historial."""
+    if "error_log" not in st.session_state:
+        st.session_state["error_log"] = []
+    st.session_state["error_log"].append({
+        "ts":      _dt_now.now().isoformat(timespec="seconds"),
+        "nivel":   nivel,
+        "context": context,
+        "error":   message,
+    })
+
+
 def show_odoo_error(e: Exception, context: str = "") -> None:
     """
     Muestra un error de Odoo en la UI de Streamlit de forma consistente.
     Loguea el error completo; muestra al usuario solo el mensaje limpio.
+    También escribe en el log de sesión visible en el tab Historial.
 
     Uso en un tab:
         try:
@@ -91,22 +104,23 @@ def show_odoo_error(e: Exception, context: str = "") -> None:
     prefix = f"Error al {context}: " if context else "Error: "
     if isinstance(e, OdooError):
         st.error(f"❌ {prefix}{e}")
+        _append_session_log("ERROR", context, str(e))
     else:
         _logger.exception("Unexpected error: %s", e)
-        st.error(f"❌ {prefix}Error inesperado — revisá la consola de logs.")
+        st.error(f"❌ {prefix}Error inesperado — revisá el log de sesión.")
+        _append_session_log("ERROR", context, f"{type(e).__name__}: {e}")
 
-    # Guardar en historial de errores de sesión para diagnóstico
-    if "error_log" not in st.session_state:
-        st.session_state["error_log"] = []
-    st.session_state["error_log"].append({
-        "ts":      _dt_now.now().isoformat(timespec="seconds"),
-        "context": context,
-        "error":   str(e),
-    })
+
+def show_odoo_warning(message: str, context: str = "") -> None:
+    """Muestra un warning en UI y lo registra en el log de sesión."""
+    prefix = f"Advertencia al {context}: " if context else ""
+    st.warning(f"⚠️ {prefix}{message}")
+    _logger.warning("%s%s", prefix, message)
+    _append_session_log("WARNING", context, message)
 
 
 def get_odoo_error_log() -> list:
-    """Devuelve el log de errores de la sesión actual (para mostrar en Historial)."""
+    """Devuelve el log de errores/warnings de la sesión actual (para mostrar en Historial)."""
     return st.session_state.get("error_log", [])
 
 
@@ -1018,6 +1032,45 @@ def fmt_ars(v):
     except Exception:
         return str(v)
 
+def validate_cuit(raw: str) -> tuple[bool, str]:
+    """Valida y normaliza un CUIT argentino.
+
+    Retorna (ok, cuit_limpio_o_mensaje_error).
+    El CUIT limpio es la cadena de 11 dígitos sin guiones ni espacios.
+    """
+    if not raw or not raw.strip():
+        return False, "El CUIT es obligatorio."
+    clean = re.sub(r"[\s\-\.]", "", raw.strip())
+    if not clean.isdigit():
+        return False, f"CUIT inválido '{raw}': debe contener solo dígitos (con o sin guiones)."
+    if len(clean) != 11:
+        return False, f"CUIT inválido '{raw}': debe tener exactamente 11 dígitos (tiene {len(clean)})."
+    # Verificación del dígito verificador
+    _factors = [5, 4, 3, 2, 7, 6, 5, 4, 3, 2]
+    total = sum(int(clean[i]) * _factors[i] for i in range(10))
+    rem = total % 11
+    check = 0 if rem == 0 else (11 - rem if rem != 1 else None)
+    if check is None:
+        return False, f"CUIT inválido '{raw}': dígito verificador no válido."
+    if int(clean[10]) != check:
+        return False, f"CUIT inválido '{raw}': el dígito verificador no coincide."
+    return True, clean
+
+
+def validate_email(raw: str) -> tuple[bool, str]:
+    """Validación básica de formato de email.
+
+    Retorna (ok, mensaje_error_o_vacío).
+    """
+    if not raw or not raw.strip():
+        return True, ""  # Email es opcional en la mayoría de formularios
+    addr = raw.strip()
+    import re as _re
+    if not _re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", addr):
+        return False, f"Email inválido '{addr}': debe tener el formato usuario@dominio.com."
+    return True, ""
+
+
 def fmt_usd(v):
     """Formatea número como moneda USD estilo Odoo: u$s 1.234,56"""
     try:
@@ -1170,6 +1223,7 @@ def check_invoice_exists(models_url, uid, api_key, ref):
         return False, None, None
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_all_payment_terms(models_url, uid, api_key):
     """Retorna lista de (id, name) de plazos de pago activos en Odoo."""
     try:
@@ -1396,6 +1450,7 @@ def get_ejecutivo_field(models_url, uid, api_key):
     except Exception:
         return None, None
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_referidos(models_url, uid, api_key):
     """Devuelve lista de (id, nombre) de partners usados como Referido en Odoo."""
     try:
@@ -1439,6 +1494,7 @@ def create_vendor_partner(models, uid, api_key, name, vat, street="", phone="", 
 # CONTACTOS — helpers ARCA + Odoo
 # ─────────────────────────────────────────────────────────────────────────────
 
+@st.cache_data(ttl=86400, show_spinner=False)
 def get_ar_states(_models_url, uid, api_key):
     """Provincias argentinas: lista de (id, name)."""
     try:

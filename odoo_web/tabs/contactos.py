@@ -15,6 +15,8 @@ from odoo_client import (
     match_ar_state,
     OdooError,
     show_odoo_error,
+    validate_cuit,
+    validate_email,
 )
 from parsers import extract_arca_fields, parse_alta_cliente_docx
 
@@ -273,10 +275,18 @@ def render(models, uid, api_key, models_url, is_admin):
         _ct_go = st.form_submit_button("💾 Crear en Odoo", use_container_width=True, type="primary")
 
     if _ct_go:
+        _ct_errs = []
         if not _ct_name.strip():
-            st.error("La razón social es obligatoria.")
-        elif not _ct_cuit.strip():
-            st.error("El CUIT es obligatorio.")
+            _ct_errs.append("La razón social es obligatoria.")
+        _cuit_ok, _cuit_clean_or_msg = validate_cuit(_ct_cuit)
+        if not _cuit_ok:
+            _ct_errs.append(_cuit_clean_or_msg)
+        _email_ok, _email_msg = validate_email(_ct_email)
+        if not _email_ok:
+            _ct_errs.append(_email_msg)
+        if _ct_errs:
+            for _em in _ct_errs:
+                st.error(_em)
         else:
             with st.spinner("Creando contacto en Odoo..."):
                 try:
@@ -287,8 +297,8 @@ def render(models, uid, api_key, models_url, is_admin):
                         "customer_rank": 1 if _ct_is_customer else 0,
                         "supplier_rank": 1 if _ct_is_supplier else 0,
                     }
-                    # CUIT
-                    _vat_clean = re.sub(r"[\s\-]", "", _ct_cuit.strip())
+                    # CUIT (ya validado y limpio)
+                    _vat_clean = _cuit_clean_or_msg
                     _ct_vals["vat"] = _vat_clean
                     if _ct_cuit_tid:
                         _ct_vals["l10n_latam_identification_type_id"] = _ct_cuit_tid
@@ -363,7 +373,6 @@ def render(models, uid, api_key, models_url, is_admin):
                         "hora": _dt_now.now().strftime("%H:%M"),
                     })
                 except OdooError as _cte:
-                    st.error(f"❌ {_cte}")
-
-
-    pass  # end render
+                    show_odoo_error(_cte, "crear contacto")
+                except Exception as _cte:
+                    show_odoo_error(_cte, "crear contacto")

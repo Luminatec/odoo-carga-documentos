@@ -17,6 +17,8 @@ from odoo_client import (
     create_vendor_partner,
     OdooError,
     show_odoo_error,
+    validate_cuit,
+    validate_email,
 )
 from parsers import extract_pdf_fields, extract_image_fields, extract_excel_oc_fields
 
@@ -214,18 +216,27 @@ def render(models, uid, api_key, models_url, is_admin):
                         _nv_email  = st.text_input("E-mail", placeholder="proveedor@empresa.com")
                         _nv_go = st.form_submit_button("Crear proveedor en Odoo", use_container_width=True)
                     if _nv_go:
-                        if not _nv_name.strip() or not _nv_cuit.strip():
-                            st.error("Razón social y CUIT son obligatorios.")
+                        _nv_errs = []
+                        if not _nv_name.strip():
+                            _nv_errs.append("La razón social es obligatoria.")
+                        _nv_cuit_ok, _nv_cuit_clean = validate_cuit(_nv_cuit)
+                        if not _nv_cuit_ok:
+                            _nv_errs.append(_nv_cuit_clean)
+                        _nv_email_ok, _nv_email_msg = validate_email(_nv_email)
+                        if not _nv_email_ok:
+                            _nv_errs.append(_nv_email_msg)
+                        if _nv_errs:
+                            for _em in _nv_errs: st.error(_em)
                         else:
                             try:
                                 _nv_pid = create_vendor_partner(
                                     models, uid, api_key,
                                     name=_nv_name.strip(),
-                                    vat=_nv_cuit.strip().replace("-",""),
+                                    vat=_nv_cuit_clean,
                                     street=_nv_street.strip(),
                                     phone=_nv_phone.strip(),
                                     email_addr=_nv_email.strip())
-                                _cuit_for_key = _nv_cuit.strip().replace("-","")
+                                _cuit_for_key = _nv_cuit_clean
                                 st.session_state[f"vendor_created_{_cuit_for_key}"] = (_nv_pid, _nv_name.strip())
                                 st.session_state[_create_new_vend_key] = False
                                 st.success(f"✅ Proveedor **{_nv_name}** creado (ID {_nv_pid}). Recargando...")
