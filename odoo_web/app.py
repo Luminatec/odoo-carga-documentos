@@ -2961,10 +2961,14 @@ def extract_excel_oc_fields(file_bytes, filename=""):
     # Precio unitario
     _PRICE_KW  = {"imp unit", "precio unit", "precio unitario", "p unit", "unitario",
                   "precio", "pvp", "price", "valor unit", "valor unitario",
-                  "imp unit s/iva", "prec unit"}
+                  "imp unit s/iva", "prec unit",
+                  "precio s/iva", "precio sin iva", "precio neto", "neto unit",
+                  "precio s/ iva", "p s/iva"}
     # Subtotal / importe total
     _TOTAL_KW  = {"imp total", "total", "subtotal", "importe", "monto",
-                  "imp tot", "total linea", "subtot"}
+                  "imp tot", "total linea", "subtot",
+                  "precio total c/iva", "precio total c/ iva", "total c/iva",
+                  "total con iva", "precio total", "importe total"}
     # Observaciones
     _OBS_KW    = {"obs", "observaciones", "observacion", "nota", "notas", "comment"}
 
@@ -3047,6 +3051,13 @@ def extract_excel_oc_fields(file_bytes, filename=""):
                 subtotal = precio_unit * qty
         except Exception:
             subtotal = precio_unit * qty
+
+        # Fallback: si no hay precio unitario pero sí subtotal y cantidad → calcular
+        if precio_unit == 0.0 and subtotal > 0 and qty > 0:
+            precio_unit = round(subtotal / qty, 6)
+        # Fallback inverso: si no hay subtotal pero sí precio unitario
+        if subtotal == 0.0 and precio_unit > 0 and qty > 0:
+            subtotal = round(precio_unit * qty, 2)
 
         fields["lineas"].append({
             "codigo":      sku_val,
