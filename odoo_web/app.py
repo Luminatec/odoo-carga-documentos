@@ -1986,6 +1986,63 @@ def extract_arca_fields(text):
     return f
 
 
+def fetch_arca_by_cuit(cuit_str: str) -> dict:
+    """Consulta datos de un contribuyente en ARCA/AFIP por CUIT.
+    Usa la API pública de argentinadatos.com (sin autenticación).
+    Retorna dict compatible con extract_arca_fields() o {} si falla."""
+    try:
+        import requests as _req
+        _cuit_clean = re.sub(r"[\s\-]", "", cuit_str.strip())
+        if not _cuit_clean.isdigit() or len(_cuit_clean) != 11:
+            return {}
+        _url = f"https://api.argentinadatos.com/v1/afip/personas/{_cuit_clean}"
+        _resp = _req.get(_url, timeout=10)
+        if _resp.status_code != 200:
+            return {}
+        _data = _resp.json()
+
+        _out = {
+            "nombre": "", "cuit": _cuit_clean, "forma_juridica": "",
+            "street": "", "city": "", "zip_code": "", "province_name": "",
+            "tipo_resp": "RI", "actividad_principal": "",
+        }
+
+        # Razón social / nombre
+        _tipo = _data.get("tipoPersona", "")
+        if _tipo == "JURIDICA":
+            _out["nombre"] = (_data.get("razonSocial") or "").strip()
+            _out["forma_juridica"] = "Sociedad"
+        else:
+            _parts = [_data.get("apellido",""), _data.get("nombre","")]
+            _out["nombre"] = " ".join(p for p in _parts if p).strip()
+
+        # Domicilio fiscal
+        _dom = _data.get("domicilioFiscal") or {}
+        _out["street"]        = (_dom.get("direccion") or "").strip().title()
+        _out["city"]          = (_dom.get("localidad") or "").strip().title()
+        _out["zip_code"]      = str(_dom.get("codPostal") or "").strip()
+        _out["province_name"] = (_dom.get("descripcionProvincia") or "").strip().title()
+
+        # Tipo de responsabilidad
+        for _c in (_data.get("caracterizaciones") or []):
+            _desc = (_c.get("descripcionCaracterizacion") or "").upper()
+            if "MONOTRIBUT" in _desc:
+                _out["tipo_resp"] = "MONO"; break
+            if "EXENTO" in _desc or "NO ALCANZADO" in _desc:
+                _out["tipo_resp"] = "EX"; break
+            if "RESPONSABLE INSCRIPTO" in _desc or ("IVA" in _desc and "NO" not in _desc):
+                _out["tipo_resp"] = "RI"; break
+
+        # Actividad principal (menor orden = principal)
+        _acts = sorted(_data.get("actividades") or [], key=lambda a: a.get("orden", 99))
+        if _acts:
+            _out["actividad_principal"] = (_acts[0].get("descripcionActividad") or "")[:120]
+
+        return _out
+    except Exception:
+        return {}
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_ar_states(_models_url, uid, api_key):
     """Provincias argentinas: lista de (id, name)."""
@@ -4960,15 +5017,39 @@ with tab_orders:
 # ═══════════════════════════════════════════════════
 with tab_contacts:
     st.subheader("Alta de Contactos")
-    st.caption("Subí la constancia de ARCA para pre-completar los datos, o completá a mano.")
+    st.caption("Pre-completá los datos buscando por CUIT en ARCA o subiendo la constancia PDF.")
 
+    # ── Búsqueda por CUIT ─────────────────────────────────────────────────
+    _ct_srch_c1, _ct_srch_c2 = st.columns([4, 1])
+    _ct_cuit_query = _ct_srch_c1.text_input(
+        "Buscar por CUIT en ARCA",
+        placeholder="Ej: 30-71234567-8",
+        key="ct_cuit_query",
+        label_visibility="collapsed",
+    )
+    _ct_srch_c2.markdown("<div style='padding-top:2px'></div>", unsafe_allow_html=True)
+    if _ct_srch_c2.button("🔍 Buscar en ARCA", use_container_width=True):
+        if _ct_cuit_query.strip():
+            with st.spinner("Consultando ARCA..."):
+                _api_result = fetch_arca_by_cuit(_ct_cuit_query)
+            if _api_result and _api_result.get("nombre"):
+                st.session_state["ct_arca_data"] = _api_result
+                st.session_state["ct_arca_source"] = "api"
+                st.success(f"✅ {_api_result['nombre']} · CUIT {_api_result['cuit']}")
+            else:
+                st.warning("No se encontraron datos para ese CUIT en ARCA. Podés ingresar los datos manualmente.")
+        else:
+            st.warning("Ingresá un CUIT para buscar.")
+
+    # ── Constancia PDF (alternativa al buscador) ──────────────────────────
     _ct_file = st.file_uploader(
-        "Constancia de inscripción ARCA (PDF) — opcional",
+        "O subí la constancia de inscripción ARCA (PDF)",
         type=["pdf"], key="ct_arca_upload",
         accept_multiple_files=False,
     )
 
-    # ── Extraer datos del PDF si se subió ─────────────────────────────────
+    # ── Determinar fuente de datos ─────────────────────────────────────────
+    # PDF tiene prioridad si se acaba de subir; de lo contrario se usa la API
     _arca = {}
     if _ct_file:
         _ct_bytes = _ct_file.read()
@@ -4978,9 +5059,13 @@ with tab_contacts:
                 with pdfplumber.open(BytesIO(_ct_bytes)) as _pdf:
                     _ct_text = "\n".join(p.extract_text() or "" for p in _pdf.pages)
                 _arca = extract_arca_fields(_ct_text)
+                st.session_state["ct_arca_data"] = _arca
+                st.session_state["ct_arca_source"] = "pdf"
                 st.success(f"✅ {_arca.get('nombre','?')} · CUIT {_arca.get('cuit','?')}")
             except Exception as _ce:
                 st.warning(f"No se pudo leer el PDF: {_ce}")
+    else:
+        _arca = st.session_state.get("ct_arca_data", {})
 
     # ── Cargar catálogos Odoo ──────────────────────────────────────────────
     _ct_states   = get_ar_states(models_url, uid, api_key)
@@ -5206,6 +5291,9 @@ with tab_contacts:
 
                     _new_pid = create_full_partner(models, uid, api_key, _ct_vals)
                     _new_url = odoo_url("res.partner", _new_pid)
+                    # Limpiar datos de ARCA para el próximo contacto
+                    st.session_state.pop("ct_arca_data", None)
+                    st.session_state.pop("ct_arca_source", None)
                     st.toast("Contacto creado en Odoo", icon="✅")
                     st.markdown(f"🎉 **{_ct_name}** creado · [Abrir en Odoo]({_new_url})")
                     st.session_state.history.append({
