@@ -15,6 +15,8 @@ from odoo_client import (
     get_ejecutivo_field,
     get_referidos,
     create_partner,
+    OdooError,
+    show_odoo_error,
 )
 from parsers import extract_image_oc_fields, extract_oc_fields, extract_excel_oc_fields
 

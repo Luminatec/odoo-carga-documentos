@@ -13,6 +13,8 @@ from odoo_client import (
     get_ar_accounts,
     create_full_partner,
     match_ar_state,
+    OdooError,
+    show_odoo_error,
 )
 from parsers import extract_arca_fields, parse_alta_cliente_docx
 
@@ -360,7 +362,7 @@ def render(models, uid, api_key, models_url, is_admin):
                         "estado": "✅",
                         "hora": _dt_now.now().strftime("%H:%M"),
                     })
-                except Exception as _cte:
+                except OdooError as _cte:
                     st.error(f"❌ {_cte}")
 
 

@@ -15,6 +15,8 @@ from odoo_client import (
     search_partner_by_cuit,
     check_invoice_exists,
     create_vendor_partner,
+    OdooError,
+    show_odoo_error,
 )
 from parsers import extract_pdf_fields, extract_image_fields, extract_excel_oc_fields
 
@@ -80,8 +82,8 @@ def render(models, uid, api_key, models_url, is_admin):
                         url = odoo_url("account.move", move_id)
                         st.session_state.history.append({"tipo":"Factura proveedor",
                             "archivo":f"{uf.name}·fila{i+1}","id":move_id,"url":url,"estado":"✅","hora":_dt_now.now().strftime("%H:%M")})
-                    except Exception as e:
-                        errs.append(f"Fila {i+1}: {str(e)[:100]}")
+                    except (OdooError, Exception) as e:
+                        errs.append(f"Fila {i+1}: {str(e)[:120]}")
                     bar.progress((i+1)/len(df))
                 if ok: st.toast(f"{ok} de {len(df)} facturas creadas en Odoo.", icon="✅")
                 for err in errs: st.warning(err)
@@ -435,8 +437,8 @@ def render(models, uid, api_key, models_url, is_admin):
                         st.markdown(f"📎 [Abrir en Odoo]({url})")
                         st.session_state.history.append({"tipo":"Factura proveedor",
                             "archivo":uf.name,"id":move_id,"url":url,"estado":"✅","hora":_dt_now.now().strftime("%H:%M")})
-                    except Exception as e:
-                        st.error(f"❌ {e}")
+                    except OdooError as e:
+                        show_odoo_error(e, "crear factura")
 
 
     pass  # end render

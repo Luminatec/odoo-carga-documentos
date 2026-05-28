@@ -185,7 +185,11 @@ def verify_user(email, password):
     return False, "Contraseña incorrecta."
 
 def call(models, uid, api_key, model, method, args, kw=None):
-    return models.execute_kw(_cfg.ODOO_DB, uid, api_key, model, method, args, kw or {})
+    """
+    Helper de bajo nivel. Delega a odoo_call() para retry automático y
+    manejo uniforme de errores. Lanza OdooError ante fallos de Odoo.
+    """
+    return odoo_call(models, uid, api_key, model, method, args, kw)
 
 @st.cache_data(ttl=300, show_spinner=False)
 def search_partners(models_url, uid, api_key, name, limit=8):
@@ -857,9 +861,15 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
             line_vals["tax_ids"] = [(5, 0, 0)]   # limpiar impuestos (factura exenta)
         vals["invoice_line_ids"] = [(0, 0, line_vals)]
 
-    move_id = call(models, uid, api_key, "account.move", "create", [vals])
+    try:
+        move_id = call(models, uid, api_key, "account.move", "create", [vals])
+    except OdooError as e:
+        raise OdooError(f"No se pudo crear la factura '{ref}': {e}") from e
     if file_bytes:
-        attach_file(models, uid, api_key, "account.move", move_id, filename, file_bytes, mimetype)
+        try:
+            attach_file(models, uid, api_key, "account.move", move_id, filename, file_bytes, mimetype)
+        except Exception:
+            pass  # adjunto falla silencioso — la factura ya existe
     return move_id
 
 def create_landed_cost(models, uid, api_key, picking_ids, cost_lines):
@@ -882,18 +892,20 @@ def create_sale_order(models, uid, api_key, partner_id, note, lines, filename, f
     if date_order:       vals["date_order"]        = date_order
     if ejecutivo_field and ejecutivo_id:
         vals[ejecutivo_field] = ejecutivo_id
-    order_id = call(models, uid, api_key, "sale.order", "create", [vals])
+    try:
+        order_id = call(models, uid, api_key, "sale.order", "create", [vals])
+    except OdooError as e:
+        raise OdooError(f"No se pudo crear el pedido: {e}") from e
+
     for ln in lines:
         line_vals = {
-            "order_id":       order_id,
-            "name":           ln.get("descripcion") or ln.get("producto") or "Sin descripción",
+            "order_id":        order_id,
+            "name":            ln.get("descripcion") or ln.get("producto") or "Sin descripción",
             "product_uom_qty": _to_float(ln.get("cantidad", 1)),
-            "price_unit":     _to_float(ln.get("precio_unit") or ln.get("precio", 0)),
+            "price_unit":      _to_float(ln.get("precio_unit") or ln.get("precio", 0)),
         }
         if ln.get("product_id"):
             _pid = ln["product_id"]
-            # product_id puede ser product.template (estrategias 1&2) o product.product (EAN13)
-            # Buscar variante por template_id; si no hay resultado ya es un variant ID correcto
             _vv = call(models, uid, api_key, "product.product", "search",
                        [[("product_tmpl_id", "=", _pid), ("active", "=", True)]], {"limit": 1})
             line_vals["product_id"] = _vv[0] if _vv else _pid
@@ -902,9 +914,17 @@ def create_sale_order(models, uid, api_key, partner_id, note, lines, filename, f
                             [[("name", "ilike", ln["producto"])]], {"limit": 1})
             if prod_ids:
                 line_vals["product_id"] = prod_ids[0]
-        call(models, uid, api_key, "sale.order.line", "create", [line_vals])
+        try:
+            call(models, uid, api_key, "sale.order.line", "create", [line_vals])
+        except OdooError as e:
+            _logger.warning("Línea de pedido %s no creada: %s", line_vals.get("name"), e)
+            # Continuar con las demás líneas aunque una falle
+
     if file_bytes:
-        attach_file(models, uid, api_key, "sale.order", order_id, filename, file_bytes, mimetype)
+        try:
+            attach_file(models, uid, api_key, "sale.order", order_id, filename, file_bytes, mimetype)
+        except Exception:
+            pass  # adjunto falla silencioso — el pedido ya existe
     # El pedido queda en estado Presupuesto (draft) para revisión y confirmación manual en Odoo
     return order_id
 
@@ -1500,9 +1520,13 @@ def create_full_partner(models, uid, api_key, vals_dict):
     """
     Crea un res.partner completo en Odoo.
     vals_dict puede incluir cualquier campo válido de res.partner.
-    Retorna partner_id.
+    Retorna partner_id. Lanza OdooError si falla.
     """
-    return call(models, uid, api_key, "res.partner", "create", [vals_dict])
+    name = vals_dict.get("name", "?")
+    try:
+        return call(models, uid, api_key, "res.partner", "create", [vals_dict])
+    except OdooError as e:
+        raise OdooError(f"No se pudo crear el contacto '{name}': {e}") from e
 
 
 def match_ar_state(province_name, ar_states):
@@ -2009,6 +2033,9 @@ def register_customer_payment(models, uid, api_key,
             raise  # Re-lanzar si no es el error esperado
 
         return True, group_id
-    except Exception as e:
+    except OdooError as e:
         return False, str(e)
-
+    except Exception as e:
+        msg = _clean_odoo_fault(str(e)) if "Traceback" in str(e) else str(e)
+        _logger.error("register_customer_payment: %s", msg)
+        return False, msg
