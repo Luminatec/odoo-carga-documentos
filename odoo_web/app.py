@@ -1847,22 +1847,24 @@ def search_product_by_code_or_name(models_url, uid, api_key,
 
 
 def get_ejecutivo_field(models_url, uid, api_key):
-    """Detecta el nombre técnico del campo 'Ejecutivo de cuenta' (o similar) en sale.order."""
+    """Detecta el nombre técnico y el modelo de relación del campo
+    'Ejecutivo de cuenta' (o similar) en sale.order.
+    Retorna (field_name, relation_model) o (None, None)."""
     try:
         _mx = xmlrpc.client.ServerProxy(models_url)
         fields = _mx.execute_kw(ODOO_DB, uid, api_key,
             "sale.order", "fields_get", [],
-            {"attributes": ["string", "type"]})
+            {"attributes": ["string", "type", "relation"]})
         keywords = ["ejecutivo", "referido"]
         for fname, finfo in fields.items():
             if not fname.startswith("x_"):
                 continue
             label = finfo.get("string", "").lower()
             if any(kw in label for kw in keywords):
-                return fname
-        return None
+                return fname, finfo.get("relation", "res.partner")
+        return None, None
     except Exception:
-        return None
+        return None, None
 
 def get_referidos(models_url, uid, api_key):
     """Devuelve lista de (id, nombre) de partners usados como Referido en Odoo."""
@@ -4859,7 +4861,7 @@ with tab_orders:
             st.markdown("---")
 
             # Campo Referido / Ejecutivo de cuenta
-            _oc_ejecutivo_field = get_ejecutivo_field(models_url, uid, api_key)
+            _oc_ejecutivo_field, _oc_ejecutivo_relation = get_ejecutivo_field(models_url, uid, api_key)
             _oc_referidos  = get_referidos(models_url, uid, api_key)
             _oc_ref_map    = {n: i for i, n in _oc_referidos}
             _oc_ref_opts   = ["— Sin referido —"] + list(_oc_ref_map.keys())
@@ -4907,7 +4909,19 @@ with tab_orders:
                                      {"x_studio_referido_1": _oc_ref_map[_oc_ref_sel]}])
                             except Exception:
                                 pass
-                        _ref_id_oc = _oc_ref_map.get(_oc_ref_sel) if _oc_ref_sel != "— Sin referido —" else None
+                        _ref_partner_id = _oc_ref_map.get(_oc_ref_sel) if _oc_ref_sel != "— Sin referido —" else None
+                        # Si el campo espera res.users, buscar el usuario cuyo partner coincide
+                        _ref_id_oc = _ref_partner_id
+                        if _ref_partner_id and _oc_ejecutivo_relation == "res.users":
+                            try:
+                                _usr = models.execute_kw(ODOO_DB, uid, api_key,
+                                    "res.users", "search_read",
+                                    [[("partner_id", "=", _ref_partner_id)]],
+                                    {"fields": ["id"], "limit": 1})
+                                if _usr:
+                                    _ref_id_oc = _usr[0]["id"]
+                            except Exception:
+                                pass
                         order_id = create_sale_order(
                             models, uid, api_key,
                             partner_id       = _partner_id_oc,
