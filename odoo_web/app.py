@@ -3786,11 +3786,17 @@ def get_customer_pending_credit_notes(models_url, uid, api_key, partner_ids_tupl
         rows = m.execute_kw(ODOO_DB, uid, api_key, "account.move", "search_read",
             [[("move_type", "=", "out_refund"),
               ("state", "=", "posted"),
-              ("payment_state", "in", ["not_paid", "partial"]),
+              ("payment_state", "in", ["not_paid", "partial", "in_payment"]),
               ("partner_id", "child_of", list(partner_ids_tuple))]],
             {"fields": ["id", "name", "invoice_date", "amount_total",
                         "amount_residual", "currency_id", "partner_id"],
              "order": "invoice_date asc", "limit": 200})
+        # amount_residual en out_refund puede ser negativo en Odoo → tomar valor absoluto
+        for _r in rows:
+            if (_r.get("amount_residual") or 0) < 0:
+                _r["amount_residual"] = abs(_r["amount_residual"])
+            if (_r.get("amount_total") or 0) < 0:
+                _r["amount_total"] = abs(_r["amount_total"])
         return rows
     except Exception as _e:
         st.warning(f"⚠️ Error al cargar notas de crédito pendientes: {_e}")
@@ -7142,6 +7148,7 @@ with tab_recibos:
             if st.button("🔄 Actualizar desde Odoo", key="rc_refresh"):
                 search_partners_by_cuits.clear()
                 get_customer_unpaid_invoices.clear()
+                get_customer_pending_credit_notes.clear()
                 st.rerun()
 
             st.divider()
@@ -7300,6 +7307,8 @@ with tab_recibos:
                     _rc_ncs        = _rc_nc_by_pid.get(_rc_pid, [])
                     _rcncsel_ids   = []
                     _rcncsel_total = 0.0
+                    if not _rc_ncs:
+                        st.caption("📋 Sin notas de crédito pendientes para este cliente.")
                     if _rc_ncs:
                         st.markdown("**Notas de crédito pendientes de aplicar:**")
                         _rnc_rows = []
