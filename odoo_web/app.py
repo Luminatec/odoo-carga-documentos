@@ -2108,17 +2108,52 @@ def parse_alta_cliente_docx(file_bytes: bytes) -> dict:
 
 def fetch_arca_by_cuit(cuit_str: str) -> dict:
     """Consulta datos de un contribuyente en ARCA/AFIP por CUIT.
-    Usa la API pública de argentinadatos.com (sin autenticación).
-    Retorna dict compatible con extract_arca_fields() o {} si falla."""
+    Intenta argentinadatos.com primero, luego TangoFactura como fallback.
+    Retorna dict compatible con extract_arca_fields(), o {"_error": msg} si falla."""
     try:
         import requests as _req
         _cuit_clean = re.sub(r"[\s\-]", "", cuit_str.strip())
         if not _cuit_clean.isdigit() or len(_cuit_clean) != 11:
-            return {}
-        _url = f"https://api.argentinadatos.com/v1/afip/personas/{_cuit_clean}"
-        _resp = _req.get(_url, timeout=10)
-        if _resp.status_code != 200:
-            return {}
+            return {"_error": f"CUIT inválido: debe tener 11 dígitos (recibido: '{cuit_str.strip()}')"}
+
+        # ── Intento 1: argentinadatos.com ──────────────────────────────────
+        _url1 = f"https://api.argentinadatos.com/v1/afip/personas/{_cuit_clean}"
+        _resp = None
+        try:
+            _resp = _req.get(_url1, timeout=10)
+        except Exception as _e1:
+            pass
+
+        if _resp is None or _resp.status_code != 200:
+            # ── Intento 2: TangoFactura (fallback) ─────────────────────────
+            _url2 = f"https://afip.tangofactura.com/Rest/GetContribuyenteFull?cuit={_cuit_clean}"
+            try:
+                _resp2 = _req.get(_url2, timeout=10)
+                if _resp2.status_code == 200:
+                    _d2 = _resp2.json()
+                    _contrib = _d2.get("contribuyente") or _d2
+                    _nombre2 = (_contrib.get("razonSocial") or
+                                f"{_contrib.get('apellido','')} {_contrib.get('nombre','')}").strip()
+                    if _nombre2:
+                        _dom2 = (_contrib.get("domicilioFiscal") or
+                                 _contrib.get("domicilio") or {})
+                        return {
+                            "nombre": _nombre2, "cuit": _cuit_clean,
+                            "forma_juridica": _contrib.get("tipoPersona",""),
+                            "street":   (_dom2.get("direccion") or "").strip().title(),
+                            "city":     (_dom2.get("localidad") or "").strip().title(),
+                            "zip_code": str(_dom2.get("codPostal") or "").strip(),
+                            "province_name": (_dom2.get("descripcionProvincia") or
+                                              _dom2.get("provincia") or "").strip().title(),
+                            "tipo_resp": "RI", "actividad_principal": "",
+                            "_source": "tangofactura",
+                        }
+            except Exception:
+                pass
+            # Ambos fallaron — devolver error descriptivo
+            _status = _resp.status_code if _resp is not None else "sin respuesta"
+            return {"_error": f"API no encontró el CUIT {_cuit_clean} (HTTP {_status}). "
+                              "Verificá el número o completá los datos manualmente."}
         _data = _resp.json()
 
         _out = {
@@ -5268,11 +5303,13 @@ with tab_contacts:
             if _api_result and _api_result.get("nombre"):
                 st.session_state["ct_arca_data"]  = _api_result
                 st.session_state["ct_arca_source"] = "api"
-                # Incrementar versión para forzar recreación del form con nuevos valores
                 st.session_state["ct_form_ver"] = st.session_state.get("ct_form_ver", 0) + 1
+                _src_label = " (TangoFactura)" if _api_result.get("_source") == "tangofactura" else ""
                 st.session_state["ct_arca_msg"] = ("success",
-                    f"✅ {_api_result['nombre']} · CUIT {_api_result['cuit']}")
+                    f"✅ {_api_result['nombre']} · CUIT {_api_result['cuit']}{_src_label}")
                 st.rerun()
+            elif _api_result and _api_result.get("_error"):
+                st.warning(_api_result["_error"])
             else:
                 st.warning("No se encontraron datos para ese CUIT. Verificá el número o completá los datos a mano.")
         else:
@@ -5399,6 +5436,15 @@ with tab_contacts:
     if _arca.get("delivery_address"):
         _ref_parts.append(f"Entrega: {_arca['delivery_address']}")
     _def_ref_interna = " | ".join(_ref_parts)
+
+    # ── Botón limpiar ─────────────────────────────────────────────────────
+    if _arca or st.session_state.get("ct_arca_data"):
+        if st.button("🗑️ Limpiar / Nuevo contacto", key="ct_clear"):
+            for _k in list(st.session_state.keys()):
+                if any(_k.startswith(p) for p in
+                       ("ct_arca", "ct_pdf_", "ct_form_ver", "ct_clear")):
+                    st.session_state.pop(_k, None)
+            st.rerun()
 
     with st.form(f"ct_form_{st.session_state.get('ct_form_ver', 0)}"):
         # ── Persona / Empresa ──────────────────────────────────────────────
