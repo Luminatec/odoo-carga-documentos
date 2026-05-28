@@ -1036,19 +1036,7 @@ def create_sale_order(models, uid, api_key, partner_id, note, lines, filename, f
         call(models, uid, api_key, "sale.order.line", "create", [line_vals])
     if file_bytes:
         attach_file(models, uid, api_key, "sale.order", order_id, filename, file_bytes, mimetype)
-    # Confirmar el pedido (draft → sale)
-    try:
-        call(models, uid, api_key, "sale.order", "action_confirm", [[order_id]])
-    except Exception:
-        pass  # si falla la confirmación el pedido queda en draft pero no bloquea
-    # Cancelar los pickings de entrega auto-generados: el inventario se mueve con el remito
-    try:
-        _pick_ids = call(models, uid, api_key, "stock.picking", "search",
-                         [[("sale_id", "=", order_id), ("picking_type_code", "=", "outgoing")]])
-        if _pick_ids:
-            call(models, uid, api_key, "stock.picking", "action_cancel", [_pick_ids])
-    except Exception:
-        pass  # no bloquear si falla la cancelación del picking
+    # El pedido queda en estado Presupuesto (draft) para revisión y confirmación manual en Odoo
     return order_id
 
 def _to_float(v):
@@ -4797,8 +4785,8 @@ with tab_orders:
                             ejecutivo_id    = _xl_ref_id,
                         )
                         url = odoo_url("sale.order", _xl_order_id)
-                        st.toast("Pedido creado en Odoo", icon="✅")
-                        st.markdown(f"📎 [Abrir en Odoo]({url})")
+                        st.toast("Presupuesto creado en Odoo — pendiente de confirmación", icon="✅")
+                        st.markdown(f"📎 [Revisar y confirmar en Odoo]({url})")
                         st.session_state.history.append({"tipo":"Pedido cliente",
                             "archivo":uf.name,"id":_xl_order_id,"url":url,"estado":"✅","hora":_dt_now.now().strftime("%H:%M")})
                     except Exception as _xe:
@@ -5237,8 +5225,8 @@ with tab_orders:
                             ejecutivo_id     = _ref_id_oc,
                         )
                         url = odoo_url("sale.order", order_id)
-                        st.toast("Pedido creado en Odoo", icon="✅")
-                        st.markdown(f"📎 [Abrir en Odoo]({url})")
+                        st.toast("Presupuesto creado en Odoo — pendiente de confirmación", icon="✅")
+                        st.markdown(f"📎 [Revisar y confirmar en Odoo]({url})")
                         st.session_state.history.append({"tipo":"Pedido cliente",
                             "archivo":uf.name,"id":order_id,"url":url,"estado":"✅","hora":_dt_now.now().strftime("%H:%M")})
                     except Exception as _e:
