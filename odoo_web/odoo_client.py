@@ -1028,8 +1028,10 @@ _ODOO17_PATHS = {
     "purchase.order":     "odoo/purchase",
     "sale.order":         "odoo/sales",
     "stock.picking":      "odoo/inventory/receipts",
-    "stock.landed.cost":  "odoo/inventory/landed-costs",
-    "res.partner":        "odoo/contacts",
+    "stock.landed.cost":       "odoo/inventory/landed-costs",
+    "res.partner":             "odoo/contacts",
+    "account.payment":         "odoo/accounting/customers/payments",
+    "account.payment.group":   "odoo/accounting/payment-groups",
 }
 
 def odoo_url(model, record_id):
@@ -1038,7 +1040,7 @@ def odoo_url(model, record_id):
     if path:
         return f"{_cfg.ODOO_URL}/{path}/{record_id}"
     # fallback hash-URL por si el modelo no está mapeado
-    return odoo_url("{model}", record_id)
+    return f"{_cfg.ODOO_URL}/web#model={model}&id={record_id}"
 
 def safe_float(v, default=0.0):
     """Convierte a float tolerando formato ARS (1.234,56), strings vacíos y None."""

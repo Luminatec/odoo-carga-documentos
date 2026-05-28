@@ -137,7 +137,7 @@ def render(models, uid, api_key, models_url, is_admin):
                                         st.session_state[_pnm_key_xl] = _xnc_name
                                         st.rerun()
                                     except Exception as _xe:
-                                        st.error(f"❌ {_xe}")
+                                        show_odoo_error(_xe, "crear cliente")
                                 else:
                                     st.warning("Razón social y CUIT son obligatorios.")
                 elif _xl_q_val:
@@ -386,7 +386,7 @@ def render(models, uid, api_key, models_url, is_admin):
                         st.session_state.history.append({"tipo":"Pedido cliente",
                             "archivo":uf.name,"id":_xl_order_id,"url":url,"estado":"✅","hora":_dt_now.now().strftime("%H:%M")})
                     except Exception as _xe:
-                        st.error(f"❌ {_xe}")
+                        show_odoo_error(_xe, "crear pedido Excel")
         else:
             # ── Parseo del PDF de OC ──────────────────────────────────────
             oc_fields, _oc_tables, _oc_raw = {}, [], ""
@@ -500,7 +500,7 @@ def render(models, uid, api_key, models_url, is_admin):
                                 st.success(f"✅ Cliente **{nc_name}** creado en Odoo (ID {_new_pid})")
                                 st.rerun()
                             except Exception as _e:
-                                st.error(f"❌ {_e}")
+                                show_odoo_error(_e, "crear cliente")
                         else:
                             st.warning("Razón social y CUIT son obligatorios.")
 
@@ -828,7 +828,7 @@ def render(models, uid, api_key, models_url, is_admin):
                         st.session_state.history.append({"tipo":"Pedido cliente",
                             "archivo":uf.name,"id":order_id,"url":url,"estado":"✅","hora":_dt_now.now().strftime("%H:%M")})
                     except Exception as _e:
-                        st.error(f"❌ {_e}")
+                        show_odoo_error(_e, "crear pedido OC")
 
 
 # ═══════════════════════════════════════════════════

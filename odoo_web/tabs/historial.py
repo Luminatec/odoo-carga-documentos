@@ -7,10 +7,10 @@ from odoo_client import get_odoo_error_log
 def render(models, uid, api_key, models_url, is_admin):
     st.subheader("Historial de esta sesion")
 
-    # ── Documentos procesados ───────────────────────────────────────────────
+    # ── Documentos creados en Odoo ─────────────────────────────────────────
     _hist = st.session_state.get("history", [])
     if not _hist:
-        st.caption("Todavia no se proceso ningun documento en esta sesion.")
+        st.caption("Todavia no se creo ningun documento en Odoo en esta sesion.")
     else:
         import pandas as _pd_hist
         _hdf = _pd_hist.DataFrame(_hist)
@@ -21,6 +21,20 @@ def render(models, uid, api_key, models_url, is_admin):
                 lambda u: "[Abrir](" + u + ")" if u else "")
         st.dataframe(_hdf_disp, use_container_width=True, hide_index=True)
 
+    # ── Archivos subidos esta sesion ───────────────────────────────────────
+    _proc = st.session_state.get("processed_files", {})
+    if _proc:
+        st.divider()
+        st.subheader(f"Archivos procesados ({len(_proc)})")
+        st.caption("Archivos subidos y procesados exitosamente en esta sesion.")
+        import pandas as _pd_proc
+        _prows = [
+            {"Hora": v["hora"], "Tipo": v["tipo"],
+             "Archivo": v["filename"], "Resultado": v["resultado"]}
+            for v in _proc.values()
+        ]
+        st.dataframe(_pd_proc.DataFrame(_prows), use_container_width=True, hide_index=True)
+
     # ── Exportar a Excel ───────────────────────────────────────────────────
     _errors = get_odoo_error_log()
     if _hist or _errors:
@@ -30,7 +44,6 @@ def render(models, uid, api_key, models_url, is_admin):
             import pandas as _pd_exp
             _buf = _io.BytesIO()
             with _pd_exp.ExcelWriter(_buf, engine="openpyxl") as _writer:
-                # Hoja 1: documentos procesados
                 if _hist:
                     _exp_df = _pd_exp.DataFrame(_hist)
                     _exp_cols = [c for c in ["hora","tipo","archivo","estado","id","url"] if c in _exp_df.columns]
@@ -38,7 +51,6 @@ def render(models, uid, api_key, models_url, is_admin):
                 else:
                     _pd_exp.DataFrame([{"info":"Sin documentos procesados"}]).to_excel(
                         _writer, sheet_name="Documentos", index=False)
-                # Hoja 2: log de errores
                 if _errors:
                     _err_df = _pd_exp.DataFrame(_errors)
                     _rename = {"ts":"Hora","nivel":"Nivel","context":"Operacion","error":"Detalle"}
@@ -57,7 +69,7 @@ def render(models, uid, api_key, models_url, is_admin):
                 key="historial_download",
             )
 
-    # ── Log de errores/warnings de la sesion ───────────────────────────────
+    # ── Log de errores/warnings de la sesion ──────────────────────────────
     if _errors:
         st.divider()
         _n_err  = sum(1 for e in _errors if e.get("nivel", "ERROR") == "ERROR")

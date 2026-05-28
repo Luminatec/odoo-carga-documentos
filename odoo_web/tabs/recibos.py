@@ -265,8 +265,9 @@ def render(models, uid, api_key, models_url, is_admin):
         if _is_dup_rc:
             st.warning(
                 f"⚠️ **{_rc_file.name}** ya fue procesado en esta sesión "
-                f"({_dup_entry_rc.get('hora','?')}). "
-                "Si querés volver a procesarlo, cerrá sesión y volvé a ingresar.")
+                f"a las {_dup_entry_rc.get('hora','?')} "
+                f"({_dup_entry_rc.get('resultado','')}). "
+                "Podés continuar igual si es un reenvío o corrección.")
         _rc_cheques = _rc_parse_cheques(_rc_bytes, _rc_file.name)
 
         if not _rc_cheques:
