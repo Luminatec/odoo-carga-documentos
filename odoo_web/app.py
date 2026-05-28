@@ -3646,6 +3646,24 @@ def get_customer_unpaid_invoices(models_url, uid, api_key, partner_ids_tuple):
         st.warning(f"⚠️ Error al cargar facturas pendientes: {_e}")
         return []
 
+@st.cache_data(ttl=180, show_spinner=False)
+def get_customer_pending_credit_notes(models_url, uid, api_key, partner_ids_tuple):
+    """Notas de crédito de cliente con saldo pendiente de aplicar (out_refund posted, not_paid/partial)."""
+    try:
+        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        rows = m.execute_kw(ODOO_DB, uid, api_key, "account.move", "search_read",
+            [[("move_type", "=", "out_refund"),
+              ("state", "=", "posted"),
+              ("payment_state", "in", ["not_paid", "partial"]),
+              ("partner_id", "child_of", list(partner_ids_tuple))]],
+            {"fields": ["id", "name", "invoice_date", "amount_total",
+                        "amount_residual", "currency_id", "partner_id"],
+             "order": "invoice_date asc", "limit": 200})
+        return rows
+    except Exception as _e:
+        st.warning(f"⚠️ Error al cargar notas de crédito pendientes: {_e}")
+        return []
+
 def register_customer_payment(models, uid, api_key,
                                partner_id, amount, currency_id,
                                payment_date, journal_id,
@@ -6899,11 +6917,14 @@ with tab_recibos:
 
             _rc_pids_found = tuple(pid for pid, _ in _rc_partner_map.values())
             if _rc_pids_found:
-                with st.spinner("Cargando facturas pendientes de cobro..."):
+                with st.spinner("Cargando facturas y notas de crédito pendientes..."):
                     _rc_all_inv = get_customer_unpaid_invoices(
+                        models_url, uid, api_key, _rc_pids_found)
+                    _rc_all_nc = get_customer_pending_credit_notes(
                         models_url, uid, api_key, _rc_pids_found)
             else:
                 _rc_all_inv = []
+                _rc_all_nc  = []
 
             # Construir mapa inverso: id_hijo → id_padre (para agrupar facturas de contactos)
             # Una factura puede estar a nombre de un contacto (hijo) del socio principal
@@ -6925,9 +6946,15 @@ with tab_recibos:
             _rc_inv_by_pid = {}
             for _rci in _rc_all_inv:
                 _rpid = (_rci.get("partner_id") or [0])[0]
-                # Si es un contacto hijo, agrupar bajo el padre
                 _rpid_norm = _rc_child_to_parent.get(_rpid, _rpid)
                 _rc_inv_by_pid.setdefault(_rpid_norm, []).append(_rci)
+
+            # Index notas de crédito by partner_id (mismo criterio)
+            _rc_nc_by_pid = {}
+            for _rnc in _rc_all_nc:
+                _rpid = (_rnc.get("partner_id") or [0])[0]
+                _rpid_norm = _rc_child_to_parent.get(_rpid, _rpid)
+                _rc_nc_by_pid.setdefault(_rpid_norm, []).append(_rnc)
 
             if st.button("🔄 Actualizar desde Odoo", key="rc_refresh"):
                 search_partners_by_cuits.clear()
@@ -7085,6 +7112,53 @@ with tab_recibos:
                         _rcsel       = _rci_edited[_rci_edited["Sel"] == True]
                         _rcsel_ids   = [int(r) for r in _rcsel["_id"].tolist()]
                         _rcsel_saldo = float(_rcsel["_saldo_num"].sum())
+
+                    # ── Selector de notas de crédito pendientes ──────────────
+                    _rc_ncs        = _rc_nc_by_pid.get(_rc_pid, [])
+                    _rcncsel_ids   = []
+                    _rcncsel_total = 0.0
+                    if _rc_ncs:
+                        st.markdown("**Notas de crédito pendientes de aplicar:**")
+                        _rnc_rows = []
+                        for _rnc in _rc_ncs:
+                            _rncic  = (_rnc.get("currency_id") or [0, "ARS"])[1]
+                            _rncres = float(_rnc.get("amount_residual") or 0)
+                            _rncto  = float(_rnc.get("amount_total") or 0)
+                            _rnc_rows.append({
+                                "Sel":        False,
+                                "Nota de Crédito": _rnc.get("name") or f"ID {_rnc['id']}",
+                                "Fecha":      str(_rnc.get("invoice_date") or ""),
+                                "Moneda":     _rncic,
+                                "Total NC":   fmt_ars(_rncto)  if _rncic == "ARS" else f"{_rncic} {_rncto:,.2f}",
+                                "Saldo NC":   fmt_ars(_rncres) if _rncic == "ARS" else f"{_rncic} {_rncres:,.2f}",
+                                "_saldo_num": _rncres,
+                                "_id":        _rnc["id"],
+                            })
+                        _rnc_df  = pd.DataFrame(_rnc_rows)
+                        _rnc_cfg = {
+                            "Sel":        st.column_config.CheckboxColumn("✓", width="small"),
+                            "Total NC":   st.column_config.TextColumn("Total NC"),
+                            "Saldo NC":   st.column_config.TextColumn("Saldo NC"),
+                            "_saldo_num": None,
+                            "_id":        None,
+                        }
+                        _rnc_disp = ["Sel", "Nota de Crédito", "Fecha", "Moneda",
+                                     "Total NC", "Saldo NC"]
+                        _rnc_edited = st.data_editor(
+                            _rnc_df[_rnc_disp + ["_saldo_num", "_id"]],
+                            column_config=_rnc_cfg,
+                            column_order=_rnc_disp,
+                            use_container_width=True, hide_index=True,
+                            key=f"rc_nc_{_rcuit}",
+                            disabled=[c for c in _rnc_disp if c != "Sel"],
+                        )
+                        _rncsel        = _rnc_edited[_rnc_edited["Sel"] == True]
+                        _rcncsel_ids   = [int(r) for r in _rncsel["_id"].tolist()]
+                        _rcncsel_total = float(_rncsel["_saldo_num"].sum())
+                        if _rcncsel_total > 0:
+                            st.caption(
+                                f"NC seleccionadas: ARS {fmt_ars(_rcncsel_total)} "
+                                "— se aplicarán contra las facturas en el recibo.")
 
                     # ── Formulario de pago ────────────────────────────────────
                     st.markdown("#### Datos del recibo")
@@ -7398,11 +7472,15 @@ with tab_recibos:
                                         d for d in st.session_state.get(_ded_key, [])
                                         if float(d.get("monto", 0)) > 0
                                     ] if _rc_cheque_vals else None
+                                    # Incluir facturas + notas de crédito seleccionadas
+                                    _rc_all_move_ids = (
+                                        (_rcsel_ids or []) + (_rcncsel_ids or [])
+                                    ) or None
                                     _rc_ok, _rc_res = register_customer_payment(
                                         models, uid, api_key,
                                         _rc_pid, _rc_neto, _rc_cur_id,
                                         _rc_date_str, _rc_jour_id,
-                                        move_ids=_rcsel_ids if _rcsel_ids else None,
+                                        move_ids=_rc_all_move_ids,
                                         memo=_rc_memo,
                                         cheques=_rc_cheque_vals if _rc_cheque_vals else None,
                                         withholdings=_rc_withholdings)
@@ -7412,6 +7490,7 @@ with tab_recibos:
                                         f"Recibo registrado para {_rc_pname} — ARS {fmt_ars(_rc_neto)}", icon="✅")
                                     search_partners_by_cuits.clear()
                                     get_customer_unpaid_invoices.clear()
+                                    get_customer_pending_credit_notes.clear()
                                     if _wh_warn:
                                         _wh_detail = _rc_res.replace("__WH_WARN__", "")
                                         st.warning(
