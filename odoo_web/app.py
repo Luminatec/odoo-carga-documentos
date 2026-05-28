@@ -7092,8 +7092,11 @@ with tab_recibos:
                     _cuit_rets = st.session_state.get("rc_retenciones", {}).get(_rcuit, [])
                     for _cret in _cuit_rets:
                         _cret_fname = _cret.get("_filename", "")
+                        _cret_concepto_key = _cret.get("concepto", "")
+                        # Deduplicar por archivo + concepto (un PDF puede tener varias retenciones)
                         _already = any(
-                            d.get("_ret_filename") == _cret_fname
+                            d.get("_ret_filename") == _cret_fname and
+                            d.get("_ret_concepto_pdf") == _cret_concepto_key
                             for d in st.session_state[_ded_key])
                         if not _already and _cret.get("importe", 0) > 0:
                             _new_uid = st.session_state[_ded_cnt_key] + 1
@@ -7132,13 +7135,14 @@ with tab_recibos:
                             if _ret_acct_lbl and _ret_acct_lbl in _rc_acct_opts_pre:
                                 _ret_acct_idx = _rc_acct_opts_pre.index(_ret_acct_lbl)
                             st.session_state[_ded_key].append({
-                                "uid":           _new_uid,
-                                "monto":         float(_cret["importe"]),
-                                "concepto_idx":  _ret_acct_idx,
-                                "concepto":      _ret_acct_lbl,
-                                "account_id":    _ret_acct_id,
-                                "_ret_filename": _cret_fname,
-                                "_ret_auto":     True,
+                                "uid":               _new_uid,
+                                "monto":             float(_cret["importe"]),
+                                "concepto_idx":      _ret_acct_idx,
+                                "concepto":          _ret_acct_lbl,
+                                "account_id":        _ret_acct_id,
+                                "_ret_filename":     _cret_fname,
+                                "_ret_concepto_pdf": _cret_concepto_key,
+                                "_ret_auto":         True,
                             })
                             st.toast(
                                 f"Retención de {_cret.get('nombre','')} "
