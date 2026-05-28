@@ -1986,7 +1986,9 @@ def register_customer_payment(models, uid, api_key,
                                partner_id, amount, currency_id,
                                payment_date, journal_id,
                                move_ids=None, memo="", cheques=None,
-                               withholdings=None):
+                               withholdings=None,
+                               writeoff_account_id=None,
+                               writeoff_label="Diferencia de redondeo"):
     """Registra un recibo de cobro de cliente usando account.payment.group.
     Flujo correcto para Odoo AR (módulo account_payments_group):
       1. Crear account.payment.group con payment_type='receivable'
@@ -2162,6 +2164,19 @@ def register_customer_payment(models, uid, api_key,
             if _wh_errors:
                 # Retornar los errores como advertencia (el recibo principal ya quedó)
                 return True, f"__WH_WARN__{'|'.join(_wh_errors)}"
+
+        # 3d. Configurar writeoff si hay diferencia de redondeo a saldar
+        if writeoff_account_id and inv_line_ids:
+            try:
+                models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                    "account.payment.group", "write",
+                    [[group_id], {
+                        "payment_difference_handling": "reconcile",
+                        "writeoff_account_id": writeoff_account_id,
+                        "writeoff_label": writeoff_label or "Diferencia de redondeo",
+                    }])
+            except Exception as _wo_err:
+                _logger.warning("register_customer_payment: writeoff config: %s", _wo_err)
 
         # 4. Confirmar el grupo
         # Nota: post() retorna None en esta instalacion, lo que causa un error

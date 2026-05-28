@@ -760,6 +760,46 @@ def render(models, uid, api_key, models_url, is_admin):
                         _rc_info += "  ·  Sin facturas → se registra como pago a cuenta"
                     st.info(_rc_info)
 
+                    # ── Diferencia de redondeo ─────────────────────────────────────────
+                    _rc_writeoff_account_id = None
+                    _rc_writeoff_label = "Diferencia de redondeo"
+                    if _rcsel_ids and _rcsel_saldo > 0:
+                        _rc_diff = _rcsel_saldo - _rc_neto
+                        _rc_diff_abs = abs(_rc_diff)
+                        if 0 < _rc_diff_abs <= 1.0:
+                            st.warning(
+                                f"⚖️ Diferencia de **ARS {fmt_ars(_rc_diff_abs)}** entre "
+                                f"el importe cobrado (ARS {fmt_ars(_rc_neto)}) y el saldo "
+                                f"de las facturas seleccionadas (ARS {fmt_ars(_rcsel_saldo)}).")
+                            _wo_chk_key = f"rc_writeoff_chk_{_rcuit}"
+                            _wo_checked = st.checkbox(
+                                f"Registrar ARS {fmt_ars(_rc_diff_abs)} como diferencia de "
+                                "redondeo y marcar facturas como pagadas en su totalidad",
+                                key=_wo_chk_key)
+                            if _wo_checked:
+                                # Pre-seleccionar cuentas con "redon" en el nombre
+                                _rc_wo_accts_filt = [
+                                    (aid, albl) for aid, albl in _rc_accts
+                                    if "redon" in albl.lower()
+                                ]
+                                _rc_wo_pool = _rc_wo_accts_filt if _rc_wo_accts_filt else _rc_accts
+                                _rc_wo_opts = ["— Seleccionar cuenta —"] + [lbl for _, lbl in _rc_wo_pool]
+                                _wo_acct_col, _wo_lbl_col = st.columns([3, 2])
+                                _rc_wo_acct_sel = _wo_acct_col.selectbox(
+                                    "Cuenta para la diferencia",
+                                    options=_rc_wo_opts,
+                                    index=(1 if _rc_wo_accts_filt else 0),
+                                    key=f"rc_wo_acct_{_rcuit}")
+                                _rc_wo_lbl_input = _wo_lbl_col.text_input(
+                                    "Etiqueta del asiento",
+                                    value="Diferencia de redondeo",
+                                    key=f"rc_wo_lbl_{_rcuit}")
+                                if _rc_wo_acct_sel != "— Seleccionar cuenta —":
+                                    _rc_writeoff_account_id = next(
+                                        (aid for aid, albl in _rc_wo_pool
+                                         if albl == _rc_wo_acct_sel), None)
+                                    _rc_writeoff_label = _rc_wo_lbl_input or "Diferencia de redondeo"
+
                     _dup_pending = st.session_state.get(f"rc_confirm_dup_{_rcuit}", False)
                     if _dup_pending:
                         st.button("↩️ Cancelar", key=f"rc_cancel_dup_{_rcuit}",
@@ -868,6 +908,9 @@ def render(models, uid, api_key, models_url, is_admin):
                                         st.write(f"📋 {len(_rc_withholdings)} retención(es) a registrar")
                                     if _rc_all_move_ids:
                                         st.write(f"🔗 Imputando {len(_rc_all_move_ids)} comprobante(s)")
+                                    if _rc_writeoff_account_id:
+                                        _diff_disp = abs(_rcsel_saldo - _rc_neto)
+                                        st.write(f"⚖️ Saldando diferencia de redondeo ARS {fmt_ars(_diff_disp)}")
                                     _rc_ok, _rc_res = register_customer_payment(
                                         models, uid, api_key,
                                         _rc_pid, _rc_neto, _rc_cur_id,
@@ -875,7 +918,9 @@ def render(models, uid, api_key, models_url, is_admin):
                                         move_ids=_rc_all_move_ids,
                                         memo=_rc_memo,
                                         cheques=_rc_cheque_vals if _rc_cheque_vals else None,
-                                        withholdings=_rc_withholdings)
+                                        withholdings=_rc_withholdings,
+                                        writeoff_account_id=_rc_writeoff_account_id,
+                                        writeoff_label=_rc_writeoff_label)
                                     if _rc_ok:
                                         _rc_status.update(
                                             label="✅ Cobro registrado",
