@@ -1,5 +1,8 @@
 """Tab Contactos."""
 import streamlit as st
+import re
+from io import BytesIO
+from datetime import datetime as _dt_now
 import config as _cfg
 from odoo_client import (
     odoo_url,

@@ -1,5 +1,8 @@
 """Tab Recibos de Cobro."""
 import streamlit as st
+import re
+from io import BytesIO
+import pandas as pd
 import config as _cfg
 from odoo_client import (
     get_all_accounts,
