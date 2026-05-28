@@ -1,9 +1,22 @@
 """Tab Facturas de Proveedores."""
 import streamlit as st
-import xmlrpc.client
 import config as _cfg
-from odoo_client import *
-from parsers import *
+from odoo_client import (
+    search_partners,
+    get_all_accounts,
+    get_partner_default_account,
+    get_expense_products,
+    get_partner_default_product,
+    get_analytic_accounts,
+    create_vendor_bill,
+    odoo_url,
+    safe_float,
+    fmt_ars,
+    search_partner_by_cuit,
+    check_invoice_exists,
+    create_vendor_partner,
+)
+from parsers import extract_pdf_fields, extract_image_fields, extract_excel_oc_fields
 
 
 def render(models, uid, api_key, models_url, is_admin):

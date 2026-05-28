@@ -1,9 +1,7 @@
 """Tab Asistente."""
 import streamlit as st
-import xmlrpc.client
 import config as _cfg
-from odoo_client import *
-from parsers import *
+
 
 
 def render(models, uid, api_key, models_url, is_admin):

@@ -5,11 +5,110 @@ Todas las funciones @st.cache_data y helpers de creación/búsqueda van aquí.
 import xmlrpc.client
 import base64
 import re
+import time
+import logging
 import streamlit as st
 from io import BytesIO
 from datetime import datetime as _dt_now
 import pandas as pd
 import config as _cfg
+
+_logger = logging.getLogger("lumidoo.odoo_client")
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ERROR HANDLING CENTRALIZADO
+# ═══════════════════════════════════════════════════════════════════════════
+
+class OdooError(Exception):
+    """Error controlado de Odoo XML-RPC."""
+    pass
+
+
+def odoo_call(models, uid, api_key, model, method, args, kw=None,
+              retries: int = 2, retry_delay: float = 1.5):
+    """
+    Wrapper seguro para models.execute_kw con:
+      - retry automático ante errores de red/timeout (no ante errores de negocio)
+      - logging estructurado
+      - excepción tipada OdooError para manejo uniforme en la UI
+
+    Uso:
+        result = odoo_call(models, uid, api_key, "account.move", "create", [vals])
+
+    Para errores de negocio (campo requerido, acceso denegado, etc.)
+    Odoo devuelve Fault — se propagan como OdooError con mensaje legible.
+    """
+    kw = kw or {}
+    last_exc = None
+
+    for attempt in range(retries + 1):
+        try:
+            return models.execute_kw(_cfg.ODOO_DB, uid, api_key, model, method, args, kw)
+        except xmlrpc.client.Fault as e:
+            # Error de negocio de Odoo — no reintentar, el mensaje ya es legible
+            msg = _clean_odoo_fault(e.faultString)
+            _logger.error("OdooFault %s.%s: %s", model, method, msg)
+            raise OdooError(msg) from e
+        except (ConnectionError, TimeoutError, OSError) as e:
+            last_exc = e
+            _logger.warning("OdooNetwork attempt %d/%d %s.%s: %s",
+                            attempt + 1, retries + 1, model, method, e)
+            if attempt < retries:
+                time.sleep(retry_delay)
+        except Exception as e:
+            last_exc = e
+            _logger.error("OdooUnexpected %s.%s: %s", model, method, e)
+            if attempt < retries:
+                time.sleep(retry_delay)
+
+    raise OdooError(f"No se pudo conectar a Odoo tras {retries + 1} intentos: {last_exc}") from last_exc
+
+
+def _clean_odoo_fault(fault_str: str) -> str:
+    """Extrae el mensaje legible de un Fault string de Odoo (quita traceback Python)."""
+    # Los Fault strings de Odoo tienen la forma:
+    # "Traceback (most recent call last):\n  ...\nUserError: El mensaje real"
+    for prefix in ("UserError: ", "ValidationError: ", "AccessError: ",
+                   "MissingError: ", "AccessDenied: "):
+        if prefix in fault_str:
+            return fault_str.split(prefix, 1)[-1].strip().split("\n")[0]
+    # Si no matchea ningún prefijo conocido, tomar la última línea no vacía
+    lines = [l.strip() for l in fault_str.splitlines() if l.strip()]
+    return lines[-1] if lines else fault_str
+
+
+def show_odoo_error(e: Exception, context: str = "") -> None:
+    """
+    Muestra un error de Odoo en la UI de Streamlit de forma consistente.
+    Loguea el error completo; muestra al usuario solo el mensaje limpio.
+
+    Uso en un tab:
+        try:
+            result = odoo_call(models, uid, api_key, ...)
+        except OdooError as e:
+            show_odoo_error(e, "crear factura")
+    """
+    prefix = f"Error al {context}: " if context else "Error: "
+    if isinstance(e, OdooError):
+        st.error(f"❌ {prefix}{e}")
+    else:
+        _logger.exception("Unexpected error: %s", e)
+        st.error(f"❌ {prefix}Error inesperado — revisá la consola de logs.")
+
+    # Guardar en historial de errores de sesión para diagnóstico
+    if "error_log" not in st.session_state:
+        st.session_state["error_log"] = []
+    st.session_state["error_log"].append({
+        "ts":      _dt_now.now().isoformat(timespec="seconds"),
+        "context": context,
+        "error":   str(e),
+    })
+
+
+def get_odoo_error_log() -> list:
+    """Devuelve el log de errores de la sesión actual (para mostrar en Historial)."""
+    return st.session_state.get("error_log", [])
+
 
 def get_models_proxy():
     """ServerProxy para account.move, etc. Es stateless — uid y password van por llamada."""
@@ -1320,350 +1419,6 @@ def create_vendor_partner(models, uid, api_key, name, vat, street="", phone="", 
 # CONTACTOS — helpers ARCA + Odoo
 # ─────────────────────────────────────────────────────────────────────────────
 
-def extract_arca_fields(text):
-    """
-    Extrae campos de una Constancia de Inscripción ARCA (AFIP).
-    Devuelve dict con: nombre, cuit, forma_juridica, street, city, zip_code,
-    province_name, tipo_resp (RI/MONO/EX/otro), actividad_principal.
-    """
-    f = {
-        "nombre": "", "cuit": "", "forma_juridica": "",
-        "street": "", "city": "", "zip_code": "", "province_name": "",
-        "tipo_resp": "RI",   # default: Responsable Inscripto
-        "actividad_principal": "",
-    }
-    if not text:
-        return f
-
-    lines = text.splitlines()
-
-    # Nombre y CUIT — primera línea con "CUIT:"
-    for ln in lines[:10]:
-        m = re.match(r"^(.+?)\s+CUIT:\s*([\d\-]+)", ln.strip())
-        if m:
-            f["nombre"] = m.group(1).strip()
-            f["cuit"]   = re.sub(r"[\s\-]", "", m.group(2))
-            break
-
-    # Forma jurídica
-    for ln in lines:
-        m = re.match(r"Forma\s+Jur[íi]dica:\s*(.+)", ln, re.I)
-        if m:
-            f["forma_juridica"] = m.group(1).strip()
-            break
-
-    # Tipo responsabilidad AFIP
-    text_up = text.upper()
-    if "MONOTRIBUTO" in text_up or "RSOC " in text_up:
-        f["tipo_resp"] = "MONO"
-    elif "EXENTO" in text_up and "IVA" not in text_up:
-        f["tipo_resp"] = "EX"
-    else:
-        f["tipo_resp"] = "RI"   # IVA registrado → Responsable Inscripto
-
-    # Actividad principal
-    for ln in lines:
-        m = re.search(r"Actividad\s+principal:\s*\d+\s*(?:\(F-\d+\))?\s*(.+?)(?:\s+Mes de inicio|$)", ln, re.I)
-        if m:
-            f["actividad_principal"] = m.group(1).strip()[:120]
-            break
-
-    # Domicilio fiscal
-    # Buscar el bloque después de "DOMICILIO FISCAL - ARCA"
-    try:
-        idx = next(i for i, l in enumerate(lines) if "DOMICILIO FISCAL" in l.upper() and "ARCA" in l.upper())
-        addr_lines = [l.strip() for l in lines[idx+1:idx+5] if l.strip()]
-        if addr_lines:
-            f["street"] = addr_lines[0]
-        if len(addr_lines) >= 2:
-            f["city"] = addr_lines[1]
-        if len(addr_lines) >= 3:
-            # "5963-CORDOBA" → zip=5963, province=CORDOBA
-            m_cp = re.match(r"(\d+)[\s\-]+(.+)", addr_lines[2])
-            if m_cp:
-                f["zip_code"]      = m_cp.group(1)
-                f["province_name"] = m_cp.group(2).strip().title()
-            else:
-                f["province_name"] = addr_lines[2].strip().title()
-    except StopIteration:
-        pass
-
-    return f
-
-
-def parse_alta_cliente_docx(file_bytes: bytes) -> dict:
-    """Parsea el formulario interno 'ALTA DE CLIENTE' (.docx).
-    Retorna dict compatible con extract_arca_fields() + campos extra:
-    email, phone, website, iibb, transport_name, transport_address,
-    delivery_address, forma_pago, plazos, tipo_resp_raw."""
-    import zipfile as _zf
-    out = {
-        "nombre": "", "cuit": "", "iibb": "",
-        "street": "", "city": "", "zip_code": "", "province_name": "",
-        "tipo_resp": "RI", "actividad_principal": "",
-        "email": "", "phone": "", "website": "",
-        "transport_name": "", "transport_address": "",
-        "delivery_address": "", "forma_pago": "", "plazos": "",
-        "_source": "formulario_interno",
-    }
-    try:
-        with _zf.ZipFile(BytesIO(file_bytes)) as _z:
-            _xml = _z.read("word/document.xml").decode("utf-8")
-        # Extraer runs de texto en orden
-        _texts = re.findall(r'<w:t[^>]*>([^<]*)</w:t>', _xml)
-        _lines = [t.strip() for t in _texts if t.strip()]
-        _full  = "\n".join(_lines)
-
-        # Palabras reservadas para labels: no tomar como valor
-        _LABELS = {
-            "razón social", "razon social", "cuit", "iibb", "domicilio",
-            "correo electrónico", "correo electronico",
-            "teléfono", "telefono", "int", "celular",
-            "datos logísticos:", "datos logisticos:",
-            "nombre de transporte", "dirección transporte", "direccion transporte",
-            "web", "horario", "solicitud de turno:",
-            "domicilio entrega final", "facturación:", "facturacion:",
-            "tipo iva", "forma de pago", "mipymes fce", "plazos acordados",
-            "si/no", "alta de cliente", "fecha:",
-        }
-
-        def _next_val(idx, lines, max_look=5):
-            """Retorna el primer texto no-label después de lines[idx]."""
-            for _j in range(idx + 1, min(idx + max_look, len(lines))):
-                _c = lines[_j].strip()
-                if _c and _c.lower() not in _LABELS:
-                    return _c
-            return ""
-
-        for _i, _l in enumerate(_lines):
-            _ll = _l.lower().strip()
-
-            # Razón Social
-            if re.match(r"^raz[oó]n\s+social$", _ll):
-                out["nombre"] = _next_val(_i, _lines)
-
-            # CUIT
-            elif _ll == "cuit" and not out["cuit"]:
-                _v = _next_val(_i, _lines)
-                _digits = re.sub(r"[^\d]", "", _v)
-                if len(_digits) == 11:
-                    out["cuit"] = _digits
-
-            # IIBB
-            elif _ll == "iibb":
-                _v = _next_val(_i, _lines)
-                if re.search(r"[\d]", _v):
-                    out["iibb"] = _v
-
-            # Domicilio fiscal (solo la primera ocurrencia simple, no "entrega" ni "transporte")
-            elif re.match(r"^domicilio\s*$", _ll) and not out["street"]:
-                _v = _next_val(_i, _lines)
-                if _v and not re.match(r'^(correo|tel[eé]|datos|nombre|direcci|factur|tipo|forma|plazo|si/no|web)', _v, re.I):
-                    out["street"] = _v
-
-            # Domicilio entrega Final
-            elif re.search(r"domicilio\s+entrega\s+final", _ll):
-                _v = _next_val(_i, _lines)
-                if _v and not re.match(r'^(factur|tipo|forma|plazo|\*)', _v, re.I):
-                    out["delivery_address"] = _v
-
-            # Nombre de transporte
-            elif re.match(r"^nombre\s+de\s+transporte$", _ll):
-                out["transport_name"] = _next_val(_i, _lines)
-
-            # Dirección Transporte
-            elif re.search(r"direcci[oó]n\s+transporte", _ll):
-                _v = _next_val(_i, _lines)
-                if _v and not re.match(r'^(tel[eé]|correo|web|horario)', _v, re.I):
-                    out["transport_address"] = _v
-
-            # TIPO IVA
-            elif re.match(r"^tipo\s+iva$", _ll):
-                _v = _next_val(_i, _lines)
-                if _v:
-                    _vu = _v.upper()
-                    if "MONOTRIBUTO" in _vu or "MONO" in _vu:
-                        out["tipo_resp"] = "MONO"
-                    elif "EXENTO" in _vu:
-                        out["tipo_resp"] = "EX"
-                    else:
-                        out["tipo_resp"] = "RI"
-                    out["tipo_resp_raw"] = _v
-
-            # Forma de Pago
-            elif re.match(r"^forma\s+de\s+pago$", _ll):
-                _v = _next_val(_i, _lines)
-                if _v and not re.match(r'^(mi|plazo|si/no|\*)', _v, re.I):
-                    out["forma_pago"] = _v
-
-            # Plazos acordados
-            elif re.match(r"^plazos\s+acordados$", _ll):
-                _v = _next_val(_i, _lines)
-                if _v and not re.match(r'^\*', _v):
-                    out["plazos"] = _v
-
-        # Email — primer patrón válido en todo el texto
-        _em = re.search(r"[\w\.\-\+]+@[\w\.\-]+\.[a-zA-Z]{2,}", _full)
-        if _em:
-            out["email"] = _em.group(0).strip()
-
-        # Teléfono — primer patrón telefónico argentino
-        _ph = re.search(
-            r"(?:0\d{2,4}[\-\s]?\d{6,8}|\+54[\s\d\-]{8,14}|\d{4}[\-\s]\d{4,8})", _full)
-        if _ph:
-            out["phone"] = _ph.group(0).strip()
-
-        # Sitio web
-        _wb = re.search(r"(?:https?://|www\.)\S+", _full)
-        if _wb:
-            out["website"] = _wb.group(0).strip()
-
-    except Exception:
-        pass
-    return out
-
-
-def fetch_arca_by_cuit(cuit_str: str) -> dict:
-    """Consulta datos de un contribuyente en ARCA/AFIP por CUIT.
-    Intenta argentinadatos.com primero, luego TangoFactura como fallback.
-    Retorna dict compatible con extract_arca_fields(), o {"_error": msg} si falla."""
-    try:
-        import requests as _req
-        _cuit_clean = re.sub(r"[\s\-]", "", cuit_str.strip())
-        if not _cuit_clean.isdigit() or len(_cuit_clean) != 11:
-            return {"_error": f"CUIT inválido: debe tener 11 dígitos (recibido: '{cuit_str.strip()}')"}
-
-        # ── Intento 1: argentinadatos.com ──────────────────────────────────
-        _url1 = f"https://api.argentinadatos.com/v1/afip/personas/{_cuit_clean}"
-        _resp = None
-        try:
-            _resp = _req.get(_url1, timeout=10)
-        except Exception as _e1:
-            pass
-
-        if _resp is None or _resp.status_code != 200:
-            # ── Intento 2: TangoFactura (fallback) ─────────────────────────
-            _url2 = f"https://afip.tangofactura.com/Rest/GetContribuyenteFull?cuit={_cuit_clean}"
-            try:
-                _resp2 = _req.get(_url2, timeout=10)
-                if _resp2.status_code == 200:
-                    _d2 = _resp2.json()
-                    _contrib = _d2.get("contribuyente") or _d2
-                    _nombre2 = (_contrib.get("razonSocial") or
-                                f"{_contrib.get('apellido','')} {_contrib.get('nombre','')}").strip()
-                    if _nombre2:
-                        _dom2 = (_contrib.get("domicilioFiscal") or
-                                 _contrib.get("domicilio") or {})
-                        return {
-                            "nombre": _nombre2, "cuit": _cuit_clean,
-                            "forma_juridica": _contrib.get("tipoPersona",""),
-                            "street":   (_dom2.get("direccion") or "").strip().title(),
-                            "city":     (_dom2.get("localidad") or "").strip().title(),
-                            "zip_code": str(_dom2.get("codPostal") or "").strip(),
-                            "province_name": (_dom2.get("descripcionProvincia") or
-                                              _dom2.get("provincia") or "").strip().title(),
-                            "tipo_resp": "RI", "actividad_principal": "",
-                            "_source": "tangofactura",
-                        }
-            except Exception:
-                pass
-
-            # ── Intento 3: cuitonline.com (scraping HTML) ──────────────────
-            try:
-                _url3 = f"https://www.cuitonline.com/search.php?q={_cuit_clean}"
-                _r3 = _req.get(_url3, timeout=10,
-                               headers={"User-Agent": "Mozilla/5.0"})
-                if _r3.status_code == 200:
-                    # Buscar el nombre en el HTML: típicamente en <td class="nombre">...</td>
-                    # o en <strong> dentro de tabla de resultados
-                    _nombre3 = ""
-                    _m3 = re.search(
-                        r'(?:class=["\'](?:razonSocial|nombre)["\'][^>]*>|'
-                        r'<td[^>]*>\s*' + re.escape(_cuit_clean) + r'\s*</td>\s*<td[^>]*>)'
-                        r'\s*([^<]{3,80})',
-                        _r3.text, re.I)
-                    if not _m3:
-                        # Fallback: buscar el CUIT formateado y tomar el siguiente td
-                        _cuit_fmt = f"{_cuit_clean[:2]}-{_cuit_clean[2:10]}-{_cuit_clean[10]}"
-                        _m3 = re.search(
-                            r'(?:' + re.escape(_cuit_fmt) + r'|' + re.escape(_cuit_clean) + r')'
-                            r'[^<]*</td>\s*<td[^>]*>\s*([^<]{3,100})',
-                            _r3.text, re.I)
-                    if _m3:
-                        _nombre3 = re.sub(r'\s+', ' ', _m3.group(1)).strip()
-                    if _nombre3:
-                        return {
-                            "nombre": _nombre3, "cuit": _cuit_clean,
-                            "forma_juridica": "", "street": "", "city": "",
-                            "zip_code": "", "province_name": "",
-                            "tipo_resp": "RI", "actividad_principal": "",
-                            "_source": "cuitonline",
-                            "_aviso": "Solo se obtuvo el nombre (completá el resto manualmente).",
-                        }
-            except Exception:
-                pass
-
-            # Los tres intentos fallaron
-            _status = _resp.status_code if _resp is not None else "sin respuesta"
-            _cuit_fmt = f"{_cuit_clean[:2]}-{_cuit_clean[2:10]}-{_cuit_clean[10]}"
-            return {
-                "_error": (
-                    f"CUIT {_cuit_fmt} no encontrado en las fuentes disponibles "
-                    f"(argentinadatos HTTP {_status}, TangoFactura y CuitOnline fallaron). "
-                    f"La constancia de ARCA requiere CAPTCHA y no puede consultarse automáticamente. "
-                    f"Completá los datos manualmente o consultá en ARCA."
-                ),
-                "_afip_link": (
-                    "https://seti.afip.gob.ar/padron-puc-constancia-internet/"
-                    "ConsultaConstanciaAction.do"
-                ),
-                "_cuit_fmt": _cuit_fmt,
-            }
-        _data = _resp.json()
-
-        _out = {
-            "nombre": "", "cuit": _cuit_clean, "forma_juridica": "",
-            "street": "", "city": "", "zip_code": "", "province_name": "",
-            "tipo_resp": "RI", "actividad_principal": "",
-        }
-
-        # Razón social / nombre
-        _tipo = _data.get("tipoPersona", "")
-        if _tipo == "JURIDICA":
-            _out["nombre"] = (_data.get("razonSocial") or "").strip()
-            _out["forma_juridica"] = "Sociedad"
-        else:
-            _parts = [_data.get("apellido",""), _data.get("nombre","")]
-            _out["nombre"] = " ".join(p for p in _parts if p).strip()
-
-        # Domicilio fiscal
-        _dom = _data.get("domicilioFiscal") or {}
-        _out["street"]        = (_dom.get("direccion") or "").strip().title()
-        _out["city"]          = (_dom.get("localidad") or "").strip().title()
-        _out["zip_code"]      = str(_dom.get("codPostal") or "").strip()
-        _out["province_name"] = (_dom.get("descripcionProvincia") or "").strip().title()
-
-        # Tipo de responsabilidad
-        for _c in (_data.get("caracterizaciones") or []):
-            _desc = (_c.get("descripcionCaracterizacion") or "").upper()
-            if "MONOTRIBUT" in _desc:
-                _out["tipo_resp"] = "MONO"; break
-            if "EXENTO" in _desc or "NO ALCANZADO" in _desc:
-                _out["tipo_resp"] = "EX"; break
-            if "RESPONSABLE INSCRIPTO" in _desc or ("IVA" in _desc and "NO" not in _desc):
-                _out["tipo_resp"] = "RI"; break
-
-        # Actividad principal (menor orden = principal)
-        _acts = sorted(_data.get("actividades") or [], key=lambda a: a.get("orden", 99))
-        if _acts:
-            _out["actividad_principal"] = (_acts[0].get("descripcionActividad") or "")[:120]
-
-        return _out
-    except Exception:
-        return {}
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
 def get_ar_states(_models_url, uid, api_key):
     """Provincias argentinas: lista de (id, name)."""
     try:

@@ -1,9 +1,22 @@
 """Tab Pedidos de Clientes."""
 import streamlit as st
-import xmlrpc.client
 import config as _cfg
-from odoo_client import *
-from parsers import *
+from odoo_client import (
+    create_sale_order,
+    odoo_url,
+    safe_float,
+    fmt_ars,
+    parse_payment_terms,
+    search_partner_by_cuit,
+    search_partner_by_cuit_or_name,
+    get_all_payment_terms,
+    get_customer_payment_terms,
+    search_product_by_code_or_name,
+    get_ejecutivo_field,
+    get_referidos,
+    create_partner,
+)
+from parsers import extract_image_oc_fields, extract_oc_fields, extract_excel_oc_fields
 
 
 def render(models, uid, api_key, models_url, is_admin):

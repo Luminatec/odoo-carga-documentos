@@ -1,9 +1,20 @@
 """Tab Contactos."""
 import streamlit as st
-import xmlrpc.client
 import config as _cfg
-from odoo_client import *
-from parsers import *
+from odoo_client import (
+    odoo_url,
+    get_all_payment_terms,
+    get_referidos,
+    get_ar_states,
+    get_afip_resp_types,
+    get_cuit_id_type,
+    get_odoo_users,
+    get_pricelists,
+    get_ar_accounts,
+    create_full_partner,
+    match_ar_state,
+)
+from parsers import extract_arca_fields, parse_alta_cliente_docx
 
 
 def render(models, uid, api_key, models_url, is_admin):

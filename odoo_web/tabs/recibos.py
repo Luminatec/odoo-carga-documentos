@@ -1,9 +1,17 @@
 """Tab Recibos de Cobro."""
 import streamlit as st
-import xmlrpc.client
 import config as _cfg
-from odoo_client import *
-from parsers import *
+from odoo_client import (
+    get_all_accounts,
+    normalize_amount,
+    fmt_ars,
+    get_all_banks,
+    match_bank_id,
+    search_partners_by_cuits,
+    get_customer_unpaid_invoices,
+    get_customer_pending_credit_notes,
+    register_customer_payment,
+)
 
 
 def render(models, uid, api_key, models_url, is_admin):
