@@ -4536,6 +4536,31 @@ with tab_orders:
 
             # ── Crear pedido ───────────────────────────────────────────────
             st.markdown("---")
+
+            # Campo Referido / Ejecutivo de cuenta (igual que en ruta PDF)
+            _xl_ejecutivo_field, _xl_ejecutivo_relation = get_ejecutivo_field(models_url, uid, api_key)
+            _xl_referidos   = get_referidos(models_url, uid, api_key)
+            _xl_ref_map     = {n: i for i, n in _xl_referidos}
+            _xl_ref_opts    = ["— Sin referido —"] + list(_xl_ref_map.keys())
+            _xl_ref_default = 0
+            if _xl_pid and _xl_ref_map:
+                try:
+                    _xl_pdata = models.execute_kw(ODOO_DB, uid, api_key,
+                        "res.partner", "read", [[_xl_pid]],
+                        {"fields": ["x_studio_referido_1"]})[0]
+                    _xl_existing = _xl_pdata.get("x_studio_referido_1")
+                    if _xl_existing and isinstance(_xl_existing, (list, tuple)):
+                        _rxlname = _xl_existing[1]
+                        if _rxlname in _xl_ref_opts:
+                            _xl_ref_default = _xl_ref_opts.index(_rxlname)
+                except Exception:
+                    pass
+            _xl_ref_sel = st.selectbox(
+                "Referido", _xl_ref_opts, index=_xl_ref_default,
+                key=f"xl_ref_{uf.name}",
+                help="Quién refirió a este cliente",
+            )
+
             _xl_btn_disabled = not bool(_xl_pid)
             if _xl_btn_disabled:
                 st.caption("🔒 Identificá el cliente para habilitar la creación del pedido.")
@@ -4543,6 +4568,27 @@ with tab_orders:
                          type="primary", disabled=_xl_btn_disabled):
                 with st.spinner("Creando pedido..."):
                     try:
+                        # Escribir referido al partner
+                        if _xl_ref_sel != "— Sin referido —" and _xl_ref_sel in _xl_ref_map:
+                            try:
+                                models.execute_kw(ODOO_DB, uid, api_key,
+                                    "res.partner", "write",
+                                    [[_xl_pid],
+                                     {"x_studio_referido_1": _xl_ref_map[_xl_ref_sel]}])
+                            except Exception:
+                                pass
+                        _xl_ref_partner_id = _xl_ref_map.get(_xl_ref_sel) if _xl_ref_sel != "— Sin referido —" else None
+                        _xl_ref_id = _xl_ref_partner_id
+                        if _xl_ref_partner_id and _xl_ejecutivo_relation == "res.users":
+                            try:
+                                _xl_usr = models.execute_kw(ODOO_DB, uid, api_key,
+                                    "res.users", "search_read",
+                                    [[("partner_id", "=", _xl_ref_partner_id)]],
+                                    {"fields": ["id"], "limit": 1})
+                                if _xl_usr:
+                                    _xl_ref_id = _xl_usr[0]["id"]
+                            except Exception:
+                                pass
                         _xl_order_lines = [{
                             "product_id":  _el["odoo_product"]["id"] if _el.get("odoo_product") else None,
                             "descripcion": _el.get("descripcion",""),
@@ -4558,6 +4604,8 @@ with tab_orders:
                             file_bytes      = file_bytes,
                             mimetype        = mimetype,
                             payment_term_id = _xl_pt_id or None,
+                            ejecutivo_field = _xl_ejecutivo_field,
+                            ejecutivo_id    = _xl_ref_id,
                         )
                         url = odoo_url("sale.order", _xl_order_id)
                         st.toast("Pedido creado en Odoo", icon="✅")
