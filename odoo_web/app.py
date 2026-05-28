@@ -5067,6 +5067,14 @@ with tab_contacts:
     st.subheader("Alta de Contactos")
     st.caption("Pre-completá los datos buscando por CUIT en ARCA o subiendo la constancia PDF.")
 
+    # ── Mensaje persistente post-búsqueda ─────────────────────────────────
+    if "ct_arca_msg" in st.session_state:
+        _msg_type, _msg_text = st.session_state.pop("ct_arca_msg")
+        if _msg_type == "success":
+            st.success(_msg_text)
+        else:
+            st.warning(_msg_text)
+
     # ── Búsqueda por CUIT ─────────────────────────────────────────────────
     _ct_srch_c1, _ct_srch_c2 = st.columns([4, 1])
     _ct_cuit_query = _ct_srch_c1.text_input(
@@ -5081,11 +5089,15 @@ with tab_contacts:
             with st.spinner("Consultando ARCA..."):
                 _api_result = fetch_arca_by_cuit(_ct_cuit_query)
             if _api_result and _api_result.get("nombre"):
-                st.session_state["ct_arca_data"] = _api_result
+                st.session_state["ct_arca_data"]  = _api_result
                 st.session_state["ct_arca_source"] = "api"
-                st.success(f"✅ {_api_result['nombre']} · CUIT {_api_result['cuit']}")
+                # Incrementar versión para forzar recreación del form con nuevos valores
+                st.session_state["ct_form_ver"] = st.session_state.get("ct_form_ver", 0) + 1
+                st.session_state["ct_arca_msg"] = ("success",
+                    f"✅ {_api_result['nombre']} · CUIT {_api_result['cuit']}")
+                st.rerun()
             else:
-                st.warning("No se encontraron datos para ese CUIT en ARCA. Podés ingresar los datos manualmente.")
+                st.warning("No se encontraron datos para ese CUIT. Verificá el número o completá los datos a mano.")
         else:
             st.warning("Ingresá un CUIT para buscar.")
 
@@ -5097,21 +5109,28 @@ with tab_contacts:
     )
 
     # ── Determinar fuente de datos ─────────────────────────────────────────
-    # PDF tiene prioridad si se acaba de subir; de lo contrario se usa la API
     _arca = {}
     if _ct_file:
         _ct_bytes = _ct_file.read()
-        with st.spinner("Leyendo constancia ARCA..."):
-            try:
-                import pdfplumber
-                with pdfplumber.open(BytesIO(_ct_bytes)) as _pdf:
-                    _ct_text = "\n".join(p.extract_text() or "" for p in _pdf.pages)
-                _arca = extract_arca_fields(_ct_text)
-                st.session_state["ct_arca_data"] = _arca
-                st.session_state["ct_arca_source"] = "pdf"
-                st.success(f"✅ {_arca.get('nombre','?')} · CUIT {_arca.get('cuit','?')}")
-            except Exception as _ce:
-                st.warning(f"No se pudo leer el PDF: {_ce}")
+        _ct_pdf_key = f"ct_pdf_{hash(_ct_bytes)}"
+        if _ct_pdf_key not in st.session_state:
+            # PDF nuevo — parsear y actualizar versión de form
+            with st.spinner("Leyendo constancia ARCA..."):
+                try:
+                    import pdfplumber
+                    with pdfplumber.open(BytesIO(_ct_bytes)) as _pdf:
+                        _ct_text = "\n".join(p.extract_text() or "" for p in _pdf.pages)
+                    _arca_pdf = extract_arca_fields(_ct_text)
+                    st.session_state["ct_arca_data"]  = _arca_pdf
+                    st.session_state["ct_arca_source"] = "pdf"
+                    st.session_state["ct_form_ver"] = st.session_state.get("ct_form_ver", 0) + 1
+                    st.session_state[_ct_pdf_key] = True
+                    st.session_state["ct_arca_msg"] = ("success",
+                        f"✅ {_arca_pdf.get('nombre','?')} · CUIT {_arca_pdf.get('cuit','?')}")
+                    st.rerun()
+                except Exception as _ce:
+                    st.warning(f"No se pudo leer el PDF: {_ce}")
+        _arca = st.session_state.get("ct_arca_data", {})
     else:
         _arca = st.session_state.get("ct_arca_data", {})
 
@@ -5159,7 +5178,7 @@ with tab_contacts:
     _ct_acct_pay_map = {n: i for i, n in _ct_accts_pay}
 
 
-    with st.form("ct_form"):
+    with st.form(f"ct_form_{st.session_state.get('ct_form_ver', 0)}"):
         # ── Persona / Empresa ──────────────────────────────────────────────
         _ct_company_type = st.radio(
             "Tipo de entidad", ["🏢 Empresa", "👤 Persona"],
@@ -5340,8 +5359,9 @@ with tab_contacts:
                     _new_pid = create_full_partner(models, uid, api_key, _ct_vals)
                     _new_url = odoo_url("res.partner", _new_pid)
                     # Limpiar datos de ARCA para el próximo contacto
-                    st.session_state.pop("ct_arca_data", None)
-                    st.session_state.pop("ct_arca_source", None)
+                    for _k in list(st.session_state.keys()):
+                        if _k.startswith("ct_arca") or _k.startswith("ct_pdf_") or _k == "ct_form_ver":
+                            st.session_state.pop(_k, None)
                     st.toast("Contacto creado en Odoo", icon="✅")
                     st.markdown(f"🎉 **{_ct_name}** creado · [Abrir en Odoo]({_new_url})")
                     st.session_state.history.append({
@@ -6602,46 +6622,104 @@ with tab_recibos:
             return 0.0
 
     def _rc_parse_retencion(file_bytes):
-        """Parsea PDF de retención de IIBB y retorna dict con los datos clave."""
+        """Parsea PDF de retención. Soporta formato AFIP estándar y formato SAP multi-página.
+        Retorna LISTA de dicts [{cuit, nombre, importe, fecha, concepto, ...}].
+        Lista vacía si falla o no se reconoce el formato."""
         try:
             import pdfplumber
-            text = ""
-            with pdfplumber.open(BytesIO(file_bytes)) as pdf:
-                text = (pdf.pages[0].extract_text() or "") if pdf.pages else ""
-            if not text:
-                return None
-            result = {}
-            # Nombre emisor: primera línea significativa
-            lines = [l.strip() for l in text.splitlines() if l.strip()]
-            result["nombre"] = lines[0] if lines else ""
-            # CUIT emisor: primer CUIT en el texto (antes de "Razón social")
-            _m = re.search(r"C\.U\.I\.T\.:\s*([\d\-]+)", text)
-            if _m:
-                result["cuit"] = _m.group(1).replace("-", "").replace(" ", "").strip()
-            # Fecha
-            _m = re.search(r"Fecha:\s*(\d{2}/\d{2}/\d{4})", text)
-            if _m:
-                _p = _m.group(1).split("/")
-                result["fecha"] = _m.group(1)
-                result["fecha_iso"] = f"{_p[2]}-{_p[1]}-{_p[0]}"
-            # Nro certificado
-            _m = re.search(r"Nro\.\s*de\s*certificado:\s*(.+)", text)
-            if _m: result["nro_certificado"] = _m.group(1).strip()
-            # Nro pago
-            _m = re.search(r"Pago:\s*(.+)", text)
-            if _m: result["nro_pago"] = _m.group(1).strip()
-            # Concepto
-            _m = re.search(r"Concepto del pago:\s*(.+)", text)
-            if _m: result["concepto"] = _m.group(1).strip()
-            # Importe retenido
-            _m = re.search(r"Importe retenido:\s*([\d.,]+)", text)
-            if _m: result["importe"] = _rc_parse_monto(_m.group(1))
-            # Importe sujeto
-            _m = re.search(r"Importe pagado sujeto a retenci[oó]n:\s*([\d.,]+)", text)
-            if _m: result["importe_sujeto"] = _rc_parse_monto(_m.group(1))
-            return result if result.get("cuit") and result.get("importe") else None
-        except Exception as _e:
-            return None
+            results = []
+            with pdfplumber.open(BytesIO(file_bytes)) as _pdf:
+                for _page in _pdf.pages:
+                    _txt = _page.extract_text() or ""
+                    if not _txt.strip():
+                        continue
+                    _r = {}
+                    _clean_lines = [l.strip() for l in _txt.splitlines() if l.strip()]
+
+                    # ── CUIT emisor ──────────────────────────────────────────────
+                    # Tomar el primero que aparece (el del cliente que retiene, no Luminatec)
+                    _m = re.search(r"C\.U\.I\.T\.:\s*([\d\-\s]+)", _txt)
+                    if _m:
+                        _r["cuit"] = re.sub(r"[^\d]", "", _m.group(1))[:11]
+
+                    # ── Nombre emisor ────────────────────────────────────────────
+                    # Formato AFIP: primera línea significativa
+                    # Formato SAP: línea 3 posiciones antes de "Fecha:" en el bloque del emisor
+                    _fecha_idx = next(
+                        (i for i, l in enumerate(_clean_lines)
+                         if re.match(r"Fecha:\s*\d{2}[./]\d{2}[./]\d{4}", l)), None)
+                    if _fecha_idx is not None and _fecha_idx >= 3:
+                        _r["nombre"] = _clean_lines[_fecha_idx - 3]
+                    else:
+                        _r["nombre"] = _clean_lines[0] if _clean_lines else ""
+
+                    # ── Fecha (DD/MM/YYYY o DD.MM.YYYY) ─────────────────────────
+                    _m = re.search(r"Fecha:\s*(\d{2})[./](\d{2})[./](\d{4})", _txt)
+                    if _m:
+                        _r["fecha"]     = f"{_m.group(1)}/{_m.group(2)}/{_m.group(3)}"
+                        _r["fecha_iso"] = f"{_m.group(3)}-{_m.group(2)}-{_m.group(1)}"
+
+                    # ── Nro certificado ──────────────────────────────────────────
+                    # Formato AFIP
+                    _m = re.search(r"Nro\.\s*de\s*certificado:\s*(.+)", _txt)
+                    if _m:
+                        _r["nro_certificado"] = _m.group(1).strip()
+                    else:
+                        # Formato SAP: "Certificado de Retención:\nXXXX-XXXXXXXX"
+                        _m = re.search(
+                            r"Certificado de Retenci[oó]n:\s*\n?\s*([\d\-]+)", _txt)
+                        if _m:
+                            _r["nro_certificado"] = _m.group(1).strip()
+
+                    # ── Concepto / tipo de retención ─────────────────────────────
+                    # Formato AFIP
+                    _m = re.search(r"Concepto del pago:\s*(.+)", _txt)
+                    if _m:
+                        _r["concepto"] = _m.group(1).strip()
+                    else:
+                        # Formato SAP: "Certificado de Retención:\nNRO\nTIPO\n[Provincia: NN PROV]"
+                        _m = re.search(
+                            r"Certificado de Retenci[oó]n:\s*\n\s*[\d\-]+\s*\n\s*(.+)",
+                            _txt)
+                        if _m:
+                            _tipo = _m.group(1).strip()
+                            # Provincia opcional
+                            _mp = re.search(r"Provincia:\s*\d+\s*(.+)", _txt)
+                            _prov = _mp.group(1).strip() if _mp else ""
+                            _r["provincia"] = _prov
+                            # Construir concepto combinado para matching de journal
+                            _r["concepto"] = f"{_tipo} {_prov}".strip() if _prov else _tipo
+
+                    # Fallback concepto desde "Este certificado de retención de TYPE es para"
+                    if not _r.get("concepto"):
+                        _m = re.search(
+                            r"Este certificado de retenci[oó]n de (.+?) es para", _txt)
+                        if _m:
+                            _r["concepto"] = _m.group(1).strip()
+
+                    # ── Importe retenido ─────────────────────────────────────────
+                    # Formato AFIP: "Importe retenido: X.XXX,XX"
+                    _m = re.search(r"Importe retenido:\s*([\d.,]+)", _txt)
+                    if _m:
+                        _r["importe"] = _rc_parse_monto(_m.group(1))
+                    else:
+                        # Formato SAP: línea TOTAL → último número antes de "ARS"
+                        # Ej: " 12.381.348,45 123.813,48 ARS"
+                        _ars_nums = re.findall(r"([\d\.]+,\d{2})\s+ARS", _txt)
+                        if _ars_nums:
+                            _r["importe"] = _rc_parse_monto(_ars_nums[-1])
+
+                    # ── Importe sujeto (opcional) ────────────────────────────────
+                    _m = re.search(
+                        r"Importe pagado sujeto a retenci[oó]n:\s*([\d.,]+)", _txt)
+                    if _m:
+                        _r["importe_sujeto"] = _rc_parse_monto(_m.group(1))
+
+                    if _r.get("cuit") and _r.get("importe"):
+                        results.append(_r)
+            return results
+        except Exception:
+            return []
 
     def _rc_parse_cheques(file_bytes, filename):
         fname = filename.lower()
@@ -6741,15 +6819,20 @@ with tab_recibos:
     if _rc_ret_files:
         for _rf in _rc_ret_files:
             _rb = _rf.read()
-            _ret = _rc_parse_retencion(_rb)
-            if _ret and _ret.get("cuit"):
-                _rcuit_ret = _ret["cuit"]
-                _ret["_filename"] = _rf.name
-                # Evitar duplicados por nombre de archivo
-                existing = st.session_state["rc_retenciones"].get(_rcuit_ret, [])
-                if not any(r.get("_filename") == _rf.name for r in existing):
-                    existing.append(_ret)
-                    st.session_state["rc_retenciones"][_rcuit_ret] = existing
+            _rets = _rc_parse_retencion(_rb)
+            if _rets:
+                for _ret in _rets:
+                    _rcuit_ret = _ret["cuit"]
+                    _ret["_filename"] = _rf.name
+                    _existing = st.session_state["rc_retenciones"].get(_rcuit_ret, [])
+                    # Evitar duplicados: mismo archivo + mismo concepto
+                    _dup_key = f"{_rf.name}|{_ret.get('concepto','')}"
+                    if not any(
+                        f"{r.get('_filename','')}|{r.get('concepto','')}" == _dup_key
+                        for r in _existing
+                    ):
+                        _existing.append(_ret)
+                        st.session_state["rc_retenciones"][_rcuit_ret] = _existing
             else:
                 st.warning(f"No se pudo parsear la retención en {_rf.name}.")
 
