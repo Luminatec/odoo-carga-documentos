@@ -5317,52 +5317,15 @@ with tab_orders:
 # ═══════════════════════════════════════════════════
 with tab_contacts:
     st.subheader("Alta de Contactos")
-    st.caption("Pre-completá los datos buscando por CUIT en ARCA, subiendo la constancia PDF o el formulario interno (.docx).")
+    st.caption("Pre-completá los datos subiendo la constancia ARCA (PDF) o el formulario interno (.docx).")
 
-    # ── Mensaje persistente post-búsqueda ─────────────────────────────────
+    # ── Mensaje persistente post-acción ───────────────────────────────────
     if "ct_arca_msg" in st.session_state:
         _msg_type, _msg_text = st.session_state.pop("ct_arca_msg")
         if _msg_type == "success":
             st.success(_msg_text)
         else:
             st.warning(_msg_text)
-
-    # ── Búsqueda por CUIT ─────────────────────────────────────────────────
-    _ct_srch_c1, _ct_srch_c2 = st.columns([4, 1])
-    _ct_cuit_query = _ct_srch_c1.text_input(
-        "Buscar por CUIT en ARCA",
-        placeholder="Ej: 30-71234567-8",
-        key="ct_cuit_query",
-        label_visibility="collapsed",
-    )
-    _ct_srch_c2.markdown("<div style='padding-top:2px'></div>", unsafe_allow_html=True)
-    if _ct_srch_c2.button("🔍 Buscar en ARCA", use_container_width=True):
-        if _ct_cuit_query.strip():
-            with st.spinner("Consultando ARCA..."):
-                _api_result = fetch_arca_by_cuit(_ct_cuit_query)
-            if _api_result and _api_result.get("nombre"):
-                st.session_state["ct_arca_data"]  = _api_result
-                st.session_state["ct_arca_source"] = "api"
-                st.session_state["ct_form_ver"] = st.session_state.get("ct_form_ver", 0) + 1
-                _src_label = " (TangoFactura)" if _api_result.get("_source") == "tangofactura" else ""
-                st.session_state["ct_arca_msg"] = ("success",
-                    f"✅ {_api_result['nombre']} · CUIT {_api_result['cuit']}{_src_label}")
-                st.rerun()
-            elif _api_result and _api_result.get("_error"):
-                st.warning(_api_result["_error"])
-                if _api_result.get("_afip_link"):
-                    _fmt = _api_result.get("_cuit_fmt", _ct_cuit_query.strip())
-                    st.markdown(
-                        f"🔍 [Consultar **{_fmt}** en ARCA (abre en nueva pestaña)]"
-                        f"({_api_result['_afip_link']})"
-                    )
-                    st.caption(
-                        "En ARCA buscá el CUIT con CAPTCHA, copiá los datos y completá el formulario abajo."
-                    )
-            else:
-                st.warning("No se encontraron datos para ese CUIT. Verificá el número o completá los datos a mano.")
-        else:
-            st.warning("Ingresá un CUIT para buscar.")
 
     # ── Documento (constancia ARCA PDF o formulario interno DOCX) ────────
     _ct_file = st.file_uploader(
