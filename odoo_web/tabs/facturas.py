@@ -1,0 +1,429 @@
+"""Tab Facturas de Proveedores."""
+import streamlit as st
+import xmlrpc.client
+import config as _cfg
+from odoo_client import *
+from parsers import *
+
+
+def render(models, uid, api_key, models_url, is_admin):
+    st.subheader("Facturas de proveedores")
+    files = st.file_uploader("Arrastrá o elegí archivos (PDF, JPG, PNG, XLSX)",
+        type=["pdf","jpg","jpeg","png","xlsx","xls"], accept_multiple_files=True, key="bills_upload")
+    if not files:
+        st.caption("Subí uno o más archivos para empezar.")
+    _total_upfiles = len(files) if files else 0
+    if _total_upfiles > 1:
+        st.caption(f"📂 {_total_upfiles} archivo(s) cargados — procesando uno por uno.")
+    for _uf_idx, uf in enumerate(files or []):
+        st.divider()
+        ext        = uf.name.rsplit(".", 1)[-1].lower()
+        file_bytes = uf.read()
+        mimetype   = _cfg.MIMETYPES.get(ext, "application/octet-stream")
+        _file_lbl = f"({_uf_idx + 1}/{_total_upfiles}) " if _total_upfiles > 1 else ""
+        st.markdown(f"**📎 {_file_lbl}{uf.name}**  `{ext.upper()}`  ({len(file_bytes)//1024} KB)")
+        if ext in ("xlsx", "xls"):
+            # ── Detección temprana: ¿es un Excel de pedido de cliente? ───────
+            _oc_check = extract_excel_oc_fields(file_bytes)
+            if _oc_check.get("lineas"):
+                st.warning(
+                    f"⚠️ **Este Excel parece un pedido de cliente** — se detectaron "
+                    f"{len(_oc_check['lineas'])} producto(s) con columna de cantidad/pedido.\n\n"
+                    "Este archivo **no debe cargarse como factura de proveedor**. "
+                    "Por favor subilo en la pestaña **📦 Pedidos** para crear el pedido en Ventas."
+                )
+                continue
+            try:
+                df = pd.read_excel(BytesIO(file_bytes), dtype=str).fillna("")
+                df.columns = [c.strip() for c in df.columns]
+            except Exception as e:
+                st.error(f"No se pudo leer el Excel: {e}"); continue
+            st.caption(f"📊 {len(df)} filas · Columnas: {', '.join(df.columns)}")
+            st.dataframe(df.head(10), use_container_width=True, height=180)
+            cols_opts = ["(ninguna)"] + list(df.columns)
+            c1, c2, c3, c4 = st.columns(4)
+            col_prov  = c1.selectbox("Proveedor",    cols_opts, key=f"bp_{uf.name}")
+            col_fecha = c2.selectbox("Fecha",         cols_opts, key=f"bf_{uf.name}")
+            col_ref   = c3.selectbox("N° Factura",   cols_opts, key=f"br_{uf.name}")
+            col_total = c4.selectbox("Total (info)",  cols_opts, key=f"bt_{uf.name}")
+            if st.button(f"⬆️ Cargar {len(df)} facturas en Odoo", key=f"load_bills_xls_{uf.name}"):
+                bar = st.progress(0)
+                ok, errs = 0, []
+                for i, row in df.iterrows():
+                    try:
+                        prov_name  = row.get(col_prov, "")  if col_prov  != "(ninguna)" else ""
+                        fecha      = row.get(col_fecha, "") if col_fecha != "(ninguna)" else ""
+                        ref        = row.get(col_ref, "")   if col_ref   != "(ninguna)" else ""
+                        partner_id = False
+                        if prov_name:
+                            m2 = search_partners(models_url, uid, api_key, prov_name, limit=1)
+                            partner_id = m2[0][0] if m2 else False
+                        move_id = create_vendor_bill(models, uid, api_key,
+                            partner_id=partner_id, ref=str(ref),
+                            invoice_date=str(fecha) if fecha else False,
+                            filename=f"{uf.name}_fila{i+1}.pdf",
+                            file_bytes=file_bytes, mimetype=mimetype)
+                        ok += 1
+                        url = odoo_url("account.move", move_id)
+                        st.session_state.history.append({"tipo":"Factura proveedor",
+                            "archivo":f"{uf.name}·fila{i+1}","id":move_id,"url":url,"estado":"✅","hora":_dt_now.now().strftime("%H:%M")})
+                    except Exception as e:
+                        errs.append(f"Fila {i+1}: {str(e)[:100]}")
+                    bar.progress((i+1)/len(df))
+                if ok: st.toast(f"{ok} de {len(df)} facturas creadas en Odoo.", icon="✅")
+                for err in errs: st.warning(err)
+        else:
+            extracted, raw_text = {}, ""
+            if ext == "pdf":
+                with st.spinner(f"Analizando PDF con IA... {_file_lbl}"):
+                    extracted, raw_text = extract_pdf_fields(file_bytes)
+                _src_tag = "✨ IA" if extracted.get("_source") == "ai" else "🔣 Regex"
+                if extracted.get("proveedor") or extracted.get("numero"):
+                    st.caption(f"🤖 Datos detectados [{_src_tag}] — revisá antes de confirmar.")
+                else:
+                    st.caption("ℹ️ PDF sin texto extraíble. Completá los datos a mano.")
+            elif ext in ("jpg","jpeg","png"):
+                st.image(file_bytes, caption="Vista previa", width=420)
+                with st.spinner(f"Leyendo imagen con OCR... {_file_lbl}"):
+                    extracted, raw_text = extract_image_fields(file_bytes)
+                st.caption("🤖 Datos detectados por OCR — revisá antes de confirmar." if extracted.get("proveedor")
+                           else "ℹ️ OCR no detectó datos. Completá los campos a mano.")
+
+            # Cargar cuentas contables (cacheado)
+            _bill_accounts = get_all_accounts(models_url, uid, api_key)
+            _acct_labels   = ["— Sin cuenta —"] + [lbl for _, lbl in _bill_accounts]
+
+            # ── CUIT editable en tiempo real (fuera del form) ────────────────────
+            _cuit_raw    = extracted.get("cuit", "")
+            _cond_venta  = extracted.get("condiciones_venta", "")
+            _dias_pago   = extracted.get("dias_pago")
+            _vto_auto    = extracted.get("fecha_vencimiento", "")
+
+            _cuit_edit_key = f"bill_cuit_edit_{uf.name}"
+            if _cuit_edit_key not in st.session_state:
+                st.session_state[_cuit_edit_key] = _cuit_raw
+
+            _cuit_effective = st.text_input(
+                "CUIT del proveedor",
+                key=_cuit_edit_key,
+                placeholder="30-12345678-9",
+                help="Detectado automáticamente del PDF. Corregilo si es necesario.",
+            )
+            _cuit_raw  = _cuit_effective.strip() if _cuit_effective else ""
+            _cuit_norm = _cuit_raw.replace("-","").replace(" ","").strip()
+            _ss_vendor_key = f"vendor_created_{_cuit_norm}"
+
+            # Buscar primero en session state (recién creado), luego en Odoo
+            _partner_preloaded = st.session_state.get(_ss_vendor_key)
+            if not _partner_preloaded and _cuit_raw:
+                _partner_preloaded = search_partner_by_cuit(models_url, uid, api_key, _cuit_raw)
+
+            # Pre-selección de cuenta contable según proveedor
+            _default_acct_idx = 0
+            if _partner_preloaded:
+                _def_acct = get_partner_default_account(models_url, uid, api_key, _partner_preloaded[0])
+                if _def_acct:
+                    _def_acct_label = _def_acct[1]
+                    for _i, _lbl in enumerate(_acct_labels):
+                        if _lbl == _def_acct_label:
+                            _default_acct_idx = _i
+                            break
+
+            # Cargar productos de gasto y calcular default del proveedor
+            _expense_products = get_expense_products(models_url, uid, api_key)
+            _prod_labels = ["— Sin producto —"] + [lbl for _, lbl in _expense_products]
+            _default_prod_idx = 0
+            if _partner_preloaded:
+                _def_prod = get_partner_default_product(models_url, uid, api_key, _partner_preloaded[0])
+                if _def_prod:
+                    _def_prod_label = _def_prod[1]
+                    for _pi, _plbl in enumerate(_prod_labels):
+                        if _plbl == _def_prod_label:
+                            _default_prod_idx = _pi
+                            break
+
+            # Cargar cuentas analíticas (Centros de Costo)
+            _analytic_accounts = get_analytic_accounts(models_url, uid, api_key)
+            _analytic_labels   = ["— Sin centro de costo —"] + [lbl for _, lbl in _analytic_accounts]
+
+            # ── Estado del proveedor + opción de crear nuevo ──────────────────────
+            _create_new_vend_key = f"bill_create_new_vend_{uf.name}"
+            # Inicializar siempre en False para evitar que quede marcado de sesiones anteriores
+            if _create_new_vend_key not in st.session_state:
+                st.session_state[_create_new_vend_key] = False
+
+            if _partner_preloaded:
+                st.info(f"🏢 Proveedor detectado por CUIT: **{_partner_preloaded[1]}**")
+            elif _cuit_raw:
+                # CUIT ingresado pero no encontrado → ofrecer crear
+                st.warning(f"⚠️ CUIT **{_cuit_raw}** no encontrado en Odoo.")
+                st.checkbox("➕ Crear nuevo proveedor en Odoo", key=_create_new_vend_key)
+            else:
+                # Sin CUIT → permitir buscar por nombre o CUIT, o crear nuevo proveedor
+                _search_query = st.text_input(
+                    "🔍 Buscar proveedor por nombre o CUIT",
+                    placeholder="Ej: Acme SA  ó  30-12345678-9",
+                    key=f"vend_search_{uf.name}",
+                    help="Buscá en Odoo por nombre o CUIT del proveedor",
+                )
+                if _search_query and _search_query.strip():
+                    _srch_results = search_partners(
+                        models_url, uid, api_key, _search_query.strip(), limit=6)
+                    if _srch_results:
+                        _srch_opts = {f"{r[1]} ({r[2]})": r[0] for r in _srch_results}
+                        _chosen_lbl = st.selectbox(
+                            "Proveedor encontrado",
+                            options=list(_srch_opts.keys()),
+                            key=f"vend_sel_{uf.name}",
+                        )
+                        if _chosen_lbl:
+                            st.session_state[f"partner_override_{uf.name}"] = _srch_opts[_chosen_lbl]
+                            st.session_state[f"partner_name_{uf.name}"]     = _chosen_lbl
+                    else:
+                        st.info("No se encontraron proveedores. Podés crear uno nuevo.")
+                st.checkbox("➕ Crear nuevo proveedor en Odoo", key=_create_new_vend_key)
+
+            if st.session_state.get(_create_new_vend_key):
+                with st.expander("📝 Datos del nuevo proveedor", expanded=True):
+                    with st.form(key=f"new_vendor_form_{uf.name}"):
+                        st.markdown("Completá los datos mínimos para dar de alta el proveedor:")
+                        _nv_c1, _nv_c2 = st.columns(2)
+                        _nv_name  = _nv_c1.text_input("Razón social *",
+                            value=extracted.get("proveedor","")[:80],
+                            placeholder="Nombre en Odoo")
+                        _nv_cuit  = _nv_c2.text_input("CUIT *",
+                            value=_cuit_raw,
+                            placeholder="30-12345678-9")
+                        _nv_street = _nv_c1.text_input("Dirección", placeholder="Av. Corrientes 1234")
+                        _nv_phone  = _nv_c2.text_input("Teléfono", placeholder="+54 11 4xxx-xxxx")
+                        _nv_email  = st.text_input("E-mail", placeholder="proveedor@empresa.com")
+                        _nv_go = st.form_submit_button("Crear proveedor en Odoo", use_container_width=True)
+                    if _nv_go:
+                        if not _nv_name.strip() or not _nv_cuit.strip():
+                            st.error("Razón social y CUIT son obligatorios.")
+                        else:
+                            try:
+                                _nv_pid = create_vendor_partner(
+                                    models, uid, api_key,
+                                    name=_nv_name.strip(),
+                                    vat=_nv_cuit.strip().replace("-",""),
+                                    street=_nv_street.strip(),
+                                    phone=_nv_phone.strip(),
+                                    email_addr=_nv_email.strip())
+                                _cuit_for_key = _nv_cuit.strip().replace("-","")
+                                st.session_state[f"vendor_created_{_cuit_for_key}"] = (_nv_pid, _nv_name.strip())
+                                st.session_state[_create_new_vend_key] = False
+                                st.success(f"✅ Proveedor **{_nv_name}** creado (ID {_nv_pid}). Recargando...")
+                                st.rerun()
+                            except Exception as _nv_e:
+                                st.error(f"Error al crear proveedor: {_nv_e}")
+
+            if _cond_venta:
+                if _dias_pago:
+                    st.caption(f"📅 Condición de venta: **{_cond_venta}** → vencimiento calculado: `{_vto_auto}`")
+                else:
+                    st.caption(f"📅 Condición de venta: **{_cond_venta}** (sin días detectados — completá el vencimiento a mano)")
+
+            # ── Chequeo de duplicado en tiempo real ───────────────────────────────
+            _num_raw = extracted.get("numero","")
+            _dup_exists, _dup_id, _dup_name = False, None, None
+            if _num_raw:
+                _dup_exists, _dup_id, _dup_name = check_invoice_exists(models_url, uid, api_key, _num_raw)
+            if _dup_exists:
+                _dup_url = odoo_url("account.move", _dup_id)
+                st.error(
+                    f"🚫 Esta factura **ya fue cargada** en Odoo ({_dup_name}). "
+                    f"[Ver factura existente]({_dup_url})"
+                )
+
+            with st.form(key=f"bill_form_{uf.name}"):
+                # CUIT ya está fuera del form para lookup en tiempo real
+                cuit_i = _cuit_raw
+                c1, c2 = st.columns(2)
+                ref_i   = c2.text_input("N° de factura",
+                            value=extracted.get("numero",""))
+                fecha_i = c1.text_input("Fecha emisión (AAAA-MM-DD)",
+                            value=extracted.get("fecha_iso",""),
+                            placeholder="2026-05-12")
+                fecha_vto_i = c2.text_input("Fecha vencimiento (AAAA-MM-DD)",
+                            value=_vto_auto,
+                            placeholder="2026-05-20",
+                            help="Se calcula automáticamente si se detectan días en las condiciones de venta")
+
+                concepto_i = st.text_input(
+                    "📋 Concepto / Descripción",
+                    value=extracted.get("concepto", ""),
+                    placeholder="Descripción del servicio o producto",
+                    help="Se usa como descripción de la línea en Odoo",
+                )
+
+                # Proveedor por nombre como fallback si no hay CUIT
+                prov_i = st.text_input("Nombre del proveedor (fallback si no hay CUIT)",
+                            value=(_partner_preloaded[1] if _partner_preloaded else extracted.get("proveedor","")[:60]),
+                            placeholder="Nombre exacto en Odoo",
+                            help="Se usa solo si el CUIT no resuelve a ningún proveedor")
+
+                # Monto a cargar (editable; por defecto: neto gravado / total si exenta)
+                _ca, _cb = st.columns([2, 1])
+                _total_ref = extracted.get("total") or ""
+                _neto_ref  = extracted.get("neto")  or ""
+                _iva_ref   = extracted.get("iva")   or ""
+                # Default: neto (base imponible); Odoo aplica impuestos encima.
+                # Si no hay neto usa total (caso exenta: neto == total).
+                _default_amount = safe_float(_neto_ref) or safe_float(_total_ref)
+                amount_i = _ca.number_input(
+                    "💰 Importe neto (base) *",
+                    min_value=0.0,
+                    value=_default_amount,
+                    step=0.01,
+                    format="%.2f",
+                    key=f"amount_i_{uf.name}",
+                    help="Base imponible (sin IVA). Odoo calcula los impuestos encima. "
+                         "Para facturas exentas, ingresá el total.",
+                )
+                _ca.caption(
+                    f"Extraído → Neto: {fmt_ars(_neto_ref)}  |  "
+                    f"IVA: {fmt_ars(_iva_ref)}  |  "
+                    f"Total: {fmt_ars(_total_ref)}"
+                )
+                # Exenta: sin IVA extraído → pre-marcar
+                _exenta_default = not bool(safe_float(_iva_ref))
+                exenta_i = st.checkbox(
+                    "🔒 Factura exenta / Monotributo (sin impuestos)",
+                    value=_exenta_default,
+                    key=f"exenta_{uf.name}",
+                    help="Si está marcado, se crea la línea sin ningún impuesto en Odoo.",
+                )
+
+                st.text_area("Notas internas", height=55, key=f"notas_{uf.name}")
+
+                # Producto, Cuenta contable y Centro de Costo
+                st.markdown("##### 📦 Producto / Servicio y Contabilidad")
+                prod_sel = st.selectbox(
+                    "Producto / Servicio",
+                    options=_prod_labels,
+                    index=_default_prod_idx,
+                    key=f"prod_g_{uf.name}",
+                    help="Producto de Odoo que se asigna a la línea de factura. "
+                         "Se pre-selecciona según el proveedor.",
+                )
+                # Cuenta contable: auto-detectada en background (no se muestra en UI)
+                # cuenta_sel sigue disponible para el asiento estimado y fallback
+                cuenta_sel = _acct_labels[_default_acct_idx] if _acct_labels and _default_acct_idx < len(_acct_labels) else None
+                analytic_sel = st.selectbox(
+                    "Centro de Costo",
+                    options=_analytic_labels,
+                    index=0,
+                    key=f"cc_g_{uf.name}",
+                    help="Centro de costo (cuenta analítica) que absorbe el gasto. Opcional.",
+                )
+
+                _btn_label = "⬆️ Cargar en Odoo"
+                if _dup_exists:
+                    _btn_label = "⚠️ Ya existe — Cargar igual"
+                go = st.form_submit_button(_btn_label, use_container_width=True)
+
+            # Asiento estimado — visible siempre que haya montos
+            _neto_f = extracted.get("neto","")
+            _iva_f  = extracted.get("iva","")
+            _tot_f  = extracted.get("total","")
+            if _neto_f or _tot_f:
+                _cuenta_disp = (cuenta_sel if (cuenta_sel and cuenta_sel != "— Sin cuenta —")
+                                else "*(cuenta de gasto — seleccioná arriba)*")
+                st.markdown("**📒 Asiento estimado en Odoo:**")
+                st.markdown(
+                    f"| Cuenta | Debe | Haber |\n"
+                    f"|---|---|---|\n"
+                    f"| {_cuenta_disp} | {fmt_ars(_neto_f)} | |\n"
+                    f"| IVA Crédito Fiscal (si aplica) | {fmt_ars(_iva_f)} | |\n"
+                    f"| Proveedor (por pagar) | | {fmt_ars(_tot_f)} |"
+                )
+
+            if go:
+                with st.spinner("Procesando..."):
+                    try:
+                        partner_id = False
+                        # 0. Proveedor seleccionado vía búsqueda por nombre/CUIT (sin-CUIT branch)
+                        _ov_id = st.session_state.get(f"partner_override_{uf.name}")
+                        if _ov_id:
+                            partner_id = _ov_id
+                            st.caption(f"Proveedor seleccionado: {st.session_state.get(f'partner_name_{uf.name}','')}")
+                        # 1. Buscar por CUIT ingresado en el form
+                        if cuit_i and cuit_i.strip():
+                            _found = search_partner_by_cuit(models_url, uid, api_key, cuit_i.strip())
+                            if _found:
+                                partner_id = _found[0]
+                                st.caption(f"Proveedor por CUIT: {_found[1]}")
+                        # 2. Fallback: buscar por nombre
+                        if not partner_id and prov_i and prov_i.strip():
+                            m2 = search_partners(models_url, uid, api_key, prov_i.strip(), limit=3)
+                            if m2:
+                                partner_id = m2[0][0]
+                                st.caption(f"Proveedor por nombre: {m2[0][1]}")
+                            else:
+                                st.warning(f"'{prov_i}' no encontrado — se creará sin proveedor asignado.")
+
+                        # 3. Chequeo de duplicado en el submit (segunda línea de defensa)
+                        if ref_i and ref_i.strip():
+                            _dup2, _dup2_id, _dup2_name = check_invoice_exists(
+                                models_url, uid, api_key, ref_i.strip())
+                            if _dup2:
+                                _dup2_url = odoo_url("account.move", _dup2_id)
+                                st.error(
+                                    f"🚫 La factura **{ref_i}** ya existe en Odoo ({_dup2_name}). "
+                                    f"[Ver factura existente]({_dup2_url})"
+                                )
+                                continue
+
+                        # 4. Resolver cuenta seleccionada
+                        account_id_sel = None
+                        if cuenta_sel and cuenta_sel != "— Sin cuenta —":
+                            for _aid, _albl in _bill_accounts:
+                                if _albl == cuenta_sel:
+                                    account_id_sel = _aid
+                                    break
+
+                        # 5. Resolver Centro de Costo
+                        analytic_id_sel = None
+                        if analytic_sel and analytic_sel != "— Sin centro de costo —":
+                            for _anid, _anlbl in _analytic_accounts:
+                                if _anlbl == analytic_sel:
+                                    analytic_id_sel = _anid
+                                    break
+
+                        # 6. Resolver Producto seleccionado
+                        product_id_sel = None
+                        if prod_sel and prod_sel != "— Sin producto —":
+                            for _epid, _eplbl in _expense_products:
+                                if _eplbl == prod_sel:
+                                    product_id_sel = _epid
+                                    break
+
+                        # 7. l10n_latam_document_number (número sin prefijo de letra)
+                        _latam_num = (ref_i or "").strip()
+                        # Si el número extraído tiene prefijo de letra, quitarlo
+                        if _latam_num and re.match(r"^[A-Za-z]\d", _latam_num):
+                            _latam_num = _latam_num[1:]
+
+                        move_id = create_vendor_bill(models, uid, api_key,
+                            partner_id=partner_id, ref=concepto_i.strip() or ref_i,
+                            invoice_date=fecha_i or False,
+                            invoice_date_due=fecha_vto_i or None,
+                            filename=uf.name, file_bytes=file_bytes, mimetype=mimetype,
+                            account_id=account_id_sel,
+                            amount_neto=amount_i if amount_i else None,
+                            analytic_account_id=analytic_id_sel,
+                            product_id=product_id_sel,
+                            l10n_latam_document_number=_latam_num or None,
+                            clear_taxes=exenta_i,
+                            line_name=concepto_i.strip() or None)
+                        url = odoo_url("account.move", move_id)
+                        st.toast("Factura creada en Odoo", icon="✅")
+                        st.markdown(f"📎 [Abrir en Odoo]({url})")
+                        st.session_state.history.append({"tipo":"Factura proveedor",
+                            "archivo":uf.name,"id":move_id,"url":url,"estado":"✅","hora":_dt_now.now().strftime("%H:%M")})
+                    except Exception as e:
+                        st.error(f"❌ {e}")
+
+
+    pass  # end render
