@@ -28,7 +28,7 @@ from odoo_client import (
     _AR_TZ,
     clean_str,
 )
-from parsers import extract_pdf_fields, extract_image_fields, extract_excel_oc_fields
+from parsers import extract_pdf_fields, parse_ar_date, extract_image_fields, extract_excel_oc_fields
 
 
 def render(models, uid, api_key, models_url, is_admin):
@@ -476,10 +476,13 @@ def render(models, uid, api_key, models_url, is_admin):
                         if _latam_num and re.match(r"^[A-Za-z]\d", _latam_num):
                             _latam_num = _latam_num[1:]
 
+                        # Normalizar fechas: acepta DD/MM/YYYY, DD/M/YYYY o YYYY-MM-DD
+                        _fecha_i_iso   = parse_ar_date(fecha_i)   if fecha_i   else ""
+                        _fecha_vto_iso = parse_ar_date(fecha_vto_i) if fecha_vto_i else ""
                         move_id = create_vendor_bill(models, uid, api_key,
                             partner_id=partner_id, ref=concepto_i.strip() or ref_i,
-                            invoice_date=fecha_i or False,
-                            invoice_date_due=fecha_vto_i or None,
+                            invoice_date=_fecha_i_iso or False,
+                            invoice_date_due=_fecha_vto_iso or None,
                             filename=uf.name, file_bytes=file_bytes, mimetype=mimetype,
                             account_id=account_id_sel,
                             amount_neto=amount_i if amount_i else None,
