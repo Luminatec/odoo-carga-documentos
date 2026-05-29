@@ -10,6 +10,22 @@ from datetime import datetime as _dt_now
 import pandas as pd
 import config as _cfg
 
+
+def parse_ar_date(raw):
+    """Convierte fechas a ISO YYYY-MM-DD.
+    Soporta: DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY, YYYY-MM-DD, YYYY/MM/DD."""
+    if not raw:
+        return ""
+    raw = raw.strip()
+    m = re.match(r"(\d{1,2})[/\-\.](\d{1,2})[/\-\.](\d{4})", raw)
+    if m:
+        d, mo, y = m.group(1).zfill(2), m.group(2).zfill(2), m.group(3)
+        return f"{y}-{mo}-{d}"
+    m2 = re.match(r"(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})", raw)
+    if m2:
+        return raw[:10]
+    return ""
+
 def _ai_extract_invoice_fields(text):
     """
     Extrae campos de factura usando Claude Haiku via API de Anthropic.
