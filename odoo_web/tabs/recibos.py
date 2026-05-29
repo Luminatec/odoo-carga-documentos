@@ -957,6 +957,294 @@ def render(models, uid, api_key, models_url, is_admin):
         f"Para emitir facturas de venta o gestionar cobros manualmente, "
         f"usá [Odoo Ventas]({_cfg.ODOO_URL}/odoo/accounting/customers/invoices) directamente.")
 
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # SECCIÓN: Cobro manual / transferencia (sin archivo de home banking)
+    # ═══════════════════════════════════════════════════════════════════════
+    with st.expander("💸 Cobro manual / transferencia", expanded=False):
+        st.caption(
+            "Registrá cobros por transferencia bancaria, efectivo u otro medio "
+            "sin necesidad de cargar un archivo del home banking.")
+
+        # ── Búsqueda de cliente ───────────────────────────────────────────
+        _man_sq, _man_sbtn = st.columns([4, 1])
+        _man_q = _man_sq.text_input(
+            "Buscar cliente por nombre",
+            key="rc_man_q",
+            placeholder="Ej: Acosta, Distribuidora Norte…",
+            label_visibility="collapsed")
+        _man_buscar = _man_sbtn.button(
+            "🔍 Buscar", key="rc_man_buscar", use_container_width=True)
+
+        if _man_buscar:
+            if len(_man_q.strip()) < 3:
+                st.warning("Ingresá al menos 3 caracteres.")
+                st.session_state.pop("rc_man_partners", None)
+            else:
+                with st.spinner("Buscando…"):
+                    try:
+                        _man_found = models.execute_kw(
+                            _cfg.ODOO_DB, uid, api_key, "res.partner", "search_read",
+                            [[("name", "ilike", _man_q.strip()),
+                              ("customer_rank", ">", 0),
+                              ("active", "=", True)]],
+                            {"fields": ["id", "name", "vat"], "limit": 10})
+                        st.session_state["rc_man_partners"] = _man_found
+                    except Exception as _me:
+                        st.error(f"Error al buscar: {_me}")
+                        st.session_state["rc_man_partners"] = []
+
+        _man_partners = st.session_state.get("rc_man_partners")
+
+        if _man_partners is None:
+            st.caption("Ingresá un nombre y presioná Buscar.")
+        elif not _man_partners:
+            st.warning("No se encontraron clientes con ese nombre.")
+        else:
+            _man_opts = {
+                f"{r['name']}  ({r.get('vat') or 'sin CUIT'})": (r["id"], r["name"])
+                for r in _man_partners
+            }
+            _man_sel_lbl = st.selectbox(
+                "Cliente", list(_man_opts.keys()),
+                key="rc_man_client_sel")
+            _man_pid, _man_pname = _man_opts[_man_sel_lbl]
+            st.markdown(f"**Cliente Odoo:** {_man_pname} (ID {_man_pid})")
+
+            if st.button("🔄 Actualizar facturas", key="rc_man_refresh"):
+                get_customer_unpaid_invoices.clear()
+                get_customer_pending_credit_notes.clear()
+                st.rerun()
+
+            with st.spinner("Cargando facturas…"):
+                _man_invs = get_customer_unpaid_invoices(
+                    models_url, uid, api_key, (_man_pid,))
+                _man_ncs  = get_customer_pending_credit_notes(
+                    models_url, uid, api_key, (_man_pid,))
+
+            # ── Selector de facturas ──────────────────────────────────────
+            _mansel_ids   = []
+            _mansel_saldo = 0.0
+            if not _man_invs:
+                st.info(
+                    "No hay facturas pendientes. El cobro se registrará "
+                    "como pago a cuenta.")
+            else:
+                st.markdown("**Seleccioná las facturas a cobrar:**")
+                _man_inv_rows = []
+                for _mi in _man_invs:
+                    _mic  = (_mi.get("currency_id") or [0, "ARS"])[1]
+                    _mres = float(_mi.get("amount_residual") or 0)
+                    _mto  = float(_mi.get("amount_total") or 0)
+                    _mv   = str(_mi.get("invoice_date_due") or "")
+                    _mvd  = (f"⚠️ {_mv}" if _mv and _mv < str(_rc_date_cls.today()) else _mv)
+                    _man_inv_rows.append({
+                        "Sel":        False,
+                        "Factura":    _mi.get("name") or f"ID {_mi['id']}",
+                        "Fecha":      str(_mi.get("invoice_date") or ""),
+                        "Vence":      _mvd,
+                        "Moneda":     _mic,
+                        "Total":      fmt_ars(_mto)  if _mic == "ARS" else f"{_mic} {_mto:,.2f}",
+                        "Saldo":      fmt_ars(_mres) if _mic == "ARS" else f"{_mic} {_mres:,.2f}",
+                        "_saldo_num": _mres,
+                        "_id":        _mi["id"],
+                    })
+                _man_inv_df = pd.DataFrame(_man_inv_rows)
+                _man_inv_cfg = {
+                    "Sel":        st.column_config.CheckboxColumn("✓", width="small"),
+                    "Total":      st.column_config.TextColumn("Total"),
+                    "Saldo":      st.column_config.TextColumn("Saldo"),
+                    "_saldo_num": None,
+                    "_id":        None,
+                }
+                _man_inv_disp = ["Sel", "Factura", "Fecha", "Vence", "Moneda", "Total", "Saldo"]
+                _man_inv_ed = st.data_editor(
+                    _man_inv_df[_man_inv_disp + ["_saldo_num", "_id"]],
+                    column_config=_man_inv_cfg,
+                    column_order=_man_inv_disp,
+                    use_container_width=True, hide_index=True,
+                    key="rc_man_inv_editor",
+                    disabled=[c for c in _man_inv_disp if c != "Sel"],
+                )
+                _mansel       = _man_inv_ed[_man_inv_ed["Sel"] == True]
+                _mansel_ids   = [int(r) for r in _mansel["_id"].tolist()]
+                _mansel_saldo = float(_mansel["_saldo_num"].sum())
+
+            # ── Selector de notas de crédito ──────────────────────────────
+            _manncsel_ids   = []
+            _manncsel_total = 0.0
+            if _man_ncs:
+                st.markdown("**Notas de crédito pendientes:**")
+                _man_nc_rows = []
+                for _mnc in _man_ncs:
+                    _mncic  = (_mnc.get("currency_id") or [0, "ARS"])[1]
+                    _mncres = float(_mnc.get("amount_residual") or 0)
+                    _mncto  = float(_mnc.get("amount_total") or 0)
+                    _man_nc_rows.append({
+                        "Sel":        False,
+                        "NC":         _mnc.get("name") or f"ID {_mnc['id']}",
+                        "Fecha":      str(_mnc.get("invoice_date") or ""),
+                        "Moneda":     _mncic,
+                        "Saldo NC":   fmt_ars(_mncres) if _mncic == "ARS" else f"{_mncic} {_mncres:,.2f}",
+                        "_saldo_num": _mncres,
+                        "_id":        _mnc["id"],
+                    })
+                _man_nc_df = pd.DataFrame(_man_nc_rows)
+                _man_nc_cfg = {
+                    "Sel":        st.column_config.CheckboxColumn("✓", width="small"),
+                    "Saldo NC":   st.column_config.TextColumn("Saldo NC"),
+                    "_saldo_num": None,
+                    "_id":        None,
+                }
+                _man_nc_disp = ["Sel", "NC", "Fecha", "Moneda", "Saldo NC"]
+                _man_nc_ed = st.data_editor(
+                    _man_nc_df[_man_nc_disp + ["_saldo_num", "_id"]],
+                    column_config=_man_nc_cfg,
+                    column_order=_man_nc_disp,
+                    use_container_width=True, hide_index=True,
+                    key="rc_man_nc_editor",
+                    disabled=[c for c in _man_nc_disp if c != "Sel"],
+                )
+                _manncsel       = _man_nc_ed[_man_nc_ed["Sel"] == True]
+                _manncsel_ids   = [int(r) for r in _manncsel["_id"].tolist()]
+                _manncsel_total = float(_manncsel["_saldo_num"].sum())
+                if _manncsel_total > 0:
+                    st.caption(f"NC seleccionadas: ARS {fmt_ars(_manncsel_total)}")
+
+            # ── Formulario de pago ────────────────────────────────────────
+            st.markdown("#### Datos del cobro")
+            _man_fc1, _man_fc2 = st.columns([1, 1])
+            _man_date = _man_fc1.date_input(
+                "Fecha de cobro",
+                value=_rc_date_cls.today(),
+                key="rc_man_date")
+            _man_amount = _man_fc2.number_input(
+                "Importe (ARS)",
+                min_value=0.0,
+                value=float(_mansel_saldo) if _mansel_saldo > 0 else 0.0,
+                step=0.01, format="%.2f",
+                key="rc_man_amount",
+                help="Pre-completado con el saldo de las facturas seleccionadas.")
+
+            # Diario: todos los diarios disponibles, pre-seleccionado según preferencia
+            _man_jour_list    = [(jid, jname) for jid, jname, *_ in _all_rc_journals]
+            _man_jour_names   = [jname for _, jname in _man_jour_list]
+            _man_jour_default = next(
+                (i for i, (_, jn) in enumerate(_man_jour_list) if jn == _pref_jour),
+                0) if _pref_jour else 0
+            _man_jour_sel = st.selectbox(
+                "Diario / Banco",
+                _man_jour_names,
+                index=_man_jour_default,
+                key="rc_man_jour")
+            _man_jour_id = next(
+                (jid for jid, jn in _man_jour_list if jn == _man_jour_sel),
+                _RC_JOURNAL_ID)
+
+            _man_memo = st.text_input(
+                "Referencia / Memo",
+                value=f"Cobro — {_man_pname}",
+                key="rc_man_memo")
+
+            _man_info = f"**Importe:** ARS {fmt_ars(_man_amount)}"
+            if _mansel_ids:
+                _man_info += (
+                    f"  ·  {len(_mansel_ids)} factura(s) "
+                    f"(saldo ARS {fmt_ars(_mansel_saldo)})")
+            else:
+                _man_info += "  ·  Sin facturas → pago a cuenta"
+            st.info(_man_info)
+
+            # ── Diferencia de redondeo ────────────────────────────────────
+            _man_writeoff_id  = None
+            _man_writeoff_lbl = "Diferencia de redondeo"
+            if _mansel_ids and _mansel_saldo > 0:
+                _man_diff     = _mansel_saldo - _man_amount
+                _man_diff_abs = abs(_man_diff)
+                if 0 < _man_diff_abs <= 1.0:
+                    st.warning(
+                        f"⚖️ Diferencia de **ARS {fmt_ars(_man_diff_abs)}** entre "
+                        f"el importe y el saldo de las facturas.")
+                    _man_wo_chk = st.checkbox(
+                        f"Registrar ARS {fmt_ars(_man_diff_abs)} como diferencia de redondeo",
+                        key="rc_man_wo_chk")
+                    if _man_wo_chk:
+                        _man_accts_raw = get_all_accounts(models_url, uid, api_key)
+                        _man_accts = sorted(
+                            _man_accts_raw,
+                            key=lambda x: (1 if "(copia)" in x[1].lower() else 0, x[1]))
+                        _man_wo_filt = [(aid, albl) for aid, albl in _man_accts
+                                        if "redon" in albl.lower()]
+                        _man_wo_pool = _man_wo_filt if _man_wo_filt else _man_accts
+                        _man_wo_opts = ["— Seleccionar cuenta —"] + [lbl for _, lbl in _man_wo_pool]
+                        _mwa_col, _mwl_col = st.columns([3, 2])
+                        _man_wo_acct = _mwa_col.selectbox(
+                            "Cuenta para la diferencia", _man_wo_opts,
+                            index=(1 if _man_wo_filt else 0),
+                            key="rc_man_wo_acct")
+                        _man_wo_lbl_inp = _mwl_col.text_input(
+                            "Etiqueta", value="Diferencia de redondeo",
+                            key="rc_man_wo_lbl")
+                        if _man_wo_acct != "— Seleccionar cuenta —":
+                            _man_writeoff_id = next(
+                                (aid for aid, albl in _man_wo_pool
+                                 if albl == _man_wo_acct), None)
+                            _man_writeoff_lbl = _man_wo_lbl_inp or "Diferencia de redondeo"
+
+            # ── Botón registro ────────────────────────────────────────────
+            if st.button("💵 Registrar cobro en Odoo",
+                         type="primary", key="rc_man_reg_btn"):
+                if _man_amount <= 0:
+                    st.error("El importe debe ser mayor a cero.")
+                else:
+                    _man_all_moves = (_mansel_ids + _manncsel_ids) or None
+                    _man_cur_id    = None
+                    try:
+                        _man_ars = models.execute_kw(
+                            _cfg.ODOO_DB, uid, api_key, "res.currency", "search_read",
+                            [[("name", "=", "ARS"), ("active", "in", [True, False])]],
+                            {"fields": ["id"], "limit": 1})
+                        if _man_ars:
+                            _man_cur_id = _man_ars[0]["id"]
+                    except Exception:
+                        pass
+                    _man_cur_id = _man_cur_id or 1
+                    with st.status("Registrando cobro…", expanded=True) as _man_st:
+                        st.write(f"💳 Cobro · ARS {fmt_ars(_man_amount)}")
+                        if _man_all_moves:
+                            st.write(f"🔗 Imputando {len(_man_all_moves)} comprobante(s)")
+                        if _man_writeoff_id:
+                            st.write(f"⚖️ Saldando diferencia ARS "
+                                     f"{fmt_ars(abs(_mansel_saldo - _man_amount))}")
+                        _man_ok, _man_res_val = register_customer_payment(
+                            models, uid, api_key,
+                            _man_pid, _man_amount, _man_cur_id,
+                            _man_date.strftime("%Y-%m-%d"), _man_jour_id,
+                            move_ids=_man_all_moves,
+                            memo=_man_memo,
+                            cheques=None,
+                            withholdings=None,
+                            writeoff_account_id=_man_writeoff_id,
+                            writeoff_label=_man_writeoff_lbl)
+                        if _man_ok:
+                            _man_st.update(
+                                label="✅ Cobro registrado",
+                                state="complete", expanded=False)
+                        else:
+                            _man_st.update(
+                                label="❌ Error al registrar",
+                                state="error", expanded=True)
+                    if _man_ok:
+                        st.toast(
+                            f"Cobro registrado para {_man_pname} "
+                            f"— ARS {fmt_ars(_man_amount)}", icon="✅")
+                        get_customer_unpaid_invoices.clear()
+                        get_customer_pending_credit_notes.clear()
+                        st.session_state.pop("rc_man_partners", None)
+                        st.rerun()
+                    else:
+                        st.error(f"Error al registrar en Odoo: {_man_res_val}")
+
     # ═══════════════════════════════════════════════════════════════════════
     # SECCIÓN: Consulta de recibos ya registrados en Odoo
     # ═══════════════════════════════════════════════════════════════════════
