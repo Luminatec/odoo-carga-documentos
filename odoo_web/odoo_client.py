@@ -808,6 +808,21 @@ def _calc_cost_breakdown(po_lines, bills, tc_usd):
     }
     return rows, summary
 
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_purchase_journals(models_url, uid, api_key):
+    """Retorna lista de (id, name) de diarios de tipo 'purchase'."""
+    try:
+        common_url = models_url.replace("/object", "/common").replace("xmlrpc/2/object", "xmlrpc/2/common")
+        models = _xmlrpc.ServerProxy(models_url, allow_none=True)
+        rows = models.execute_kw(
+            _cfg.ODOO_DB, uid, api_key, "account.journal", "search_read",
+            [[("type", "=", "purchase")]],
+            {"fields": ["id", "name"], "order": "name asc", "limit": 50})
+        return [(r["id"], r["name"]) for r in rows]
+    except Exception:
+        return []
+
 def get_journal_purchase_account(models_url, uid, api_key, journal_id):
     """
     Devuelve un account_id de compras/gastos para líneas de factura de proveedor.
