@@ -6,6 +6,8 @@ from datetime import datetime as _dt_now
 import config as _cfg
 from user_prefs import load_prefs as _load_prefs
 from odoo_client import (
+    search_partner_by_cuit_or_name,
+    create_partner,
     odoo_url,
     get_all_payment_terms,
     get_referidos,
@@ -389,3 +391,171 @@ def render(models, uid, api_key, models_url, is_admin):
                     show_odoo_error(_cte, "crear contacto")
                 except Exception as _cte:
                     show_odoo_error(_cte, "crear contacto")
+
+    st.divider()
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # SECCIÓN: Búsqueda de contactos existentes en Odoo
+    # ═══════════════════════════════════════════════════════════════════════
+    with st.expander("🔍 Buscar contacto existente en Odoo", expanded=False):
+        st.caption("Buscá un contacto por nombre, CUIT o email.")
+        _ct_sq, _ct_sbtn = st.columns([4, 1])
+        _ct_search_q = _ct_sq.text_input(
+            "Nombre, CUIT o email",
+            key="ct_search_q",
+            placeholder="Ej: Juan, 30-12345678-9, juan@empresa.com",
+            label_visibility="collapsed")
+        _ct_search_btn = _ct_sbtn.button("🔍 Buscar", key="ct_search_btn", use_container_width=True)
+
+        if _ct_search_btn and _ct_search_q.strip():
+            with st.spinner("Buscando..."):
+                _ct_results = search_partner_by_cuit_or_name(
+                    models_url, uid, api_key, _ct_search_q.strip(), limit=15)
+            if not _ct_results:
+                st.info("No se encontraron contactos.")
+            else:
+                import pandas as _ct_pd
+                _ct_rows = []
+                for _r in _ct_results:
+                    _ct_rows.append({
+                        "Nombre":  _r.get("name",""),
+                        "CUIT":    _r.get("vat","") or "—",
+                        "Email":   _r.get("email","") or "—",
+                        "Tel.":    _r.get("phone","") or _r.get("mobile","") or "—",
+                        "Ciudad":  _r.get("city","") or "—",
+                        "Link":    f"[Abrir]({_cfg.ODOO_URL}/odoo/contacts/{_r['id']})",
+                    })
+                st.dataframe(_ct_pd.DataFrame(_ct_rows), use_container_width=True, hide_index=True)
+                st.caption(f"{len(_ct_results)} contacto(s) encontrado(s).")
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # SECCIÓN: Carga masiva de contactos desde Excel
+    # ═══════════════════════════════════════════════════════════════════════
+    with st.expander("📥 Carga masiva desde Excel", expanded=False):
+        st.caption(
+            "Subí un Excel con columnas: **Nombre** (obligatorio), **CUIT**, Email, "
+            "Teléfono, Dirección, Ciudad, CP. "
+            "La app omite los que ya existan en Odoo por CUIT.")
+        _bulk_file = st.file_uploader(
+            "Excel de contactos", type=["xlsx","xls"],
+            key="ct_bulk_upload")
+
+        if _bulk_file:
+            import pandas as _bpd
+            try:
+                _bdf = _bpd.read_excel(_bulk_file, dtype=str).fillna("")
+            except Exception as _bxe:
+                st.error(f"No se pudo leer el Excel: {_bxe}")
+                _bdf = None
+
+            if _bdf is not None and not _bdf.empty:
+                # Normalizar nombres de columnas
+                _bcol_map = {}
+                for _col in _bdf.columns:
+                    _cl = _col.lower().strip()
+                    if any(k in _cl for k in ["nombre","razon","razón","name"]):
+                        _bcol_map["nombre"] = _col
+                    elif any(k in _cl for k in ["cuit","ruc","nit","vat"]):
+                        _bcol_map["cuit"] = _col
+                    elif "email" in _cl or "mail" in _cl:
+                        _bcol_map["email"] = _col
+                    elif any(k in _cl for k in ["tel","phone","celular","movil","móvil"]):
+                        _bcol_map["telefono"] = _col
+                    elif any(k in _cl for k in ["direcc","street","domicilio"]):
+                        _bcol_map["direccion"] = _col
+                    elif any(k in _cl for k in ["ciudad","city","localidad"]):
+                        _bcol_map["ciudad"] = _col
+                    elif any(k in _cl for k in ["cp","zip","postal","codigo postal"]):
+                        _bcol_map["cp"] = _col
+
+                if "nombre" not in _bcol_map:
+                    st.error("No se encontró columna de Nombre/Razón Social en el Excel.")
+                else:
+                    # Construir lista de contactos a importar
+                    _bulk_rows = []
+                    for _, _br in _bdf.iterrows():
+                        _bnombre = str(_br.get(_bcol_map.get("nombre",""), "")).strip()
+                        if not _bnombre:
+                            continue
+                        _bulk_rows.append({
+                            "nombre":    _bnombre,
+                            "cuit":      str(_br.get(_bcol_map.get("cuit",""), "")).strip().replace("-","").replace(" ",""),
+                            "email":     str(_br.get(_bcol_map.get("email",""), "")).strip(),
+                            "telefono":  str(_br.get(_bcol_map.get("telefono",""), "")).strip(),
+                            "direccion": str(_br.get(_bcol_map.get("direccion",""), "")).strip(),
+                            "ciudad":    str(_br.get(_bcol_map.get("ciudad",""), "")).strip(),
+                            "cp":        str(_br.get(_bcol_map.get("cp",""), "")).strip(),
+                        })
+
+                    st.info(f"**{len(_bulk_rows)} contacto(s)** detectados en el archivo.")
+
+                    # Preview + estado de duplicados
+                    if _bulk_rows:
+                        _prev_rows = []
+                        for _br in _bulk_rows:
+                            _exists = ""
+                            if _br["cuit"] and len(_br["cuit"]) >= 10:
+                                try:
+                                    _ex = models.execute_kw(
+                                        _cfg.ODOO_DB, uid, api_key,
+                                        "res.partner", "search_read",
+                                        [[("vat","=",_br["cuit"]),("active","=",True)]],
+                                        {"fields":["id","name"],"limit":1})
+                                    _exists = f"✅ Ya existe: {_ex[0]['name']}" if _ex else "🆕 Nuevo"
+                                except Exception:
+                                    _exists = "?"
+                            else:
+                                _exists = "⚠️ Sin CUIT"
+                            _prev_rows.append({
+                                "Nombre":    _br["nombre"],
+                                "CUIT":      _br["cuit"] or "—",
+                                "Email":     _br["email"] or "—",
+                                "Teléfono":  _br["telefono"] or "—",
+                                "Ciudad":    _br["ciudad"] or "—",
+                                "Estado":    _exists,
+                            })
+
+                        _bpd2 = __import__("pandas")
+                        st.dataframe(_bpd2.DataFrame(_prev_rows), use_container_width=True, hide_index=True)
+
+                        _new_count = sum(1 for r in _prev_rows if "Nuevo" in r["Estado"])
+                        _skip_count = len(_prev_rows) - _new_count
+
+                        if _new_count == 0:
+                            st.warning("Todos los contactos ya existen en Odoo por CUIT.")
+                        else:
+                            if _skip_count > 0:
+                                st.caption(f"Se omitirán {_skip_count} contacto(s) ya existente(s). Se crearán {_new_count}.")
+                            if st.button(
+                                f"➕ Crear {_new_count} contacto(s) en Odoo",
+                                type="primary", key="ct_bulk_create"):
+                                _created = 0
+                                _errors  = []
+                                for _br, _pr in zip(_bulk_rows, _prev_rows):
+                                    if "Nuevo" not in _pr["Estado"]:
+                                        continue
+                                    try:
+                                        _new_id = create_partner(
+                                            models, uid, api_key,
+                                            _br["nombre"],
+                                            _br["cuit"] or "",
+                                            _br["direccion"],
+                                            _br["telefono"],
+                                            _br["email"],
+                                        )
+                                        st.session_state.history.append({
+                                            "tipo":   "Contacto",
+                                            "archivo": _br["nombre"],
+                                            "id":      _new_id,
+                                            "url":     odoo_url("res.partner", _new_id),
+                                            "estado":  "✅",
+                                            "hora":    _dt_now.now(_AR_TZ).strftime("%H:%M"),
+                                        })
+                                        _created += 1
+                                    except Exception as _be:
+                                        _errors.append(f"{_br['nombre']}: {_be}")
+                                if _created:
+                                    st.toast(f"{_created} contacto(s) creados en Odoo", icon="✅")
+                                if _errors:
+                                    st.warning("Errores:\n" + "\n".join(_errors))
+

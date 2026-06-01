@@ -30,7 +30,7 @@ from odoo_client import (
     _AR_TZ,
     clean_str,
 )
-from user_prefs import load_prefs as _load_prefs_fac
+from user_prefs import load_prefs as _load_prefs_fac, load_vendor_account_pref, save_vendor_account_pref
 from parsers import extract_pdf_fields, parse_ar_date, extract_image_fields, extract_excel_oc_fields
 
 
@@ -183,16 +183,25 @@ def render(models, uid, api_key, models_url, is_admin):
             if not _partner_preloaded and _cuit_raw:
                 _partner_preloaded = search_partner_by_cuit(models_url, uid, api_key, _cuit_raw)
 
-            # Pre-selección de cuenta contable según proveedor
+            # Pre-selección de cuenta contable:
+            # Prioridad 1: cache local (última usada para este proveedor)
+            # Prioridad 2: cuenta por defecto configurada en Odoo
             _default_acct_idx = 0
+            _acct_pref_source  = ""    # "cache", "odoo" o ""
             if _partner_preloaded:
-                _def_acct = get_partner_default_account(models_url, uid, api_key, _partner_preloaded[0])
-                if _def_acct:
-                    _def_acct_label = _def_acct[1]
-                    for _i, _lbl in enumerate(_acct_labels):
-                        if _lbl == _def_acct_label:
-                            _default_acct_idx = _i
-                            break
+                _vcache = load_vendor_account_pref(_partner_preloaded[0])
+                if _vcache.get("account_label") and _vcache["account_label"] in _acct_labels:
+                    _default_acct_idx = _acct_labels.index(_vcache["account_label"])
+                    _acct_pref_source  = "cache"
+                else:
+                    _def_acct = get_partner_default_account(models_url, uid, api_key, _partner_preloaded[0])
+                    if _def_acct:
+                        _def_acct_label = _def_acct[1]
+                        for _i, _lbl in enumerate(_acct_labels):
+                            if _lbl == _def_acct_label:
+                                _default_acct_idx = _i
+                                _acct_pref_source  = "odoo"
+                                break
 
             # Cargar productos de gasto y calcular default del proveedor
             _expense_products = get_expense_products(models_url, uid, api_key)
@@ -422,6 +431,10 @@ def render(models, uid, api_key, models_url, is_admin):
             _iva_f  = extracted.get("iva","")
             _tot_f  = extracted.get("total","")
             if _neto_f or _tot_f:
+                # Hint sobre origen de la pre-selección
+                if _default_acct_idx > 0 and _acct_pref_source:
+                    _src_label = "💾 Pre-seleccionada por historial" if _acct_pref_source == "cache" else "🔗 Pre-seleccionada desde Odoo"
+                    st.caption(_src_label)
                 _cuenta_disp = (cuenta_sel if (cuenta_sel and cuenta_sel != "— Sin cuenta —")
                                 else "*(cuenta de gasto — seleccioná arriba)*")
                 st.markdown("**📒 Asiento estimado en Odoo:**")
@@ -528,6 +541,11 @@ def render(models, uid, api_key, models_url, is_admin):
                             line_name=concepto_i.strip() or None)
                             url = odoo_url("account.move", move_id)
                             st.toast("Factura creada en Odoo", icon="✅")
+                            # Recordar la cuenta usada para este proveedor
+                            if partner_id and account_id_sel:
+                                _used_lbl = next((l for a, l in _bill_accounts if a == account_id_sel), "")
+                                if _used_lbl:
+                                    save_vendor_account_pref(partner_id, account_id_sel, _used_lbl)
                             st.markdown(f"📎 [Abrir en Odoo]({url})")
                             register_processed_file(file_bytes, uf.name, "Factura proveedor", f"ID {move_id}")
                             st.session_state.history.append({"tipo":"Factura proveedor",

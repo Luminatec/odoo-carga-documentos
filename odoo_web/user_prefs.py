@@ -52,3 +52,35 @@ def save_prefs(prefs: dict) -> None:
         _logger.info("Preferencias guardadas: %s", merged)
     except OSError as e:
         _logger.warning("No se pudo escribir user_prefs.json: %s", e)
+
+
+# ── Memoria de cuenta contable por proveedor ────────────────────────────────
+_VENDOR_ACCTS_FILE = "vendor_accounts.json"
+
+
+def load_vendor_account_pref(partner_id: int) -> dict:
+    """Retorna {"account_id": int, "account_label": str} o {} si no hay guardado."""
+    try:
+        with open(_VENDOR_ACCTS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get(str(partner_id), {})
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_vendor_account_pref(partner_id: int, account_id: int, account_label: str) -> None:
+    """Guarda la última cuenta contable usada para un proveedor."""
+    try:
+        try:
+            with open(_VENDOR_ACCTS_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            data = {}
+        data[str(partner_id)] = {
+            "account_id":    account_id,
+            "account_label": account_label,
+        }
+        with open(_VENDOR_ACCTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+    except OSError as e:
+        _logger.warning("No se pudo escribir vendor_accounts.json: %s", e)
