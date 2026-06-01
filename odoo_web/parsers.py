@@ -1694,6 +1694,134 @@ def extract_excel_oc_fields(file_bytes, filename=""):
 
     return fields
 
+
+def extract_afip_xml_fields(xml_bytes: bytes) -> dict:
+    """Extrae campos de una factura electrónica AFIP en formato XML.
+
+    Soporta los formatos más comunes:
+    - Respuesta WSFE de AFIP (FECAEDetResponse)
+    - XML de comprobante genérico (Comprobante/Cabecera)
+    - Datos del QR AFIP embebidos como URL en el texto del PDF
+
+    Retorna el mismo dict que extract_pdf_fields:
+    {cuit, proveedor, numero, fecha, fecha_iso, importe_total, importe_neto, iva_21, iva_105, tipo_doc}
+    """
+    import xml.etree.ElementTree as ET
+    fields = {
+        "cuit": "", "proveedor": "", "numero": "", "fecha": "", "fecha_iso": "",
+        "importe_total": 0.0, "importe_neto": 0.0, "iva_21": 0.0, "iva_105": 0.0,
+        "tipo_doc": "", "condiciones_venta": "", "dias_pago": None,
+        "lineas": [], "_from_xml": True,
+    }
+    try:
+        text = xml_bytes.decode("utf-8", errors="replace")
+        root = ET.fromstring(text)
+    except Exception:
+        return fields
+
+    def _find(tag):
+        """Busca un tag en cualquier nivel del árbol, sin namespace."""
+        for el in root.iter():
+            local = el.tag.split("}")[-1] if "}" in el.tag else el.tag
+            if local.lower() == tag.lower():
+                return (el.text or "").strip()
+        return ""
+
+    # ── CUIT y razón social del emisor ────────────────────────────────────
+    for tag in ("CuitEmisor", "DocNro", "cuit"):
+        v = _find(tag)
+        if v and len(v) >= 10:
+            fields["cuit"] = re.sub(r"[^\d]", "", v)[:11]
+            break
+    for tag in ("RazonSocialEmisor", "RazonSocial", "Emisor", "nombre"):
+        v = _find(tag)
+        if v:
+            fields["proveedor"] = v
+            break
+
+    # ── Número de comprobante ─────────────────────────────────────────────
+    pto  = re.sub(r"[^\d]", "", _find("PtoVta") or _find("PuntoVenta") or "")
+    nro  = re.sub(r"[^\d]", "", _find("CbteDesde") or _find("Numero") or _find("CbteNro") or "")
+    if pto and nro:
+        fields["numero"] = f"{pto.zfill(5)}-{nro.zfill(8)}"
+    elif nro:
+        fields["numero"] = nro
+
+    # ── Tipo de comprobante ───────────────────────────────────────────────
+    tipo = _find("CbteTipo") or _find("Tipo") or ""
+    tipo_map = {"1": "FA-A", "6": "FA-B", "11": "FA-C", "51": "FA-M",
+                "2": "ND-A", "7": "ND-B", "3": "NC-A", "8": "NC-B"}
+    if tipo in tipo_map:
+        fields["tipo_doc"] = tipo_map[tipo]
+
+    # ── Fecha ─────────────────────────────────────────────────────────────
+    fecha_raw = _find("CbteFch") or _find("FchEmision") or _find("Fecha") or ""
+    if fecha_raw:
+        fecha_raw = fecha_raw.strip()
+        if re.match(r"\d{8}$", fecha_raw):          # YYYYMMDD
+            fields["fecha_iso"] = f"{fecha_raw[:4]}-{fecha_raw[4:6]}-{fecha_raw[6:8]}"
+            fields["fecha"]     = f"{fecha_raw[6:8]}/{fecha_raw[4:6]}/{fecha_raw[:4]}"
+        elif re.match(r"\d{4}-\d{2}-\d{2}", fecha_raw):  # YYYY-MM-DD
+            fields["fecha_iso"] = fecha_raw[:10]
+            fields["fecha"]     = f"{fecha_raw[8:10]}/{fecha_raw[5:7]}/{fecha_raw[:4]}"
+        else:
+            fields["fecha"]     = fecha_raw
+            fields["fecha_iso"] = parse_ar_date(fecha_raw)
+
+    # ── Importes ──────────────────────────────────────────────────────────
+    def _amt(tag):
+        v = _find(tag)
+        try: return float(v) if v else 0.0
+        except: return 0.0
+
+    fields["importe_total"] = _amt("ImpTotal") or _amt("ImporteTotal") or _amt("Total")
+    fields["importe_neto"]  = _amt("ImpNeto")  or _amt("ImporteNeto")  or _amt("Neto")
+    iva_total = _amt("ImpIVA") or _amt("ImporteIVA") or _amt("IVA")
+    # Distribuir IVA: si hay IVA 10.5 explícito usarlo, resto a 21%
+    iva105 = _amt("ImpIVA105") or _amt("Alicuota105") or 0.0
+    iva21  = _amt("ImpIVA21")  or _amt("Alicuota21")  or (iva_total - iva105)
+    fields["iva_21"]  = iva21
+    fields["iva_105"] = iva105
+
+    return fields
+
+
+def extract_afip_qr_from_pdf_text(text: str) -> dict:
+    """Extrae y decodifica el QR de AFIP embebido como URL en el texto del PDF.
+
+    El QR de AFIP contiene una URL:
+    https://www.afip.gob.ar/fe/qr/?p=<base64_json>
+    El JSON tiene: ver, fecha, cuit, ptoVta, tipoCmp, nroCmp, importe, etc.
+    """
+    import base64, json as _json
+    m = re.search(r'afip\.gob\.ar/fe/qr/\?p=([A-Za-z0-9+/=_-]+)', text)
+    if not m:
+        return {}
+    try:
+        payload = m.group(1)
+        # padding
+        payload += "=" * (4 - len(payload) % 4)
+        data = _json.loads(base64.urlsafe_b64decode(payload).decode())
+        if not isinstance(data, dict):
+            return {}
+        fecha = str(data.get("fecha", ""))[:10]
+        cuit  = str(data.get("cuit", ""))
+        pto   = str(data.get("ptoVta", "")).zfill(5)
+        nro   = str(data.get("nroCmp", "")).zfill(8)
+        tipo  = data.get("tipoCmp", 0)
+        tipo_map = {1: "FA-A", 6: "FA-B", 11: "FA-C", 51: "FA-M"}
+        return {
+            "cuit":          cuit,
+            "numero":        f"{pto}-{nro}" if pto and nro else "",
+            "fecha":         f"{fecha[8:10]}/{fecha[5:7]}/{fecha[:4]}" if len(fecha) == 10 else "",
+            "fecha_iso":     fecha,
+            "importe_total": float(data.get("importe", 0)),
+            "tipo_doc":      tipo_map.get(tipo, ""),
+            "_from_qr":      True,
+        }
+    except Exception:
+        return {}
+
 def classify_document(text, carpeta_id=""):
     """
     Clasifica un documento de importación.

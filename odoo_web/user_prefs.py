@@ -68,19 +68,64 @@ def load_vendor_account_pref(partner_id: int) -> dict:
         return {}
 
 
-def save_vendor_account_pref(partner_id: int, account_id: int, account_label: str) -> None:
-    """Guarda la última cuenta contable usada para un proveedor."""
+def save_vendor_account_pref(partner_id: int, account_id: int, account_label: str,
+                              product_id: int = None, product_label: str = None,
+                              analytic_id: int = None, analytic_label: str = None) -> None:
+    """Guarda cuenta, producto y centro de costo usados para un proveedor."""
     try:
         try:
             with open(_VENDOR_ACCTS_FILE, encoding="utf-8") as f:
                 data = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
             data = {}
-        data[str(partner_id)] = {
-            "account_id":    account_id,
-            "account_label": account_label,
-        }
+        entry = data.get(str(partner_id), {})
+        if account_id:
+            entry["account_id"]    = account_id
+            entry["account_label"] = account_label or ""
+        if product_id:
+            entry["product_id"]    = product_id
+            entry["product_label"] = product_label or ""
+        if analytic_id:
+            entry["analytic_id"]    = analytic_id
+            entry["analytic_label"] = analytic_label or ""
+        data[str(partner_id)] = entry
         with open(_VENDOR_ACCTS_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
     except OSError as e:
         _logger.warning("No se pudo escribir vendor_accounts.json: %s", e)
+
+
+# ── Historial persistente entre sesiones ────────────────────────────────────
+_HIST_FILE = "session_history.json"
+
+
+def append_persistent_history(entry: dict) -> None:
+    """Agrega una entrada al historial persistente en disco."""
+    try:
+        try:
+            with open(_HIST_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            data = []
+        if not isinstance(data, list):
+            data = []
+        data.append(entry)
+        # Mantener solo las últimas 2000 entradas
+        if len(data) > 2000:
+            data = data[-2000:]
+        with open(_HIST_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+    except OSError as e:
+        _logger.warning("No se pudo escribir session_history.json: %s", e)
+
+
+def load_persistent_history(limit: int = 200) -> list:
+    """Carga el historial persistente del disco."""
+    try:
+        with open(_HIST_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            return []
+        return data[-limit:]
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []

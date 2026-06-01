@@ -2,13 +2,27 @@
 import streamlit as st
 import config as _cfg
 from odoo_client import get_odoo_error_log
+from user_prefs import append_persistent_history, load_persistent_history
 
 
 def render(models, uid, api_key, models_url, is_admin):
     st.subheader("Historial de esta sesion")
 
-    # ── Documentos creados en Odoo ─────────────────────────────────────────
+    # ── Persistir entradas nuevas de esta sesion ────────────────────────────
     _hist = st.session_state.get("history", [])
+    _persisted_set = st.session_state.setdefault("_persisted_hist_ids", set())
+    from datetime import date as _hist_date
+    for _he in _hist:
+        _hkey = f"{_he.get('tipo','')}|{_he.get('id','')}|{_he.get('hora','')}"
+        if _hkey not in _persisted_set:
+            append_persistent_history({
+                **_he,
+                "fecha": str(_hist_date.today()),
+            })
+            _persisted_set.add(_hkey)
+
+    # ── Documentos creados en Odoo ─────────────────────────────────────────
+    
     if not _hist:
         st.caption("Todavia no se creo ningun documento en Odoo en esta sesion.")
     else:
@@ -135,3 +149,62 @@ def render(models, uid, api_key, models_url, is_admin):
         if st.button("🗑️ Limpiar log", key="historial_clear_log"):
             st.session_state["error_log"] = []
             st.rerun()
+
+    # ── Historial persistente entre sesiones ──────────────────────────────
+    st.divider()
+    with st.expander("📋 Historial de sesiones anteriores", expanded=False):
+        _ph_all = load_persistent_history(limit=300)
+        if not _ph_all:
+            st.caption("Todavía no hay historial guardado de sesiones anteriores.")
+        else:
+            import pandas as _pd_ph
+            # Filtros
+            _ph_tipos = sorted(set(e.get("tipo","") for e in _ph_all if e.get("tipo")))
+            _phf1, _phf2, _phf3 = st.columns([2, 1, 1])
+            _ph_tipo_sel = _phf1.multiselect(
+                "Tipo", _ph_tipos, default=[], key="ph_tipo_filter",
+                placeholder="Todos")
+            _ph_desde = _phf2.date_input("Desde", value=None, key="ph_desde")
+            _ph_hasta = _phf3.date_input("Hasta", value=None, key="ph_hasta")
+
+            _ph_filtered = _ph_all
+            if _ph_tipo_sel:
+                _ph_filtered = [e for e in _ph_filtered if e.get("tipo") in _ph_tipo_sel]
+            if _ph_desde:
+                _ph_filtered = [e for e in _ph_filtered
+                                if e.get("fecha","") >= str(_ph_desde)]
+            if _ph_hasta:
+                _ph_filtered = [e for e in _ph_filtered
+                                if e.get("fecha","") <= str(_ph_hasta)]
+
+            _ph_df = _pd_ph.DataFrame([{
+                "Fecha":    e.get("fecha",""),
+                "Hora":     e.get("hora",""),
+                "Tipo":     e.get("tipo",""),
+                "Archivo":  e.get("archivo",""),
+                "Estado":   e.get("estado",""),
+                "Link":     ("[Abrir](" + e["url"] + ")" if e.get("url") else ""),
+            } for e in reversed(_ph_filtered)])
+
+            if _ph_df.empty:
+                st.caption("Sin entradas para los filtros seleccionados.")
+            else:
+                st.caption(f"{len(_ph_df)} entrada(s) — {len(_ph_all)} total en historial.")
+                st.dataframe(_ph_df, use_container_width=True, hide_index=True)
+
+                if st.button("📥 Exportar historial completo a Excel", key="ph_export"):
+                    import io as _io2
+                    _ph_buf = _io2.BytesIO()
+                    _pd_ph.DataFrame([{
+                        "Fecha": e.get("fecha",""), "Hora": e.get("hora",""),
+                        "Tipo": e.get("tipo",""), "Archivo": e.get("archivo",""),
+                        "ID Odoo": e.get("id",""), "Estado": e.get("estado",""),
+                        "URL": e.get("url",""),
+                    } for e in reversed(_ph_all)]).to_excel(_ph_buf, index=False)
+                    _ph_buf.seek(0)
+                    st.download_button(
+                        "⬇️ Descargar Excel completo",
+                        data=_ph_buf.getvalue(),
+                        file_name=f"historial_completo_{str(_hist_date.today())}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="ph_dl")

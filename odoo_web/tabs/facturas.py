@@ -30,7 +30,8 @@ from odoo_client import (
     _AR_TZ,
     clean_str,
 )
-from user_prefs import load_prefs as _load_prefs_fac, load_vendor_account_pref, save_vendor_account_pref
+from user_prefs import (load_prefs as _load_prefs_fac, load_vendor_account_pref,
+                         save_vendor_account_pref, append_persistent_history)
 from parsers import extract_pdf_fields, parse_ar_date, extract_image_fields, extract_excel_oc_fields
 
 
@@ -139,10 +140,28 @@ def render(models, uid, api_key, models_url, is_admin):
                 for err in errs: st.warning(err)
         else:
             extracted, raw_text = {}, ""
-            if ext == "pdf":
+            if ext == "xml":
+                with st.spinner(f"Leyendo XML AFIP... {_file_lbl}"):
+                    extracted = extract_afip_xml_fields(file_bytes)
+                if extracted.get("numero") or extracted.get("cuit"):
+                    st.caption("📄 Datos extraídos del XML AFIP — revisá antes de confirmar.")
+                else:
+                    st.caption("⚠️ No se reconoció el formato XML. Completá los datos a mano.")
+            elif ext == "pdf":
                 with st.spinner(f"Analizando PDF con IA... {_file_lbl}"):
                     extracted, raw_text = extract_pdf_fields(file_bytes)
-                _src_tag = "✨ IA" if extracted.get("_source") == "ai" else "🔣 Regex"
+                # Enriquecer con datos del QR AFIP si hay campos faltantes
+                if raw_text:
+                    _qr_data = extract_afip_qr_from_pdf_text(raw_text)
+                    if _qr_data:
+                        for _qk, _qv in _qr_data.items():
+                            if _qk.startswith("_"): continue
+                            if not extracted.get(_qk) and _qv:
+                                extracted[_qk] = _qv
+                        if _qr_data.get("numero") and not extracted.get("numero"):
+                            extracted["numero"] = _qr_data["numero"]
+                _src_tag = "📄 XML QR" if extracted.get("_from_qr") else (
+                    "✨ IA" if extracted.get("_source") == "ai" else "🔣 Regex")
                 if extracted.get("proveedor") or extracted.get("numero"):
                     st.caption(f"🤖 Datos detectados [{_src_tag}] — revisá antes de confirmar.")
                 else:
@@ -208,17 +227,26 @@ def render(models, uid, api_key, models_url, is_admin):
             _prod_labels = ["— Sin producto —"] + [lbl for _, lbl in _expense_products]
             _default_prod_idx = 0
             if _partner_preloaded:
-                _def_prod = get_partner_default_product(models_url, uid, api_key, _partner_preloaded[0])
-                if _def_prod:
-                    _def_prod_label = _def_prod[1]
-                    for _pi, _plbl in enumerate(_prod_labels):
-                        if _plbl == _def_prod_label:
-                            _default_prod_idx = _pi
-                            break
+                # Prioridad 1: cache local
+                if _vcache.get("product_label") and _vcache["product_label"] in _prod_labels:
+                    _default_prod_idx = _prod_labels.index(_vcache["product_label"])
+                else:
+                    # Prioridad 2: default configurado en Odoo
+                    _def_prod = get_partner_default_product(models_url, uid, api_key, _partner_preloaded[0])
+                    if _def_prod:
+                        _def_prod_label = _def_prod[1]
+                        for _pi, _plbl in enumerate(_prod_labels):
+                            if _plbl == _def_prod_label:
+                                _default_prod_idx = _pi
+                                break
 
             # Cargar cuentas analíticas (Centros de Costo)
             _analytic_accounts = get_analytic_accounts(models_url, uid, api_key)
             _analytic_labels   = ["— Sin centro de costo —"] + [lbl for _, lbl in _analytic_accounts]
+            _default_analytic_idx = 0
+            if _partner_preloaded and _vcache.get("analytic_label"):
+                if _vcache["analytic_label"] in _analytic_labels:
+                    _default_analytic_idx = _analytic_labels.index(_vcache["analytic_label"])
 
             # ── Estado del proveedor + opción de crear nuevo ──────────────────────
             _create_new_vend_key = f"bill_create_new_vend_{uf.name}"
@@ -416,7 +444,7 @@ def render(models, uid, api_key, models_url, is_admin):
                 analytic_sel = st.selectbox(
                     "Centro de Costo",
                     options=_analytic_labels,
-                    index=0,
+                    index=_default_analytic_idx if _partner_preloaded else 0,
                     key=f"cc_g_{uf.name}",
                     help="Centro de costo (cuenta analítica) que absorbe el gasto. Opcional.",
                 )
@@ -544,8 +572,28 @@ def render(models, uid, api_key, models_url, is_admin):
                             # Recordar la cuenta usada para este proveedor
                             if partner_id and account_id_sel:
                                 _used_lbl = next((l for a, l in _bill_accounts if a == account_id_sel), "")
-                                if _used_lbl:
-                                    save_vendor_account_pref(partner_id, account_id_sel, _used_lbl)
+                                _used_prod_lbl = next((l for _, l in _expense_products if
+                                    next((i for i, n in _expense_products if n == l), None) == product_id_sel), "")
+                                _used_prod_id  = product_id_sel
+                                _used_prod_lbl = next((l for i, l in _expense_products if i == product_id_sel), "") if product_id_sel else ""
+                                _used_an_id    = analytic_id_sel
+                                _used_an_lbl   = next((l for i, l in _analytic_accounts if i == analytic_id_sel), "") if analytic_id_sel else ""
+                                save_vendor_account_pref(
+                                    partner_id, account_id_sel, _used_lbl,
+                                    product_id=_used_prod_id, product_label=_used_prod_lbl,
+                                    analytic_id=_used_an_id, analytic_label=_used_an_lbl)
+                            # Persistir en historial entre sesiones
+                            if move_id:
+                                from datetime import date as _date_today
+                                append_persistent_history({
+                                    "fecha": str(_date_today.today()),
+                                    "hora": _dt_now.now(_AR_TZ).strftime("%H:%M"),
+                                    "tipo": "Factura proveedor",
+                                    "archivo": uf.name,
+                                    "id": move_id,
+                                    "url": url,
+                                    "estado": "✅",
+                                })
                             st.markdown(f"📎 [Abrir en Odoo]({url})")
                             register_processed_file(file_bytes, uf.name, "Factura proveedor", f"ID {move_id}")
                             st.session_state.history.append({"tipo":"Factura proveedor",
