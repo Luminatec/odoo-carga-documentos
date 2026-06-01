@@ -6,6 +6,7 @@ from io import BytesIO
 from datetime import datetime as _dt_now
 import config as _cfg
 from odoo_client import (
+    check_duplicate_vendor_bill,
     get_purchase_journals,
     search_partners,
     get_all_accounts,
@@ -498,10 +499,21 @@ def render(models, uid, api_key, models_url, is_admin):
                         if _latam_num and re.match(r"^[A-Za-z]\d", _latam_num):
                             _latam_num = _latam_num[1:]
 
-                        # Normalizar fechas: acepta DD/MM/YYYY, DD/M/YYYY o YYYY-MM-DD
-                        _fecha_i_iso   = parse_ar_date(fecha_i)   if fecha_i   else ""
-                        _fecha_vto_iso = parse_ar_date(fecha_vto_i) if fecha_vto_i else ""
-                        move_id = create_vendor_bill(models, uid, api_key,
+                        # ── Validar duplicado antes de crear ─────────────────────
+                        _dup_bill, _dup_bill_name, _dup_bill_id = check_duplicate_vendor_bill(
+                            models_url, uid, api_key,
+                            partner_id, _latam_num or ref_i)
+                        if _dup_bill:
+                            _dup_url = odoo_url("account.move", _dup_bill_id) if _dup_bill_id else ""
+                            st.error(
+                                f"❌ Ya existe la factura **{_dup_bill_name}** con ese número "
+                                f"para este proveedor en Odoo. "
+                                + (f"[Abrir en Odoo]({_dup_url})" if _dup_url else ""))
+                        else:
+                            # Normalizar fechas: acepta DD/MM/YYYY, DD/M/YYYY o YYYY-MM-DD
+                            _fecha_i_iso   = parse_ar_date(fecha_i)   if fecha_i   else ""
+                            _fecha_vto_iso = parse_ar_date(fecha_vto_i) if fecha_vto_i else ""
+                            move_id = create_vendor_bill(models, uid, api_key,
                             partner_id=partner_id, ref=concepto_i.strip() or ref_i,
                             invoice_date=_fecha_i_iso or False,
                             invoice_date_due=_fecha_vto_iso or None,
@@ -514,12 +526,12 @@ def render(models, uid, api_key, models_url, is_admin):
                             l10n_latam_document_number=_latam_num or None,
                             clear_taxes=exenta_i,
                             line_name=concepto_i.strip() or None)
-                        url = odoo_url("account.move", move_id)
-                        st.toast("Factura creada en Odoo", icon="✅")
-                        st.markdown(f"📎 [Abrir en Odoo]({url})")
-                        register_processed_file(file_bytes, uf.name, "Factura proveedor", f"ID {move_id}")
-                        st.session_state.history.append({"tipo":"Factura proveedor",
-                            "archivo":uf.name,"id":move_id,"url":url,"estado":"✅","hora":_dt_now.now(_AR_TZ).strftime("%H:%M")})
+                            url = odoo_url("account.move", move_id)
+                            st.toast("Factura creada en Odoo", icon="✅")
+                            st.markdown(f"📎 [Abrir en Odoo]({url})")
+                            register_processed_file(file_bytes, uf.name, "Factura proveedor", f"ID {move_id}")
+                            st.session_state.history.append({"tipo":"Factura proveedor",
+                                "archivo":uf.name,"id":move_id,"url":url,"estado":"✅","hora":_dt_now.now(_AR_TZ).strftime("%H:%M")})
                     except OdooError as e:
                         show_odoo_error(e, "crear factura")
 

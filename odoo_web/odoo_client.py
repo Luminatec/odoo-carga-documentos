@@ -143,6 +143,77 @@ def _file_hash(file_bytes: bytes) -> str:
     return hashlib.sha256(file_bytes).hexdigest()[:16]
 
 
+
+def check_duplicate_vendor_bill(models_url, uid, api_key, partner_id, document_number):
+    """Verifica si ya existe una factura de proveedor con ese número + proveedor en Odoo.
+    Retorna (True, move_name, move_id) si existe, (False, None, None) si no."""
+    if not partner_id or not document_number:
+        return False, None, None
+    try:
+        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        rows = m.execute_kw(
+            _cfg.ODOO_DB, uid, api_key, "account.move", "search_read",
+            [[("move_type", "=", "in_invoice"),
+              ("l10n_latam_document_number", "=", str(document_number).strip()),
+              ("partner_id",                "=", partner_id),
+              ("state",                     "!=", "cancel")]],
+            {"fields": ["id", "name"], "limit": 1})
+        if rows:
+            return True, rows[0]["name"], rows[0]["id"]
+        return False, None, None
+    except Exception:
+        return False, None, None
+
+
+def check_duplicate_sale_order(models_url, uid, api_key, partner_id, client_order_ref):
+    """Verifica si ya existe un pedido con ese N° OC + cliente en Odoo.
+    Retorna (True, order_name, order_id) si existe, (False, None, None) si no."""
+    if not partner_id or not client_order_ref:
+        return False, None, None
+    try:
+        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        rows = m.execute_kw(
+            _cfg.ODOO_DB, uid, api_key, "sale.order", "search_read",
+            [[("client_order_ref", "=", str(client_order_ref).strip()),
+              ("partner_id",       "=", partner_id),
+              ("state",            "not in", ["cancel"])]],
+            {"fields": ["id", "name"], "limit": 1})
+        if rows:
+            return True, rows[0]["name"], rows[0]["id"]
+        return False, None, None
+    except Exception:
+        return False, None, None
+
+
+def check_duplicate_cheque(models_url, uid, api_key, nro, issuer_vat):
+    """Verifica si ya existe un cheque con ese número + CUIT emisor en pagos confirmados.
+    Retorna (True, payment_name, group_id) si existe, (False, None, None) si no."""
+    if not nro or not issuer_vat:
+        return False, None, None
+    try:
+        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        # Buscar en l10n_latam_new_check (cheques de terceros en Odoo AR)
+        rows = m.execute_kw(
+            _cfg.ODOO_DB, uid, api_key, "l10n_latam.check", "search_read",
+            [[("name",       "=",  str(nro).strip()),
+              ("issuer_vat", "=",  str(issuer_vat).replace("-","").strip()),
+              ("state",      "!=", "cancelled")]],
+            {"fields": ["id", "name", "payment_id"], "limit": 1})
+        if rows:
+            pname = ""
+            try:
+                pay = m.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                    "account.payment", "read",
+                    [[rows[0]["payment_id"][0]]],
+                    {"fields": ["name", "payment_group_id"]})
+                pname = pay[0].get("name","") if pay else ""
+            except Exception:
+                pass
+            return True, pname or f"Cheque #{nro}", None
+        return False, None, None
+    except Exception:
+        return False, None, None
+
 def check_duplicate_file(file_bytes: bytes, filename: str) -> tuple[bool, dict]:
     """Verifica si el archivo ya fue procesado en esta sesion.
 

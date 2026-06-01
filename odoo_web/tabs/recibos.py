@@ -6,6 +6,7 @@ import pandas as pd
 import config as _cfg
 from user_prefs import load_prefs as _load_prefs
 from odoo_client import (
+    check_duplicate_cheque,
     get_all_accounts,
     normalize_amount,
     fmt_ars,
@@ -892,65 +893,82 @@ def render(models, uid, api_key, models_url, is_admin):
                                         "payment_date": _dt,
                                         "amount":       float(_rch.get("importe") or 0),
                                     })
-                                # Preparar datos antes del spinner
-                                _rc_withholdings = [
-                                    d for d in st.session_state.get(_ded_key, [])
-                                    if float(d.get("monto", 0)) > 0
-                                ] if _rc_cheque_vals else None
-                                _rc_all_move_ids = (
-                                    (_rcsel_ids or []) + (_rcncsel_ids or [])
-                                ) or None
-                                with st.status("Registrando cobro en Odoo...", expanded=True) as _rc_status:
-                                    st.write(f"💳 Grupo de pago · ARS {fmt_ars(_rc_neto)}")
-                                    if _rc_cheque_vals:
-                                        st.write(f"🏦 {len(_rc_cheque_vals)} cheque(s) por acreditar")
-                                    if _rc_withholdings:
-                                        st.write(f"📋 {len(_rc_withholdings)} retención(es) a registrar")
-                                    if _rc_all_move_ids:
-                                        st.write(f"🔗 Imputando {len(_rc_all_move_ids)} comprobante(s)")
-                                    if _rc_writeoff_account_id:
-                                        _diff_disp = abs(_rcsel_saldo - _rc_neto)
-                                        st.write(f"⚖️ Saldando diferencia de redondeo ARS {fmt_ars(_diff_disp)}")
-                                    _rc_ok, _rc_res = register_customer_payment(
-                                        models, uid, api_key,
-                                        _rc_pid, _rc_neto, _rc_cur_id,
-                                        _rc_date_str, _rc_jour_id,
-                                        move_ids=_rc_all_move_ids,
-                                        memo=_rc_memo,
-                                        cheques=_rc_cheque_vals if _rc_cheque_vals else None,
-                                        withholdings=_rc_withholdings,
-                                        writeoff_account_id=_rc_writeoff_account_id,
-                                        writeoff_label=_rc_writeoff_label)
+                                # ── Validar cheques duplicados ────────────────────────────────
+                                _chq_dups = []
+                                for _rch_v in _rc_cheque_vals:
+                                    _is_dup_chq, _dup_chq_name, _ = check_duplicate_cheque(
+                                        models_url, uid, api_key,
+                                        _rch_v.get("nro",""), _rch_v.get("issuer_vat",""))
+                                    if _is_dup_chq:
+                                        _chq_dups.append(
+                                            f"Cheque nro {_rch_v.get('nro','')} "
+                                            f"(CUIT {_rch_v.get('issuer_vat','')}): "
+                                            f"ya registrado como {_dup_chq_name}")
+                                if _chq_dups:
+                                    st.error(
+                                        "❌ Los siguientes cheques ya están registrados en Odoo:\n"
+                                        + "\n".join(f"• {d}" for d in _chq_dups))
+                                    st.session_state.pop(_dup_key, None)
+                                if not _chq_dups:
+                                    # Preparar datos antes del spinner
+                                    _rc_withholdings = [
+                                        d for d in st.session_state.get(_ded_key, [])
+                                        if float(d.get("monto", 0)) > 0
+                                    ] if _rc_cheque_vals else None
+                                    _rc_all_move_ids = (
+                                        (_rcsel_ids or []) + (_rcncsel_ids or [])
+                                    ) or None
+                                    with st.status("Registrando cobro en Odoo...", expanded=True) as _rc_status:
+                                        st.write(f"💳 Grupo de pago · ARS {fmt_ars(_rc_neto)}")
+                                        if _rc_cheque_vals:
+                                            st.write(f"🏦 {len(_rc_cheque_vals)} cheque(s) por acreditar")
+                                        if _rc_withholdings:
+                                            st.write(f"📋 {len(_rc_withholdings)} retención(es) a registrar")
+                                        if _rc_all_move_ids:
+                                            st.write(f"🔗 Imputando {len(_rc_all_move_ids)} comprobante(s)")
+                                        if _rc_writeoff_account_id:
+                                            _diff_disp = abs(_rcsel_saldo - _rc_neto)
+                                            st.write(f"⚖️ Saldando diferencia de redondeo ARS {fmt_ars(_diff_disp)}")
+                                        _rc_ok, _rc_res = register_customer_payment(
+                                            models, uid, api_key,
+                                            _rc_pid, _rc_neto, _rc_cur_id,
+                                            _rc_date_str, _rc_jour_id,
+                                            move_ids=_rc_all_move_ids,
+                                            memo=_rc_memo,
+                                            cheques=_rc_cheque_vals if _rc_cheque_vals else None,
+                                            withholdings=_rc_withholdings,
+                                            writeoff_account_id=_rc_writeoff_account_id,
+                                            writeoff_label=_rc_writeoff_label)
+                                        if _rc_ok:
+                                            _rc_status.update(
+                                                label="✅ Cobro registrado",
+                                                state="complete", expanded=False)
+                                        else:
+                                            _rc_status.update(
+                                                label="❌ Error al registrar",
+                                                state="error", expanded=True)
                                     if _rc_ok:
-                                        _rc_status.update(
-                                            label="✅ Cobro registrado",
-                                            state="complete", expanded=False)
+                                        _wh_warn = isinstance(_rc_res, str) and _rc_res.startswith("__WH_WARN__")
+                                        st.toast(
+                                            f"Recibo registrado para {_rc_pname} — ARS {fmt_ars(_rc_neto)}", icon="✅")
+                                        register_processed_file(
+                                            _rc_bytes, _rc_file.name, "Recibo de cobro",
+                                            f"{_rc_pname} ARS {fmt_ars(_rc_neto)}")
+                                        search_partners_by_cuits.clear()
+                                        get_customer_unpaid_invoices.clear()
+                                        get_customer_pending_credit_notes.clear()
+                                        if _wh_warn:
+                                            _wh_detail = _rc_res.replace("__WH_WARN__", "")
+                                            show_odoo_warning(
+                                                f"Recibo registrado, pero no se pudo crear el pago de retención "
+                                                f"en Odoo. Registralo manualmente. Detalle: {_wh_detail}",
+                                                "registrar retención")
+                                        else:
+                                            st.info(
+                                                "Presioná 🔄 Actualizar para ver "
+                                                "el estado actualizado.")
                                     else:
-                                        _rc_status.update(
-                                            label="❌ Error al registrar",
-                                            state="error", expanded=True)
-                                if _rc_ok:
-                                    _wh_warn = isinstance(_rc_res, str) and _rc_res.startswith("__WH_WARN__")
-                                    st.toast(
-                                        f"Recibo registrado para {_rc_pname} — ARS {fmt_ars(_rc_neto)}", icon="✅")
-                                    register_processed_file(
-                                        _rc_bytes, _rc_file.name, "Recibo de cobro",
-                                        f"{_rc_pname} ARS {fmt_ars(_rc_neto)}")
-                                    search_partners_by_cuits.clear()
-                                    get_customer_unpaid_invoices.clear()
-                                    get_customer_pending_credit_notes.clear()
-                                    if _wh_warn:
-                                        _wh_detail = _rc_res.replace("__WH_WARN__", "")
-                                        show_odoo_warning(
-                                            f"Recibo registrado, pero no se pudo crear el pago de retención "
-                                            f"en Odoo. Registralo manualmente. Detalle: {_wh_detail}",
-                                            "registrar retención")
-                                    else:
-                                        st.info(
-                                            "Presioná 🔄 Actualizar para ver "
-                                            "el estado actualizado.")
-                                else:
-                                    st.error(f"Error al registrar en Odoo: {_rc_res}")
+                                        st.error(f"Error al registrar en Odoo: {_rc_res}")
 
     st.divider()
     st.caption(

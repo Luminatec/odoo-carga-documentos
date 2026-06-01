@@ -7,7 +7,7 @@ import config as _cfg
 from user_prefs import load_prefs as _load_prefs
 from odoo_client import (
     create_sale_order,
-    search_registered_orders,
+    check_duplicate_sale_order,
     odoo_url,
     safe_float,
     fmt_ars,
@@ -400,6 +400,17 @@ def render(models, uid, api_key, models_url, is_admin):
                          type="primary", disabled=_xl_btn_disabled):
                 with st.spinner("Creando pedido..."):
                     try:
+                        # ── Validar OC duplicada ───────────────────────────────────────
+                        if _xl_oc_num and _xl_oc_num.strip():
+                            _dup_oc, _dup_oc_name, _dup_oc_id = check_duplicate_sale_order(
+                                models_url, uid, api_key, _xl_pid, _xl_oc_num.strip())
+                            if _dup_oc:
+                                _dup_oc_url = odoo_url("sale.order", _dup_oc_id) if _dup_oc_id else ""
+                                st.error(
+                                    f"❌ Ya existe el pedido **{_dup_oc_name}** con la OC "
+                                    f"**{_xl_oc_num}** para este cliente. "
+                                    + (f"[Abrir en Odoo]({_dup_oc_url})" if _dup_oc_url else ""))
+                                raise Exception("__SKIP__")
                         # Escribir referido al partner
                         if _xl_ref_sel != "— Sin referido —" and _xl_ref_sel in _xl_ref_map:
                             try:
@@ -453,7 +464,8 @@ def render(models, uid, api_key, models_url, is_admin):
                         st.session_state.history.append({"tipo":"Pedido cliente",
                             "archivo":uf.name,"id":_xl_order_id,"url":url,"estado":"✅","hora":_dt_now.now(_AR_TZ).strftime("%H:%M")})
                     except Exception as _xe:
-                        show_odoo_error(_xe, "crear pedido Excel")
+                        if str(_xe) != "__SKIP__":
+                            show_odoo_error(_xe, "crear pedido Excel")
         else:
             # ── Parseo del PDF de OC ──────────────────────────────────────
             oc_fields, _oc_tables, _oc_raw = {}, [], ""
@@ -847,6 +859,18 @@ def render(models, uid, api_key, models_url, is_admin):
                          type="primary", disabled=_btn_disabled):
                 with st.spinner("Creando pedido en Odoo..."):
                     try:
+                        # ── Validar OC duplicada ───────────────────────────────────────
+                        _oc_ref_check = _oc_num_i or oc_fields.get("numero_oc","")
+                        if _oc_ref_check and _oc_ref_check.strip():
+                            _dup_oc2, _dup_oc2_name, _dup_oc2_id = check_duplicate_sale_order(
+                                models_url, uid, api_key, _partner_id_oc, _oc_ref_check.strip())
+                            if _dup_oc2:
+                                _dup_oc2_url = odoo_url("sale.order", _dup_oc2_id) if _dup_oc2_id else ""
+                                st.error(
+                                    f"❌ Ya existe el pedido **{_dup_oc2_name}** con la OC "
+                                    f"**{_oc_ref_check}** para este cliente. "
+                                    + (f"[Abrir en Odoo]({_dup_oc2_url})" if _dup_oc2_url else ""))
+                                raise Exception("__SKIP__")
                         _order_lines = []
                         for _el in _enriched:
                             _order_lines.append({
@@ -900,57 +924,8 @@ def render(models, uid, api_key, models_url, is_admin):
                         st.session_state.history.append({"tipo":"Pedido cliente",
                             "archivo":uf.name,"id":order_id,"url":url,"estado":"✅","hora":_dt_now.now(_AR_TZ).strftime("%H:%M")})
                     except Exception as _e:
-                        show_odoo_error(_e, "crear pedido OC")
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # SECCIÓN: Consulta de pedidos ya registrados en Odoo
-    # ═══════════════════════════════════════════════════════════════════════
-    with st.expander("🔍 Consultar pedidos ya registrados en Odoo", expanded=False):
-        st.caption("Buscá pedidos confirmados en Odoo por cliente y/o rango de fechas.")
-        _so_c1, _so_c2, _so_c3 = st.columns([2, 1, 1])
-        _so_partner = _so_c1.text_input("Nombre del cliente (parcial)", key="srch_so_partner")
-        _so_from    = _so_c2.date_input("Desde", value=None, key="srch_so_from")
-        _so_to      = _so_c3.date_input("Hasta", value=None, key="srch_so_to")
-
-        if st.button("🔍 Buscar", key="srch_so_btn", type="primary"):
-            _so_pid = None
-            if _so_partner.strip():
-                with st.spinner("Buscando cliente..."):
-                    try:
-                        import xmlrpc.client as _xmlrpc_so
-                        _so_m = _xmlrpc_so.ServerProxy(models_url, allow_none=True)
-                        _so_res = _so_m.execute_kw(
-                            _cfg.ODOO_DB, uid, api_key,
-                            "res.partner", "search_read",
-                            [[("name", "ilike", _so_partner.strip())]],
-                            {"fields": ["id", "name"], "limit": 1})
-                        if _so_res:
-                            _so_pid = _so_res[0]["id"]
-                        else:
-                            st.warning(f"No se encontró cliente con nombre '{_so_partner}'.")
-                    except Exception as _soe:
-                        st.error(f"Error al buscar cliente: {_soe}")
-
-            with st.spinner("Consultando pedidos en Odoo..."):
-                _so_orders = search_registered_orders(
-                    models_url, uid, api_key,
-                    partner_id=_so_pid,
-                    date_from=_so_from,
-                    date_to=_so_to,
-                )
-
-            if not _so_orders:
-                st.info("No se encontraron pedidos con esos criterios.")
-            else:
-                import pandas as _pd_so
-                _so_df = _pd_so.DataFrame(_so_orders)
-                _so_df["total"] = _so_df["total"].apply(fmt_ars)
-                _so_df["url"]   = _so_df["url"].apply(lambda u: f"[Abrir]({u})" if u else "")
-                _so_disp = _so_df[["fecha","partner","name","oc_ref","total","estado","url"]].copy()
-                _so_disp.columns = ["Fecha","Cliente","Pedido","N° OC","Total","Estado","Link"]
-                st.dataframe(_so_disp, use_container_width=True, hide_index=True)
-                st.caption(f"{len(_so_orders)} pedido(s) encontrado(s).")
-
+                        if str(_e) != "__SKIP__":
+                            show_odoo_error(_e, "crear pedido OC")
 
 
 # ═══════════════════════════════════════════════════
