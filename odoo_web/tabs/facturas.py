@@ -32,7 +32,9 @@ from odoo_client import (
 )
 from user_prefs import (load_prefs as _load_prefs_fac, load_vendor_account_pref,
                          save_vendor_account_pref, append_persistent_history)
-from parsers import extract_pdf_fields, parse_ar_date, extract_image_fields, extract_excel_oc_fields
+from parsers import (extract_pdf_fields, parse_ar_date, extract_image_fields,
+                     extract_excel_oc_fields, extract_afip_xml_fields,
+                     extract_afip_qr_from_pdf_text)
 
 
 def render(models, uid, api_key, models_url, is_admin):
