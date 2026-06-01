@@ -1413,7 +1413,7 @@ def search_product_by_code_or_name(models_url, uid, api_key,
     """
     try:
         m   = xmlrpc.client.ServerProxy(models_url, allow_none=True)
-        F   = ["id", "name", "default_code", "standard_price", "list_price"]
+        F   = ["id", "name", "default_code", "standard_price", "list_price", "qty_available"]
 
         def _best(rows):
             if not rows:

@@ -180,6 +180,10 @@ def render(models, uid, api_key, models_url, is_admin):
 
             # ── CUIT editable en tiempo real (fuera del form) ────────────────────
             _cuit_raw    = extracted.get("cuit", "")
+            if _cuit_raw:
+                _cuit_mod11_ok, _cuit_mod11_msg = validate_cuit(_cuit_raw)
+                if not _cuit_mod11_ok:
+                    st.warning(f"⚠️ CUIT extraído **{_cuit_raw}** no pasa el módulo 11: {_cuit_mod11_msg}")
             _cond_venta  = extracted.get("condiciones_venta", "")
             _dias_pago   = extracted.get("dias_pago")
             _vto_auto    = extracted.get("fecha_vencimiento", "")

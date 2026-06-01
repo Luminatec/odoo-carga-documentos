@@ -7,6 +7,7 @@ import config as _cfg
 from user_prefs import load_prefs as _load_prefs
 from odoo_client import (
     create_sale_order,
+    validate_cuit as _validate_cuit_ped,
     check_duplicate_sale_order,
     odoo_url,
     safe_float,
@@ -123,6 +124,12 @@ def render(models, uid, api_key, models_url, is_admin):
                     help="Escribí el CUIT completo o parte de la razón social y presioná Enter",
                 )
                 _xl_q_val = (_xl_q or "").strip()
+                # Validar módulo-11 si parece un CUIT
+                _xl_q_digits = re.sub(r"[^\d]","",_xl_q_val)
+                if len(_xl_q_digits) == 11:
+                    _xl_cuit_ok, _xl_cuit_msg = _validate_cuit_ped(_xl_q_val)
+                    if not _xl_cuit_ok:
+                        st.warning(f"⚠️ {_xl_cuit_msg}")
                 if _xl_q_val and len(_xl_q_val) >= 3:
                     _xl_cands = search_partner_by_cuit_or_name(
                         models_url, uid, api_key, _xl_q_val, limit=8)
@@ -235,6 +242,7 @@ def render(models, uid, api_key, models_url, is_admin):
                         "P. Unit.":    float(_el.get("precio_unit", 0)),
                         "IVA %":       int(_el.get("iva_pct", 21)),
                         "Costo":       float(_el.get("cost", 0)),
+                        "Stock":       float(_op.get("qty_available", 0)) if _op else 0.0,
                         "Margen %":    round(float(_el.get("margin_pct", 0)), 1),
                         "Producto Odoo": _op["name"] if _op else "",
                     })
@@ -244,13 +252,14 @@ def render(models, uid, api_key, models_url, is_admin):
                     "P. Unit.":      st.column_config.NumberColumn("P. Unit.", format="$ %.2f"),
                     "IVA %":         st.column_config.NumberColumn("IVA %", format="%d%%"),
                     "Costo":         st.column_config.NumberColumn("Costo", format="$ %.2f"),
+                    "Stock":         st.column_config.NumberColumn("Stock 📦", format="%.0f un."),
                     "Margen %":      st.column_config.NumberColumn("Margen %", format="%.1f%%"),
                     "Producto Odoo": st.column_config.TextColumn(
                         "Producto Odoo",
                         help="✏️ Escribí nombre o código (parcial) y presioná Enter para buscar"),
                 }
                 _tbl_disabled_cols = ["", "Modelo", "Descripción", "Cant.",
-                                      "P. Unit.", "IVA %", "Costo", "Margen %"]
+                                      "P. Unit.", "IVA %", "Costo", "Stock", "Margen %"]
                 # Versión del key: cambia tras cada match exitoso para limpiar el estado del editor
                 _tbl_ver   = st.session_state.get(f"_tbl_ver_{uf.name}", 0)
                 _tbl_edited = st.data_editor(
@@ -650,6 +659,8 @@ def render(models, uid, api_key, models_url, is_admin):
                         "Cant.":        int(_el.get("cantidad",0)),
                         "Precio unit.": fmt_ars(_el.get("precio_unit",0)),
                         "Subtotal":     fmt_ars(_el.get("subtotal",0)),
+                        "Stock 📦":     (f"{float(_el['odoo_product'].get('qty_available',0)):.0f} un."
+                                        if _el.get("odoo_product") else "—"),
                         "Margen %":     f"{_el.get('margin_pct',0):.1f}%",
                         "Match Odoo":   _match_txt,
                     })
