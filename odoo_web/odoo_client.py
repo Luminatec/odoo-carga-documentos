@@ -885,8 +885,8 @@ def get_purchase_journals(models_url, uid, api_key):
     """Retorna lista de (id, name) de diarios de tipo 'purchase'."""
     try:
         common_url = models_url.replace("/object", "/common").replace("xmlrpc/2/object", "xmlrpc/2/common")
-        models = _xmlrpc.ServerProxy(models_url, allow_none=True)
-        rows = models.execute_kw(
+        _pj_models = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        rows = _pj_models.execute_kw(
             _cfg.ODOO_DB, uid, api_key, "account.journal", "search_read",
             [[("type", "=", "purchase")]],
             {"fields": ["id", "name"], "order": "name asc", "limit": 50})
