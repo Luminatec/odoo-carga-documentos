@@ -340,7 +340,6 @@ if not uid or not api_key:
 # ── Preferencias del usuario (sidebar) ─────────────────────────────────────
 from user_prefs import load_prefs, save_prefs
 from odoo_client import get_payment_journals as _get_pj
-from odoo_client import get_purchase_journals as _get_pfj
 from odoo_client import get_all_payment_terms as _get_pts
 from odoo_client import get_referidos as _get_refs
 
@@ -349,17 +348,12 @@ with st.sidebar:
     with st.expander("⚙️ Preferencias", expanded=False):
         _prefs    = load_prefs()
         _pj_raw   = _get_pj(models_url, uid, api_key)
-        _pfj_raw  = _get_pfj(models_url, uid, api_key)
         _ref_raw  = _get_refs(models_url, uid, api_key)
         _pt_raw   = _get_pts(models_url, uid, api_key)
 
         _pj_opts  = ["— Sin preferencia —"] + [n for _, n, *_ in _pj_raw]
         _ref_opts = ["— Sin preferencia —"] + [n for _, n in _ref_raw]
         _pt_opts  = ["— Sin preferencia —"] + [n for _, n in _pt_raw]
-
-        _pfj_opts = ["— Sin preferencia —"] + [n for _, n in _pfj_raw]
-        _pfj_cur  = _prefs.get("diario_facturas_nombre", "")
-        _pfj_def  = _pfj_opts.index(_pfj_cur) if _pfj_cur in _pfj_opts else 0
 
         _pj_cur   = _prefs.get("diario_cobros_nombre", "")
         _ref_cur  = _prefs.get("referido_nombre", "")
@@ -374,9 +368,6 @@ with st.sidebar:
             _pj_sel  = st.selectbox("Diario de cobros", _pj_opts,
                 index=_pj_def, key="sb_pj",
                 help="Diario usado en Recibos de Cobro")
-            _pfj_sel = st.selectbox("Diario de facturas prov.", _pfj_opts,
-                index=_pfj_def, key="sb_pfj",
-                help="Diario pre-seleccionado en Facturas de proveedores")
             _ref_sel = st.selectbox("Ejecutivo / Referido", _ref_opts,
                 index=_ref_def, key="sb_ref",
                 help="Pre-seleccionado en Pedidos y Contactos")
@@ -386,7 +377,6 @@ with st.sidebar:
             if st.form_submit_button("💾 Guardar", use_container_width=True):
                 save_prefs({
                     "diario_cobros_nombre": "" if _pj_sel  == "— Sin preferencia —" else _pj_sel,
-                    "diario_facturas_nombre": "" if _pfj_sel == "— Sin preferencia —" else _pfj_sel,
                     "referido_nombre":      "" if _ref_sel == "— Sin preferencia —" else _ref_sel,
                     "plazo_pago_nombre":    "" if _pt_sel  == "— Sin preferencia —" else _pt_sel,
                 })

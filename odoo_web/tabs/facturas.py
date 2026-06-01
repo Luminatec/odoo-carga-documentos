@@ -7,7 +7,6 @@ from datetime import datetime as _dt_now
 import config as _cfg
 from odoo_client import (
     check_duplicate_vendor_bill,
-    get_purchase_journals,
     search_partners,
     get_all_accounts,
     get_partner_default_account,
@@ -352,26 +351,6 @@ def render(models, uid, api_key, models_url, is_admin):
             with st.form(key=f"bill_form_{uf.name}"):
                 # CUIT ya está fuera del form para lookup en tiempo real
                 cuit_i = _cuit_raw
-                # ── Selector de diario de compra ─────────────────────────────
-                _pj_list = get_purchase_journals(models_url, uid, api_key)
-                _pj_names = [n for _, n in _pj_list]
-                _fac_pref_jour = _load_prefs_fac().get("diario_facturas_nombre", "")
-                _pj_default = next(
-                    (i for i, (_, n) in enumerate(_pj_list)
-                     if n == _fac_pref_jour), None)
-                if _pj_default is None:
-                    _pj_default = next(
-                        (i for i, (_, n) in enumerate(_pj_list)
-                         if "proveedor" in n.lower()), 0)
-                _pj_sel = st.selectbox(
-                    "Diario contable",
-                    _pj_names,
-                    index=_pj_default,
-                    key=f"bill_journal_{uf.name}",
-                    help="Diario con el que se registrará la factura en Odoo.")
-                _bill_journal_id = next(
-                    (jid for jid, jn in _pj_list if jn == _pj_sel), None)
-
                 c1, c2 = st.columns(2)
                 ref_i   = c2.text_input("N° de factura",
                             value=extracted.get("numero",""))
@@ -560,7 +539,6 @@ def render(models, uid, api_key, models_url, is_admin):
                             partner_id=partner_id, ref=concepto_i.strip() or ref_i,
                             invoice_date=_fecha_i_iso or False,
                             invoice_date_due=_fecha_vto_iso or None,
-                            journal_id=_bill_journal_id or None,
                             filename=uf.name, file_bytes=file_bytes, mimetype=mimetype,
                             account_id=account_id_sel,
                             amount_neto=amount_i if amount_i else None,
