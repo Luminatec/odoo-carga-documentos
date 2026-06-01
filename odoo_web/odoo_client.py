@@ -144,8 +144,9 @@ def _file_hash(file_bytes: bytes) -> str:
 
 
 
-def check_duplicate_vendor_bill(models_url, uid, api_key, partner_id, document_number):
-    """Verifica si ya existe una factura de proveedor con ese número + proveedor en Odoo.
+def check_duplicate_vendor_bill(models_url, uid, api_key, partner_id, document_number,
+                                move_type='in_invoice'):
+    """Verifica si ya existe una factura/NC de proveedor con ese número + proveedor en Odoo.
     Retorna (True, move_name, move_id) si existe, (False, None, None) si no."""
     if not partner_id or not document_number:
         return False, None, None
@@ -153,7 +154,7 @@ def check_duplicate_vendor_bill(models_url, uid, api_key, partner_id, document_n
         m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
         rows = m.execute_kw(
             _cfg.ODOO_DB, uid, api_key, "account.move", "search_read",
-            [[("move_type", "=", "in_invoice"),
+            [[("move_type", "=", move_type),
               ("l10n_latam_document_number", "=", str(document_number).strip()),
               ("partner_id",                "=", partner_id),
               ("state",                     "!=", "cancel")]],
@@ -972,13 +973,14 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                        invoice_date_due=None, account_id=None, amount_neto=None,
                        currency_id=None, analytic_account_id=None, product_id=None,
                        l10n_latam_document_number=None, invoice_origin=None,
-                       extra_lines=None, clear_taxes=False, line_name=None):
+                       extra_lines=None, clear_taxes=False, line_name=None,
+                       move_type='in_invoice'):
     """
     extra_lines: lista de dicts con keys opcionales:
         name, quantity, price_unit, account_id, product_id
     Si se pasa, reemplaza la lógica de línea única (account_id/amount_neto).
     """
-    vals = {"move_type": "in_invoice"}
+    vals = {"move_type": move_type}
     if partner_id:       vals["partner_id"]   = partner_id
     if ref:              vals["ref"]          = ref
     if invoice_date:     vals["invoice_date"] = invoice_date

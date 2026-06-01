@@ -355,6 +355,13 @@ def render(models, uid, api_key, models_url, is_admin):
             with st.form(key=f"bill_form_{uf.name}"):
                 # CUIT ya está fuera del form para lookup en tiempo real
                 cuit_i = _cuit_raw
+                # ── Tipo de comprobante ───────────────────────────────────────
+                _is_nc = st.checkbox(
+                    "📋 Es una Nota de Crédito de proveedor",
+                    key=f"bill_is_nc_{uf.name}",
+                    help="Marcá si el documento es una NC. Se registrará como "
+                         "in_refund en Odoo y reducirá el saldo del proveedor.")
+                _move_type = "in_refund" if _is_nc else "in_invoice"
                 c1, c2 = st.columns(2)
                 ref_i   = c2.text_input("N° de factura",
                             value=extracted.get("numero",""))
@@ -434,10 +441,11 @@ def render(models, uid, api_key, models_url, is_admin):
                     help="Centro de costo (cuenta analítica) que absorbe el gasto. Opcional.",
                 )
 
-                _btn_label = "⬆️ Cargar en Odoo"
+                _btn_label = "📋 Cargar NC en Odoo" if _is_nc else "⬆️ Cargar en Odoo"
                 if _dup_exists:
                     _btn_label = "⚠️ Ya existe — Cargar igual"
-                go = st.form_submit_button(_btn_label, use_container_width=True)
+                go = st.form_submit_button(_btn_label, use_container_width=True,
+                                           type="secondary" if _is_nc else "primary")
 
             # Asiento estimado — visible siempre que haya montos
             _neto_f = extracted.get("neto","")
@@ -528,7 +536,8 @@ def render(models, uid, api_key, models_url, is_admin):
                         # ── Validar duplicado antes de crear ─────────────────────
                         _dup_bill, _dup_bill_name, _dup_bill_id = check_duplicate_vendor_bill(
                             models_url, uid, api_key,
-                            partner_id, _latam_num or ref_i)
+                            partner_id, _latam_num or ref_i,
+                            move_type=_move_type)
                         if _dup_bill:
                             _dup_url = odoo_url("account.move", _dup_bill_id) if _dup_bill_id else ""
                             st.error(
@@ -541,6 +550,7 @@ def render(models, uid, api_key, models_url, is_admin):
                             _fecha_vto_iso = parse_ar_date(fecha_vto_i) if fecha_vto_i else ""
                             move_id = create_vendor_bill(models, uid, api_key,
                             partner_id=partner_id, ref=concepto_i.strip() or ref_i,
+                            move_type=_move_type,
                             invoice_date=_fecha_i_iso or False,
                             invoice_date_due=_fecha_vto_iso or None,
                             filename=uf.name, file_bytes=file_bytes, mimetype=mimetype,
@@ -552,7 +562,8 @@ def render(models, uid, api_key, models_url, is_admin):
                             clear_taxes=exenta_i,
                             line_name=concepto_i.strip() or None)
                             url = odoo_url("account.move", move_id)
-                            st.toast("Factura creada en Odoo", icon="✅")
+                            _doc_lbl = "NC" if _move_type == "in_refund" else "Factura"
+                            st.toast(f"{_doc_lbl} creada en Odoo", icon="✅")
                             # Recordar la cuenta usada para este proveedor
                             if partner_id and account_id_sel:
                                 _used_lbl = next((l for a, l in _bill_accounts if a == account_id_sel), "")
@@ -572,7 +583,7 @@ def render(models, uid, api_key, models_url, is_admin):
                                 append_persistent_history({
                                     "fecha": str(_date_today.today()),
                                     "hora": _dt_now.now(_AR_TZ).strftime("%H:%M"),
-                                    "tipo": "Factura proveedor",
+                                    "tipo": "NC proveedor" if _move_type == "in_refund" else "Factura proveedor",
                                     "archivo": uf.name,
                                     "id": move_id,
                                     "url": url,
