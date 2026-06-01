@@ -7,6 +7,7 @@ import config as _cfg
 from user_prefs import load_prefs as _load_prefs
 from odoo_client import (
     create_sale_order,
+    search_registered_orders,
     odoo_url,
     safe_float,
     fmt_ars,
@@ -188,6 +189,11 @@ def render(models, uid, api_key, models_url, is_admin):
                 if _xl_cpt_name and _xl_cpt_name in _pt_opts_xl:
                     _xl_pt_def = list(_pt_opts_xl.keys()).index(_xl_cpt_name)
             _xl_pt_names = list(_pt_opts_xl.keys()) if _pt_opts_xl else ["(sin opciones)"]
+            # Fallback a preferencia si el cliente no tiene plazo configurado
+            if not _xl_cpt_name:
+                _pref_pt_xl = _load_prefs().get("plazo_pago_nombre", "")
+                if _pref_pt_xl and _pref_pt_xl in _xl_pt_names:
+                    _xl_pt_def = _xl_pt_names.index(_pref_pt_xl)
             _xl_pt_sel   = st.selectbox("Plazo de pago a usar",
                 options=_xl_pt_names, index=_xl_pt_def, key=f"xl_pt_{uf.name}",
                 help=f"Plazo cargado en Odoo para este cliente: {_xl_cpt_name or 'no configurado'}")
@@ -369,6 +375,24 @@ def render(models, uid, api_key, models_url, is_admin):
                 help="Quién refirió a este cliente",
             )
 
+            # ── Datos adicionales del pedido ──────────────────────────────────
+            _xl_oc_col1, _xl_oc_col2 = st.columns(2)
+            _xl_oc_num = _xl_oc_col1.text_input(
+                "N° de OC del cliente",
+                value=oc_fields_xl.get("numero_oc", ""),
+                key=f"xl_ocnum_{uf.name}",
+                placeholder="ej: OC-2026-001")
+            _xl_oc_fec = _xl_oc_col2.text_input(
+                "Fecha del pedido",
+                value=oc_fields_xl.get("fecha_iso", "") or oc_fields_xl.get("fecha", ""),
+                key=f"xl_ocfec_{uf.name}",
+                placeholder="AAAA-MM-DD")
+            _xl_nota = st.text_input(
+                "Nota interna (opcional)",
+                value="",
+                key=f"xl_nota_{uf.name}",
+                placeholder="Observaciones para el pedido en Odoo")
+
             _xl_btn_disabled = not bool(_xl_pid)
             if _xl_btn_disabled:
                 st.caption("🔒 Identificá el cliente para habilitar la creación del pedido.")
@@ -403,17 +427,24 @@ def render(models, uid, api_key, models_url, is_admin):
                             "cantidad":    _el.get("cantidad", 1),
                             "precio_unit": _el.get("precio_unit", 0),
                         } for _el in _xl_enriched]
+                        _xl_fec_iso = parse_ar_date(_xl_oc_fec) if _xl_oc_fec else None
+                        _xl_nota_final = (
+                            _xl_nota.strip() or
+                            (f"Importado desde {uf.name}" if not _xl_oc_num else f"OC {_xl_oc_num}")
+                        )
                         _xl_order_id = create_sale_order(
                             models, uid, api_key,
-                            partner_id      = _xl_pid,
-                            note            = f"Importado desde {uf.name}",
-                            lines           = _xl_order_lines,
-                            filename        = uf.name,
-                            file_bytes      = file_bytes,
-                            mimetype        = mimetype,
-                            payment_term_id = _xl_pt_id or None,
-                            ejecutivo_field = _xl_ejecutivo_field,
-                            ejecutivo_id    = _xl_ref_id,
+                            partner_id       = _xl_pid,
+                            note             = _xl_nota_final,
+                            lines            = _xl_order_lines,
+                            filename         = uf.name,
+                            file_bytes       = file_bytes,
+                            mimetype         = mimetype,
+                            payment_term_id  = _xl_pt_id or None,
+                            client_order_ref = _xl_oc_num or None,
+                            date_order       = _xl_fec_iso,
+                            ejecutivo_field  = _xl_ejecutivo_field,
+                            ejecutivo_id     = _xl_ref_id,
                         )
                         url = odoo_url("sale.order", _xl_order_id)
                         st.toast("Presupuesto creado en Odoo — pendiente de confirmación", icon="✅")
@@ -762,21 +793,21 @@ def render(models, uid, api_key, models_url, is_admin):
                 st.info(f"📅 Plazo del cliente en Odoo: **{_pt_name}**")
 
             # ── SECCIÓN 6: ASIENTO ESTIMADO ───────────────────────────────
-            st.markdown("##### 📒 Asiento estimado en Odoo")
-            _iva_rows_md = ""
-            if _show_iva105 > 0:
-                _iva_rows_md += f"| IVA Débito Fiscal 10,5% | | {fmt_ars(_show_iva105)} |\n"
-            if _show_iva21 > 0:
-                _iva_rows_md += f"| IVA Débito Fiscal 21% | | {fmt_ars(_show_iva21)} |"
-            elif _show_iva > 0 and not _iva_rows_md:
-                _iva_rows_md += f"| IVA Débito Fiscal | | {fmt_ars(_show_iva)} |"
-            st.markdown(
-                f"| Cuenta | Debe | Haber |\n"
-                f"|---|---|---|\n"
-                f"| Cuentas por Cobrar (Clientes) | {fmt_ars(_show_total)} | |\n"
-                f"| Ventas / Ingresos | | {fmt_ars(_show_neto)} |\n"
-                + _iva_rows_md
-            )
+            with st.expander("📒 Ver asiento estimado en Odoo", expanded=False):
+                _iva_rows_md = ""
+                if _show_iva105 > 0:
+                    _iva_rows_md += f"| IVA Débito Fiscal 10,5% | | {fmt_ars(_show_iva105)} |\n"
+                if _show_iva21 > 0:
+                    _iva_rows_md += f"| IVA Débito Fiscal 21% | | {fmt_ars(_show_iva21)} |"
+                elif _show_iva > 0 and not _iva_rows_md:
+                    _iva_rows_md += f"| IVA Débito Fiscal | | {fmt_ars(_show_iva)} |"
+                st.markdown(
+                    f"| Cuenta | Debe | Haber |\n"
+                    f"|---|---|---|\n"
+                    f"| Cuentas por Cobrar (Clientes) | {fmt_ars(_show_total)} | |\n"
+                    f"| Ventas / Ingresos | | {fmt_ars(_show_neto)} |\n"
+                    + _iva_rows_md
+                )
 
             # ── SECCIÓN 7: CREAR PEDIDO ───────────────────────────────────
             st.markdown("---")
@@ -825,7 +856,8 @@ def render(models, uid, api_key, models_url, is_admin):
                                 "precio_unit": _el.get("precio_unit", 0),
                             })
                         _ref_oc = _oc_num_i or oc_fields.get("numero_oc","")
-                        _fec_oc = _oc_fec_i or oc_fields.get("fecha_iso","") or None
+                        _fec_oc_raw = _oc_fec_i or oc_fields.get("fecha_iso","") or oc_fields.get("fecha","") or None
+                        _fec_oc = parse_ar_date(_fec_oc_raw) if _fec_oc_raw else None
                         if _oc_ref_sel != "— Sin referido —" and _oc_ref_sel in _oc_ref_map:
                             try:
                                 models.execute_kw(_cfg.ODOO_DB, uid, api_key,
@@ -869,6 +901,56 @@ def render(models, uid, api_key, models_url, is_admin):
                             "archivo":uf.name,"id":order_id,"url":url,"estado":"✅","hora":_dt_now.now(_AR_TZ).strftime("%H:%M")})
                     except Exception as _e:
                         show_odoo_error(_e, "crear pedido OC")
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # SECCIÓN: Consulta de pedidos ya registrados en Odoo
+    # ═══════════════════════════════════════════════════════════════════════
+    with st.expander("🔍 Consultar pedidos ya registrados en Odoo", expanded=False):
+        st.caption("Buscá pedidos confirmados en Odoo por cliente y/o rango de fechas.")
+        _so_c1, _so_c2, _so_c3 = st.columns([2, 1, 1])
+        _so_partner = _so_c1.text_input("Nombre del cliente (parcial)", key="srch_so_partner")
+        _so_from    = _so_c2.date_input("Desde", value=None, key="srch_so_from")
+        _so_to      = _so_c3.date_input("Hasta", value=None, key="srch_so_to")
+
+        if st.button("🔍 Buscar", key="srch_so_btn", type="primary"):
+            _so_pid = None
+            if _so_partner.strip():
+                with st.spinner("Buscando cliente..."):
+                    try:
+                        import xmlrpc.client as _xmlrpc_so
+                        _so_m = _xmlrpc_so.ServerProxy(models_url, allow_none=True)
+                        _so_res = _so_m.execute_kw(
+                            _cfg.ODOO_DB, uid, api_key,
+                            "res.partner", "search_read",
+                            [[("name", "ilike", _so_partner.strip())]],
+                            {"fields": ["id", "name"], "limit": 1})
+                        if _so_res:
+                            _so_pid = _so_res[0]["id"]
+                        else:
+                            st.warning(f"No se encontró cliente con nombre '{_so_partner}'.")
+                    except Exception as _soe:
+                        st.error(f"Error al buscar cliente: {_soe}")
+
+            with st.spinner("Consultando pedidos en Odoo..."):
+                _so_orders = search_registered_orders(
+                    models_url, uid, api_key,
+                    partner_id=_so_pid,
+                    date_from=_so_from,
+                    date_to=_so_to,
+                )
+
+            if not _so_orders:
+                st.info("No se encontraron pedidos con esos criterios.")
+            else:
+                import pandas as _pd_so
+                _so_df = _pd_so.DataFrame(_so_orders)
+                _so_df["total"] = _so_df["total"].apply(fmt_ars)
+                _so_df["url"]   = _so_df["url"].apply(lambda u: f"[Abrir]({u})" if u else "")
+                _so_disp = _so_df[["fecha","partner","name","oc_ref","total","estado","url"]].copy()
+                _so_disp.columns = ["Fecha","Cliente","Pedido","N° OC","Total","Estado","Link"]
+                st.dataframe(_so_disp, use_container_width=True, hide_index=True)
+                st.caption(f"{len(_so_orders)} pedido(s) encontrado(s).")
+
 
 
 # ═══════════════════════════════════════════════════

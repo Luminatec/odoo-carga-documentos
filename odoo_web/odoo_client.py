@@ -1953,6 +1953,49 @@ def get_customer_pending_credit_notes(models_url, uid, api_key, partner_ids_tupl
         return []
 
 @st.cache_data(ttl=60, show_spinner=False)
+
+def search_registered_orders(models_url, uid, api_key,
+                              partner_id=None, date_from=None, date_to=None,
+                              limit=50):
+    """Busca pedidos de venta ya registrados en Odoo.
+    Retorna lista de dicts con id, name, partner, fecha, total, estado, url."""
+    try:
+        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        domain = [("state", "not in", ["cancel"])]
+        if partner_id:
+            domain.append(("partner_id", "=", partner_id))
+        if date_from:
+            domain.append(("date_order", ">=", str(date_from)))
+        if date_to:
+            domain.append(("date_order", "<=", str(date_to) + " 23:59:59"))
+        records = m.execute_kw(
+            _cfg.ODOO_DB, uid, api_key,
+            "sale.order", "search_read",
+            [domain],
+            {"fields": ["id", "name", "partner_id", "date_order",
+                        "amount_total", "state", "client_order_ref"],
+             "order":  "date_order desc",
+             "limit":  limit})
+        result = []
+        for r in (records or []):
+            partner_name = r["partner_id"][1] if r.get("partner_id") else "—"
+            estado_map = {"draft": "Borrador", "sent": "Enviado",
+                          "sale": "Confirmado", "done": "Completado"}
+            result.append({
+                "id":      r["id"],
+                "name":    r.get("name") or f"Pedido #{r['id']}",
+                "partner": partner_name,
+                "fecha":   (r.get("date_order") or "—")[:10],
+                "total":   r.get("amount_total") or 0,
+                "estado":  estado_map.get(r.get("state"), r.get("state") or "—"),
+                "oc_ref":  r.get("client_order_ref") or "",
+                "url":     f"{_cfg.ODOO_URL}/odoo/sales/{r['id']}",
+            })
+        return result
+    except Exception as e:
+        _logger.error("search_registered_orders: %s", e)
+        return []
+
 def search_registered_payments(models_url, uid, api_key,
                                 partner_id=None, date_from=None, date_to=None,
                                 limit=50):

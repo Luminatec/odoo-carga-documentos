@@ -29,6 +29,7 @@ from odoo_client import (
     _AR_TZ,
     clean_str,
 )
+from user_prefs import load_prefs as _load_prefs_fac
 from parsers import extract_pdf_fields, parse_ar_date, extract_image_fields, extract_excel_oc_fields
 
 
@@ -123,7 +124,7 @@ def render(models, uid, api_key, models_url, is_admin):
                             partner_id = m2[0][0] if m2 else False
                         move_id = create_vendor_bill(models, uid, api_key,
                             partner_id=partner_id, ref=str(ref),
-                            invoice_date=str(fecha) if fecha else False,
+                            invoice_date=parse_ar_date(str(fecha)) if fecha else False,
                             filename=f"{uf.name}_fila{i+1}.pdf",
                             file_bytes=file_bytes, mimetype=mimetype)
                         ok += 1
@@ -314,9 +315,14 @@ def render(models, uid, api_key, models_url, is_admin):
                 # ── Selector de diario de compra ─────────────────────────────
                 _pj_list = get_purchase_journals(models_url, uid, api_key)
                 _pj_names = [n for _, n in _pj_list]
+                _fac_pref_jour = _load_prefs_fac().get("diario_facturas_nombre", "")
                 _pj_default = next(
                     (i for i, (_, n) in enumerate(_pj_list)
-                     if "proveedor" in n.lower()), 0)
+                     if n == _fac_pref_jour), None)
+                if _pj_default is None:
+                    _pj_default = next(
+                        (i for i, (_, n) in enumerate(_pj_list)
+                         if "proveedor" in n.lower()), 0)
                 _pj_sel = st.selectbox(
                     "Diario contable",
                     _pj_names,
