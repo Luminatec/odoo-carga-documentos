@@ -889,8 +889,20 @@ def get_purchase_journals(models_url, uid, api_key):
         rows = _pj_models.execute_kw(
             _cfg.ODOO_DB, uid, api_key, "account.journal", "search_read",
             [[("type", "=", "purchase")]],
-            {"fields": ["id", "name"], "order": "name asc", "limit": 50})
-        return [(r["id"], r["name"]) for r in rows]
+            {"fields": ["id", "name", "code", "company_id"], "order": "name asc", "limit": 50})
+        result = []
+        for r in rows:
+            label = r["name"]
+            code  = (r.get("code") or "").strip()
+            comp  = ((r.get("company_id") or [0, ""])[1] or "").strip()
+            if code:
+                label = f"{r['name']} [{code}]"
+                if comp:
+                    label += f" — {comp}"
+            elif comp:
+                label = f"{r['name']} — {comp}"
+            result.append((r["id"], label))
+        return result
     except Exception:
         return []
 
