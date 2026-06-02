@@ -255,6 +255,21 @@ def extract_pdf_fields(file_bytes):
             _p, _pd = _extract_percepciones_iibb(text)
             if _p: _ai_fields["percepcion_iibb"] = _p
             if _pd: _ai_fields["percepcion_iibb_detalle"] = _pd
+            # Completar número si la IA no lo extrajo
+            if not _ai_fields.get("numero"):
+                for _np in [
+                    r"Nro\.Comprobante[:\s]*(\d{4,5}-\d{6,8})",
+                    r"\b(\d{4,5}-\d{6,8})\b",
+                ]:
+                    _nm = re.search(_np, text, re.IGNORECASE)
+                    if _nm:
+                        _raw_n = _nm.group(1)
+                        _parts = _raw_n.split("-")
+                        if len(_parts) == 2:
+                            _ai_fields["numero"] = f"{_parts[0].zfill(5)}-{_parts[1].zfill(8)}"
+                        else:
+                            _ai_fields["numero"] = _raw_n
+                        break
             return _ai_fields, text
     except Exception:
         pass  # silencioso: caer al parser regex
@@ -284,12 +299,18 @@ def extract_pdf_fields(file_bytes):
             r"\b([A-Z]\d{4,5}-\d{6,8})\b",
             r"\b(\d{4,5}-\d{6,8})\b",
             # Patrón 6: requiere "Factura" o "Invoice" antes del N° para no capturar "CAE N°"
+            r"Nro\.Comprobante[:\s]*(\d{4,5}-\d{6,8})",
             r"(?:Factura|Invoice)\s*N[°º\.][:\s#]*([A-Z0-9\-]{5,20})",
         ]
         for pat in num_pats:
             m = re.search(pat, text, re.IGNORECASE)
             if m:
-                fields["numero"] = m.group(1).strip()
+                _raw_num = m.group(1).strip()
+                _np = _raw_num.split("-")
+                if len(_np) == 2 and _np[0].isdigit() and _np[1].isdigit():
+                    fields["numero"] = f"{_np[0].zfill(5)}-{_np[1].zfill(8)}"
+                else:
+                    fields["numero"] = _raw_num
                 break
 
     # Formato "Nº0004 - 00020659" (Nº + espacios alrededor del guión, sin prefijo letra)
