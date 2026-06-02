@@ -987,6 +987,7 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
     Si se pasa, reemplaza la lógica de línea única (account_id/amount_neto).
     """
     # Auto-seleccionar diario de compras si no se especificó
+    # La preferencia se pasa como journal_id desde facturas.py si está configurada
     if not journal_id:
         try:
             _jrnls = models.execute_kw(_cfg.ODOO_DB, uid, api_key,

@@ -377,6 +377,13 @@ def render(models, uid, api_key, models_url, is_admin):
                     f"[Ver factura existente]({_dup_url})"
                 )
 
+            # Resolver diario de facturas desde preferencia
+            _fac_jour_id = None
+            _fac_pref_jour = _load_prefs_fac().get("diario_facturas_nombre", "")
+            if _fac_pref_jour:
+                _all_purch_j = get_purchase_journals(models_url, uid, api_key)
+                _fac_jour_id = next((jid for jid, jn in _all_purch_j if jn == _fac_pref_jour), None)
+
             with st.form(key=f"bill_form_{uf.name}"):
                 # CUIT ya está fuera del form para lookup en tiempo real
                 cuit_i = _cuit_raw
@@ -617,11 +624,14 @@ def render(models, uid, api_key, models_url, is_admin):
                                         "tax_ids":    [],
                                     })
 
+                            # Solo agregar percepciones si hay línea principal
+                            _has_main_line = bool(account_id_sel or product_id_sel) and bool(amount_i)
                             move_id = create_vendor_bill(models, uid, api_key,
                             partner_id=partner_id, ref=concepto_i.strip() or ref_i,
                             move_type=_move_type,
                             invoice_date=_fecha_i_iso or False,
                             invoice_date_due=_fecha_vto_iso or None,
+                            journal_id=_fac_jour_id or None,
                             filename=uf.name, file_bytes=file_bytes, mimetype=mimetype,
                             account_id=account_id_sel,
                             amount_neto=amount_i if amount_i else None,
@@ -630,7 +640,7 @@ def render(models, uid, api_key, models_url, is_admin):
                             l10n_latam_document_number=_latam_num or None,
                             clear_taxes=exenta_i,
                             line_name=concepto_i.strip() or None,
-                            percepcion_lines=_perc_lines if _perc_lines else None)
+                            percepcion_lines=_perc_lines if (_perc_lines and _has_main_line) else None)
                             url = odoo_url("account.move", move_id)
                             _doc_lbl = "NC" if _move_type == "in_refund" else "Factura"
                             st.toast(f"{_doc_lbl} creada en Odoo", icon="✅")
