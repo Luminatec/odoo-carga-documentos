@@ -266,6 +266,51 @@ def extract_pdf_fields(file_bytes):
             fields["fecha"] = m.group(1)
             fields["fecha_iso"] = parse_ar_date(fields["fecha"])
 
+
+    # ── PERCEPCIONES IIBB (sumas de impuestos provinciales) ───────────────────
+    # Formato 1: línea resumen tipo Andreani
+    #   Subtotal  IIBB Percepción  Percepcion IVA  IVA Inscripto  Descuento  Anticipo  Total
+    #   12.779,45  1.150,14  0,00  2.683,68  0,00  0,00  16.613,27
+    _percep_total = 0.0
+    _percep_match = re.search(
+        r"Subtotal\s+IIBB\s+Percepci[oó]n.*?\n"
+        r"\s*([\d.,]+)\s+([\d.,]+)\s+[\d.,]+\s+([\d.,]+)",
+        text, re.IGNORECASE | re.DOTALL)
+    if _percep_match:
+        _percep_total = _parse_num(_percep_match.group(2))
+        # Si no capturamos bien el neto o IVA, completar
+        if not fields["importe_neto"] and _percep_match.group(1):
+            fields["importe_neto"] = _parse_num(_percep_match.group(1))
+        if not fields["iva_21"] and _percep_match.group(3):
+            fields["iva_21"] = _parse_num(_percep_match.group(3))
+
+    # Formato 2: sumar filas del detalle percepción IIBB
+    #   12.779,45  Per. IIBB CABA  5,00  638,97
+    if not _percep_total:
+        for _pm in re.finditer(
+                r"(?:Per\.?\s*IIBB|Percepci[oó]n\s+IIBB)[^\n]*?([\d.,]+)\s*$",
+                text, re.IGNORECASE | re.MULTILINE):
+            _percep_total += _parse_num(_pm.group(1))
+
+    # Formato 3: línea "Subtotal IIBB" → segundo número
+    if not _percep_total:
+        _m = re.search(r"IIBB\s+Percepci[oó]n[:\s]+([\d.,]+)", text, re.IGNORECASE)
+        if _m:
+            _percep_total = _parse_num(_m.group(1))
+
+    if _percep_total:
+        fields["percepcion_iibb"] = _percep_total
+        # Si el total registrado no incluye percepciones, ajustarlo
+        if fields.get("importe_total") and fields.get("importe_neto"):
+            _calc = (fields.get("importe_neto",0) or 0) +                     (fields.get("iva_21",0) or 0) +                     (fields.get("iva_105",0) or 0) + _percep_total
+            _stored_total = fields.get("importe_total",0) or 0
+            # Si el total calculado con percepciones coincide mejor con el total extraído
+            if _stored_total and abs(_calc - _stored_total) < abs(
+                (fields.get("importe_neto",0) or 0) +
+                (fields.get("iva_21",0) or 0) - _stored_total
+            ):
+                fields["percepcion_iibb_validated"] = True
+
     # ── CONDICIONES DE VENTA ──────────────────────────────────────────────
     cond_pats = [
         r"(?:Condici[oó]n(?:es)?\s+de\s+Venta|Cond\.?\s*Vta\.?)[:\s]+([^\n]{3,80})",
