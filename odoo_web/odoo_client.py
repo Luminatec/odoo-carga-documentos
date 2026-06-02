@@ -152,15 +152,20 @@ def check_duplicate_vendor_bill(models_url, uid, api_key, partner_id, document_n
         return False, None, None
     try:
         m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        _doc_search = str(document_number).strip()
         rows = m.execute_kw(
             _cfg.ODOO_DB, uid, api_key, "account.move", "search_read",
             [[("move_type", "=", move_type),
-              ("l10n_latam_document_number", "=", str(document_number).strip()),
+              ("l10n_latam_document_number", "=", _doc_search),
               ("partner_id",                "=", partner_id),
               ("state",                     "!=", "cancel")]],
-            {"fields": ["id", "name"], "limit": 1})
-        if rows:
-            return True, rows[0]["name"], rows[0]["id"]
+            {"fields": ["id", "name", "l10n_latam_document_number"], "limit": 5})
+        for row in rows:
+            # Verificar del lado Python: Odoo puede ignorar el filtro
+            # sobre campos computados en algunas versiones
+            found_doc = (row.get("l10n_latam_document_number") or "").strip()
+            if found_doc == _doc_search:
+                return True, row["name"], row["id"]
         return False, None, None
     except Exception:
         return False, None, None
