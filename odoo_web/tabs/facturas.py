@@ -7,6 +7,7 @@ from datetime import datetime as _dt_now
 import config as _cfg
 from odoo_client import (
     check_duplicate_vendor_bill,
+    get_purchase_journals,
     search_partners,
     get_all_accounts,
     get_partner_default_account,
