@@ -1054,24 +1054,57 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
             line_vals["tax_ids"] = [(5, 0, 0)]   # limpiar impuestos (factura exenta)
         vals["invoice_line_ids"] = [(0, 0, line_vals)]
 
-    # Agregar líneas de percepción IIBB si las hay
+    # Agregar percepciones IIBB: primero intenta como impuestos (tax_ids), fallback a líneas
     if percepcion_lines:
-        _extra_perc = []
+        # Buscar taxes de percepción IIBB en Odoo
+        _perc_taxes = []
+        try:
+            _all_taxes = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                "account.tax", "search_read",
+                [[("type_tax_use", "=", "purchase"),
+                  ("name", "ilike", "percep"),
+                  ("active", "=", True)]],
+                {"fields": ["id", "name"], "limit": 50})
+        except Exception:
+            _all_taxes = []
+
         for _pl in percepcion_lines:
-            _perc_lv = {
-                "name":       f"Percepción IIBB {_pl.get('provincia','')}".strip(),
-                "price_unit": float(_pl.get("importe", 0)),
-                "quantity":   1,
-            }
-            if _pl.get("account_id"):
-                _perc_lv["account_id"] = _pl["account_id"]
-            if _pl.get("tax_ids") is not None:
-                _perc_lv["tax_ids"] = []  # sin IVA en percepciones
-            if analytic_account_id:
-                _perc_lv["analytic_distribution"] = {str(analytic_account_id): 100}
-            _extra_perc.append((0, 0, _perc_lv))
-        existing = vals.get("invoice_line_ids", [])
-        vals["invoice_line_ids"] = existing + _extra_perc
+            _prov = (_pl.get("provincia") or "").lower()
+            # Buscar tax que coincida con la provincia
+            _tax = next((t for t in _all_taxes
+                         if any(kw in t["name"].lower()
+                                for kw in _prov.split() if len(kw) >= 4)), None)
+            if _tax:
+                _perc_taxes.append(_tax["id"])
+
+        if _perc_taxes and vals.get("invoice_line_ids"):
+            # Adjuntar como tax_ids a la primera línea de la factura
+            first_line = vals["invoice_line_ids"][0]
+            if first_line[0] == 0:  # (0, 0, vals_dict)
+                existing_taxes = first_line[2].get("tax_ids") or []
+                if existing_taxes and existing_taxes[0][0] == 5:
+                    # [(5,0,0)] = clear, keep it
+                    pass
+                else:
+                    first_line[2]["tax_ids"] = (
+                        existing_taxes + [(4, tid, 0) for tid in _perc_taxes])
+        else:
+            # Fallback: crear como líneas separadas
+            _extra_perc = []
+            for _pl in percepcion_lines:
+                _perc_lv = {
+                    "name":       f"Percepción IIBB {_pl.get('provincia','')}".strip(),
+                    "price_unit": float(_pl.get("importe", 0)),
+                    "quantity":   1,
+                    "tax_ids":    [],
+                }
+                if _pl.get("account_id"):
+                    _perc_lv["account_id"] = _pl["account_id"]
+                if analytic_account_id:
+                    _perc_lv["analytic_distribution"] = {str(analytic_account_id): 100}
+                _extra_perc.append((0, 0, _perc_lv))
+            existing = vals.get("invoice_line_ids", [])
+            vals["invoice_line_ids"] = existing + _extra_perc
 
     try:
         move_id = call(models, uid, api_key, "account.move", "create", [vals])

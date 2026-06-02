@@ -236,6 +236,15 @@ def extract_pdf_fields(file_bytes):
         _p, _pd = _extract_percepciones_iibb(_raw)
         if _p: _bot["percepcion_iibb"] = _p
         if _pd: _bot["percepcion_iibb_detalle"] = _pd
+        # Normalizar número si falta o tiene formato incorrecto
+        _bn = str(_bot.get("numero") or "").strip()
+        if not re.match(r"^\d{4,5}-\d{6,8}$", _bn):
+            for _bnp in [r"Nro\.Comprobante[:\s]*(\d{4,5}-\d{6,8})", r"\b(\d{4,5}-\d{6,8})\b"]:
+                _bnm = re.search(_bnp, _raw, re.IGNORECASE)
+                if _bnm:
+                    _bparts = _bnm.group(1).split("-")
+                    _bot["numero"] = f"{_bparts[0].zfill(5)}-{_bparts[1].zfill(8)}" if len(_bparts)==2 else _bnm.group(1)
+                    break
         return _bot, _raw
 
     try:
@@ -255,8 +264,10 @@ def extract_pdf_fields(file_bytes):
             _p, _pd = _extract_percepciones_iibb(text)
             if _p: _ai_fields["percepcion_iibb"] = _p
             if _pd: _ai_fields["percepcion_iibb_detalle"] = _pd
-            # Completar número si la IA no lo extrajo
-            if not _ai_fields.get("numero"):
+            # Normalizar número: si la IA no lo extrajo o no tiene formato XXXXX-XXXXXXXX
+            _ai_num = str(_ai_fields.get("numero") or "").strip()
+            _ai_num_ok = bool(re.match(r"^\d{4,5}-\d{6,8}$", _ai_num))
+            if not _ai_num_ok:
                 for _np in [
                     r"Nro\.Comprobante[:\s]*(\d{4,5}-\d{6,8})",
                     r"\b(\d{4,5}-\d{6,8})\b",

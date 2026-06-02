@@ -29,8 +29,9 @@ from odoo_client import (
     _AR_TZ,
     clean_str,
 )
-from user_prefs import (load_prefs as _load_prefs_fac, load_vendor_account_pref,
-                         save_vendor_account_pref, append_persistent_history)
+from user_prefs import (load_prefs as _load_prefs_fac, save_prefs as _save_prefs_fac,
+                         load_vendor_account_pref, save_vendor_account_pref,
+                         append_persistent_history)
 from parsers import (extract_pdf_fields, parse_ar_date, extract_image_fields,
                      extract_excel_oc_fields, extract_afip_xml_fields,
                      extract_afip_qr_from_pdf_text)
@@ -644,6 +645,19 @@ def render(models, uid, api_key, models_url, is_admin):
                             url = odoo_url("account.move", move_id)
                             _doc_lbl = "NC" if _move_type == "in_refund" else "Factura"
                             st.toast(f"{_doc_lbl} creada en Odoo", icon="✅")
+                            # Aprender el diario usado para futuras cargas
+                            try:
+                                _inv_data = models.execute_kw(
+                                    _cfg.ODOO_DB, uid, api_key,
+                                    "account.move", "read",
+                                    [[move_id]], {"fields": ["journal_id"]})
+                                if _inv_data and _inv_data[0].get("journal_id"):
+                                    _jname_used = _inv_data[0]["journal_id"][1]
+                                    _cur_pref = _load_prefs_fac()
+                                    if _cur_pref.get("diario_facturas_nombre") != _jname_used:
+                                        _save_prefs_fac({**_cur_pref, "diario_facturas_nombre": _jname_used})
+                            except Exception:
+                                pass
                             # Recordar la cuenta usada para este proveedor
                             if partner_id and account_id_sel:
                                 _used_lbl = next((l for a, l in _bill_accounts if a == account_id_sel), "")
