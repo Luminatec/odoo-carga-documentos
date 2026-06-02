@@ -87,8 +87,7 @@ def render(models, uid, api_key, models_url, is_admin):
             st.warning(
                 f"⚠️ **{uf.name}** ya fue procesado en esta sesión "
                 f"({_dup_entry.get('hora','?')} · {_dup_entry.get('resultado','')}). "
-                "Subiste el mismo archivo dos veces.")
-            continue
+                "Podés continuar igual si borraste el anterior en Odoo.")
         if ext in ("xlsx", "xls"):
             # ── Detección temprana: ¿es un Excel de pedido de cliente? ───────
             _oc_check = extract_excel_oc_fields(file_bytes)
