@@ -986,28 +986,8 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
         name, quantity, price_unit, account_id, product_id
     Si se pasa, reemplaza la lógica de línea única (account_id/amount_neto).
     """
-    # Auto-seleccionar diario de compras si no se especificó
-    # La preferencia se pasa como journal_id desde facturas.py si está configurada
-    if not journal_id:
-        try:
-            _jrnls = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                "account.journal", "search_read",
-                [[("type", "=", "purchase")]],
-                {"fields": ["id", "name"], "order": "name asc", "limit": 20})
-            def _jname(j): return j["name"].lower()
-            # Prioridad: factura+proveedor (sin importa) > proveedor (sin importa) > cualquier compra
-            _pref = (
-                next((j["id"] for j in _jrnls
-                      if "factura" in _jname(j) and "proveedor" in _jname(j)
-                      and "importa" not in _jname(j)), None)
-                or next((j["id"] for j in _jrnls
-                         if "proveedor" in _jname(j) and "importa" not in _jname(j)), None)
-                or next((j["id"] for j in _jrnls), None)
-            )
-            if _pref:
-                journal_id = _pref
-        except Exception:
-            pass
+    # journal_id se pasa solo si hay preferencia guardada (user_prefs diario_facturas_nombre)
+    # Si es None, Odoo elige su diario de compras por defecto
 
     vals = {"move_type": move_type}
     if partner_id:       vals["partner_id"]   = partner_id
