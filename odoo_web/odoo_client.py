@@ -993,8 +993,16 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                 "account.journal", "search_read",
                 [[("type", "=", "purchase")]],
                 {"fields": ["id", "name"], "order": "name asc", "limit": 20})
-            _pref = next((j["id"] for j in _jrnls
-                          if "proveedor" in j["name"].lower()), None)
+            def _jname(j): return j["name"].lower()
+            # Prioridad: factura+proveedor (sin importa) > proveedor (sin importa) > cualquier compra
+            _pref = (
+                next((j["id"] for j in _jrnls
+                      if "factura" in _jname(j) and "proveedor" in _jname(j)
+                      and "importa" not in _jname(j)), None)
+                or next((j["id"] for j in _jrnls
+                         if "proveedor" in _jname(j) and "importa" not in _jname(j)), None)
+                or next((j["id"] for j in _jrnls), None)
+            )
             if _pref:
                 journal_id = _pref
         except Exception:
