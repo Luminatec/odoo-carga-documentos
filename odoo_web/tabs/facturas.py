@@ -459,22 +459,26 @@ def render(models, uid, api_key, models_url, is_admin):
                 _cuenta_disp = (cuenta_sel if (cuenta_sel and cuenta_sel != "— Sin cuenta —")
                                 else "*(cuenta de gasto — seleccioná arriba)*")
                 st.markdown("**📒 Asiento estimado en Odoo:**")
-                _percep_f = float(extracted.get("percepcion_iibb", 0) or 0)
-                _percep_row = (
-                    f"| Percepciones IIBB | {fmt_ars(_percep_f)} | |\n"
-                    if _percep_f > 0 else ""
-                )
+                _percep_f  = float(extracted.get("percepcion_iibb", 0) or 0)
+                _percep_det = extracted.get("percepcion_iibb_detalle", [])
                 if _percep_f > 0:
                     st.info(
                         f"📋 Esta factura incluye **Percepciones IIBB** por "
                         f"**ARS {fmt_ars(_percep_f)}** — "
-                        f"registralas como líneas adicionales en Odoo o en una cuenta de percepción.")
+                        "registralas como líneas adicionales en Odoo.")
+                # Filas de percepciones desglosadas por provincia
+                _percep_rows = ""
+                if _percep_det:
+                    for _pd in _percep_det:
+                        _percep_rows += f"| Percepción IIBB {_pd['provincia']} | {fmt_ars(_pd['importe'])} | |\n"
+                elif _percep_f > 0:
+                    _percep_rows = f"| Percepciones IIBB | {fmt_ars(_percep_f)} | |\n"
                 st.markdown(
                     f"| Cuenta | Debe | Haber |\n"
                     f"|---|---|---|\n"
                     f"| {_cuenta_disp} | {fmt_ars(_neto_f)} | |\n"
                     f"| IVA Crédito Fiscal (si aplica) | {fmt_ars(_iva_f)} | |\n"
-                    + _percep_row +
+                    + _percep_rows +
                     f"| Proveedor (por pagar) | | {fmt_ars(_tot_f)} |"
                 )
 

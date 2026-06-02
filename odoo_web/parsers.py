@@ -175,28 +175,46 @@ def _bot_extract(file_bytes: bytes, filename: str, mime_type: str, doc_type: str
 
 
 def _extract_percepciones_iibb(text):
-    """Extrae total percepciones IIBB. Soporta formato Andreani y similares."""
+    """Extrae percepciones IIBB con detalle por provincia.
+    Retorna (total_float, [{"provincia": str, "importe": float}, ...]).
+    """
     try:
         import re as _re
         from odoo_client import normalize_amount as _norm
         def _pn(s):
             try: return float(_norm(str(s)))
             except Exception: return 0.0
+
+        detalle = []
+
+        # Formato 1: filas "base  Per. IIBB PROVINCIA  tasa  importe"
+        for m2 in _re.finditer(
+                "[\d.,]+\s+Per\.?\s*IIBB\s+([A-Za-z\s]+?)\s+[\d.,]+\s+([\d.,]+)\s*$",
+                text, _re.IGNORECASE | _re.MULTILINE):
+            prov = m2.group(1).strip()
+            imp  = _pn(m2.group(2))
+            if imp > 0:
+                detalle.append({"provincia": prov, "importe": imp})
+
+        if detalle:
+            return sum(d["importe"] for d in detalle), detalle
+
+        # Formato 2: resumen Andreani (solo total)
         _p1 = "Subtotal[^\n]*IIBB[^\n]*\n\s*([\d.,]+)\s+([\d.,]+)\s+[\d.,]+\s+([\d.,]+)"
         m1 = _re.search(_p1, text, _re.IGNORECASE)
         if m1:
-            return _pn(m1.group(2))
-        total = 0.0
-        for m2 in _re.finditer("Per\.?\s*IIBB\s+\S+\s+[\d.,]+\s+([\d.,]+)", text, _re.IGNORECASE):
-            total += _pn(m2.group(1))
-        if total:
-            return total
+            total = _pn(m1.group(2))
+            return total, [{"provincia": "IIBB", "importe": total}]
+
+        # Formato 3: etiqueta
         m3 = _re.search("Percepci[^\n]*IIBB[\s:]+([\d.,]+)", text, _re.IGNORECASE)
         if m3:
-            return _pn(m3.group(1))
+            total = _pn(m3.group(1))
+            return total, [{"provincia": "IIBB", "importe": total}]
+
     except Exception:
         pass
-    return 0.0
+    return 0.0, []
 
 
 def extract_pdf_fields(file_bytes):
@@ -215,8 +233,9 @@ def extract_pdf_fields(file_bytes):
                 _raw = "\n".join(p.extract_text() or "" for p in _pdf.pages)
         except Exception:
             _raw = ""
-        _p = _extract_percepciones_iibb(_raw)
+        _p, _pd = _extract_percepciones_iibb(_raw)
         if _p: _bot["percepcion_iibb"] = _p
+        if _pd: _bot["percepcion_iibb_detalle"] = _pd
         return _bot, _raw
 
     try:
@@ -233,8 +252,9 @@ def extract_pdf_fields(file_bytes):
         _ai_fields = _ai_extract_invoice_fields(text)
         # Considerar exitoso si al menos tiene proveedor o número
         if _ai_fields.get("proveedor") or _ai_fields.get("numero"):
-            _p = _extract_percepciones_iibb(text)
+            _p, _pd = _extract_percepciones_iibb(text)
             if _p: _ai_fields["percepcion_iibb"] = _p
+            if _pd: _ai_fields["percepcion_iibb_detalle"] = _pd
             return _ai_fields, text
     except Exception:
         pass  # silencioso: caer al parser regex
@@ -318,6 +338,9 @@ def extract_pdf_fields(file_bytes):
 
     if _percep_total:
         fields["percepcion_iibb"] = _percep_total
+        # detalle ya disponible si llegamos por regex
+        _pdet = [{"provincia": "IIBB", "importe": _percep_total}]
+        fields["percepcion_iibb_detalle"] = _pdet
 
     # ── CONDICIONES DE VENTA ──────────────────────────────────────────────
     cond_pats = [
