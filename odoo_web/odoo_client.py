@@ -158,7 +158,7 @@ def check_duplicate_vendor_bill(models_url, uid, api_key, partner_id, document_n
             [[("move_type", "=", move_type),
               ("l10n_latam_document_number", "=", _doc_search),
               ("partner_id",                "=", partner_id),
-              ("state",                     "!=", "cancel")]],
+              ("state",                     "=", "posted")]],
             {"fields": ["id", "name", "l10n_latam_document_number"], "limit": 5})
         for row in rows:
             # Verificar del lado Python: Odoo puede ignorar el filtro
