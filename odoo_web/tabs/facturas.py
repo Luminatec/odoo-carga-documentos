@@ -84,10 +84,36 @@ def render(models, uid, api_key, models_url, is_admin):
         # ── Detección de duplicados ───────────────────────────────────
         _is_dup, _dup_entry = check_duplicate_file(file_bytes, uf.name)
         if _is_dup:
-            st.warning(
-                f"⚠️ **{uf.name}** ya fue procesado en esta sesión "
-                f"({_dup_entry.get('hora','?')} · {_dup_entry.get('resultado','')}). "
-                "Podés continuar igual si borraste el anterior en Odoo.")
+            # Verificar que el registro aún existe en Odoo antes de bloquear
+            _dup_res = _dup_entry.get("resultado", "")
+            _dup_odoo_id = None
+            import re as _re_dup
+            _m_id = _re_dup.search(r"\bID\s+(\d+)", _dup_res)
+            if _m_id:
+                _dup_odoo_id = int(_m_id.group(1))
+            _odoo_still_exists = False
+            if _dup_odoo_id:
+                try:
+                    _chk = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                        "account.move", "search_read",
+                        [[("id", "=", _dup_odoo_id), ("state", "!=", "cancel")]],
+                        {"fields": ["id", "name"], "limit": 1})
+                    _odoo_still_exists = bool(_chk)
+                except Exception:
+                    pass
+            if _odoo_still_exists:
+                _existing_name = _chk[0]["name"] if _chk else _dup_res
+                _existing_url  = odoo_url("account.move", _dup_odoo_id)
+                st.error(
+                    f"❌ **{uf.name}** ya fue procesado en esta sesión "
+                    f"({_dup_entry.get('hora','?')}) y existe en Odoo como "
+                    f"**{_existing_name}**. [Ver en Odoo]({_existing_url})")
+                continue
+            else:
+                st.warning(
+                    f"⚠️ **{uf.name}** fue procesado antes en esta sesión "
+                    f"({_dup_entry.get('hora','?')}) pero el registro fue eliminado de Odoo. "
+                    "Podés cargarlo de nuevo.")
         if ext in ("xlsx", "xls"):
             # ── Detección temprana: ¿es un Excel de pedido de cliente? ───────
             _oc_check = extract_excel_oc_fields(file_bytes)
