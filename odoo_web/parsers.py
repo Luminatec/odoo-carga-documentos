@@ -174,6 +174,31 @@ def _bot_extract(file_bytes: bytes, filename: str, mime_type: str, doc_type: str
         return {}
 
 
+def _extract_percepciones_iibb(text):
+    """Extrae total percepciones IIBB. Soporta formato Andreani y similares."""
+    try:
+        import re as _re
+        from odoo_client import normalize_amount as _norm
+        def _pn(s):
+            try: return float(_norm(str(s)))
+            except Exception: return 0.0
+        _p1 = "Subtotal[^\n]*IIBB[^\n]*\n\s*([\d.,]+)\s+([\d.,]+)\s+[\d.,]+\s+([\d.,]+)"
+        m1 = _re.search(_p1, text, _re.IGNORECASE)
+        if m1:
+            return _pn(m1.group(2))
+        total = 0.0
+        for m2 in _re.finditer("Per\.?\s*IIBB\s+\S+\s+[\d.,]+\s+([\d.,]+)", text, _re.IGNORECASE):
+            total += _pn(m2.group(1))
+        if total:
+            return total
+        m3 = _re.search("Percepci[^\n]*IIBB[\s:]+([\d.,]+)", text, _re.IGNORECASE)
+        if m3:
+            return _pn(m3.group(1))
+    except Exception:
+        pass
+    return 0.0
+
+
 def extract_pdf_fields(file_bytes):
     """
     Parser para facturas electrónicas argentinas.
@@ -190,6 +215,8 @@ def extract_pdf_fields(file_bytes):
                 _raw = "\n".join(p.extract_text() or "" for p in _pdf.pages)
         except Exception:
             _raw = ""
+        _p = _extract_percepciones_iibb(_raw)
+        if _p: _bot["percepcion_iibb"] = _p
         return _bot, _raw
 
     try:
@@ -206,6 +233,8 @@ def extract_pdf_fields(file_bytes):
         _ai_fields = _ai_extract_invoice_fields(text)
         # Considerar exitoso si al menos tiene proveedor o número
         if _ai_fields.get("proveedor") or _ai_fields.get("numero"):
+            _p = _extract_percepciones_iibb(text)
+            if _p: _ai_fields["percepcion_iibb"] = _p
             return _ai_fields, text
     except Exception:
         pass  # silencioso: caer al parser regex
