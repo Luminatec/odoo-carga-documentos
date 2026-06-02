@@ -563,6 +563,35 @@ def render(models, uid, api_key, models_url, is_admin):
                             # Normalizar fechas: acepta DD/MM/YYYY, DD/M/YYYY o YYYY-MM-DD
                             _fecha_i_iso   = parse_ar_date(fecha_i)   if fecha_i   else ""
                             _fecha_vto_iso = parse_ar_date(fecha_vto_i) if fecha_vto_i else ""
+                            # ── Resolver cuentas de percepción por provincia ──────────
+                            _perc_lines = []
+                            if _percep_det:
+                                _all_accts_perc = get_all_accounts(models_url, uid, api_key)
+                                for _pd in _percep_det:
+                                    _prov_low = (_pd.get("provincia") or "").lower()
+                                    # Buscar cuenta que contenga "percep" + nombre de provincia
+                                    _pac = next((
+                                        aid for aid, albl in _all_accts_perc
+                                        if "percep" in albl.lower()
+                                        and any(kw in albl.lower() for kw in _prov_low.split()
+                                                if len(kw) >= 4)
+                                        and "(copia)" not in albl.lower()
+                                    ), None)
+                                    if not _pac:
+                                        # Fallback: cualquier cuenta de percepción
+                                        _pac = next((
+                                            aid for aid, albl in _all_accts_perc
+                                            if "percep" in albl.lower()
+                                            and "iibb" in albl.lower()
+                                            and "(copia)" not in albl.lower()
+                                        ), None)
+                                    _perc_lines.append({
+                                        "provincia":  _pd.get("provincia", ""),
+                                        "importe":    _pd.get("importe", 0),
+                                        "account_id": _pac,
+                                        "tax_ids":    [],
+                                    })
+
                             move_id = create_vendor_bill(models, uid, api_key,
                             partner_id=partner_id, ref=concepto_i.strip() or ref_i,
                             move_type=_move_type,
@@ -575,7 +604,8 @@ def render(models, uid, api_key, models_url, is_admin):
                             product_id=product_id_sel,
                             l10n_latam_document_number=_latam_num or None,
                             clear_taxes=exenta_i,
-                            line_name=concepto_i.strip() or None)
+                            line_name=concepto_i.strip() or None,
+                            percepcion_lines=_perc_lines if _perc_lines else None)
                             url = odoo_url("account.move", move_id)
                             _doc_lbl = "NC" if _move_type == "in_refund" else "Factura"
                             st.toast(f"{_doc_lbl} creada en Odoo", icon="✅")

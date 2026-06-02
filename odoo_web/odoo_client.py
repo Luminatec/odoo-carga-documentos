@@ -979,12 +979,27 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                        currency_id=None, analytic_account_id=None, product_id=None,
                        l10n_latam_document_number=None, invoice_origin=None,
                        extra_lines=None, clear_taxes=False, line_name=None,
-                       move_type='in_invoice'):
+                       move_type='in_invoice',
+                       percepcion_lines=None):
     """
     extra_lines: lista de dicts con keys opcionales:
         name, quantity, price_unit, account_id, product_id
     Si se pasa, reemplaza la lógica de línea única (account_id/amount_neto).
     """
+    # Auto-seleccionar diario de compras si no se especificó
+    if not journal_id:
+        try:
+            _jrnls = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                "account.journal", "search_read",
+                [[("type", "=", "purchase")]],
+                {"fields": ["id", "name"], "order": "name asc", "limit": 20})
+            _pref = next((j["id"] for j in _jrnls
+                          if "proveedor" in j["name"].lower()), None)
+            if _pref:
+                journal_id = _pref
+        except Exception:
+            pass
+
     vals = {"move_type": move_type}
     if partner_id:       vals["partner_id"]   = partner_id
     if ref:              vals["ref"]          = ref
@@ -1029,6 +1044,25 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
         if clear_taxes:
             line_vals["tax_ids"] = [(5, 0, 0)]   # limpiar impuestos (factura exenta)
         vals["invoice_line_ids"] = [(0, 0, line_vals)]
+
+    # Agregar líneas de percepción IIBB si las hay
+    if percepcion_lines:
+        _extra_perc = []
+        for _pl in percepcion_lines:
+            _perc_lv = {
+                "name":       f"Percepción IIBB {_pl.get('provincia','')}".strip(),
+                "price_unit": float(_pl.get("importe", 0)),
+                "quantity":   1,
+            }
+            if _pl.get("account_id"):
+                _perc_lv["account_id"] = _pl["account_id"]
+            if _pl.get("tax_ids") is not None:
+                _perc_lv["tax_ids"] = []  # sin IVA en percepciones
+            if analytic_account_id:
+                _perc_lv["analytic_distribution"] = {str(analytic_account_id): 100}
+            _extra_perc.append((0, 0, _perc_lv))
+        existing = vals.get("invoice_line_ids", [])
+        vals["invoice_line_ids"] = existing + _extra_perc
 
     try:
         move_id = call(models, uid, api_key, "account.move", "create", [vals])
