@@ -1042,44 +1042,90 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
     except OdooError as e:
         raise OdooError(f"No se pudo crear la factura '{ref}': {e}") from e
 
-    # Agregar percepciones IIBB directamente en los apuntes contables
-    # exclude_from_invoice_tab=True → aparecen en Apuntes pero NO en Líneas de factura
+    # Agregar percepciones IIBB como TAX lines (único modo de excluirlas del tab Líneas)
+    # Flujo: 1) encontrar tax IDs via repartition por cuenta
+    #        2) agregar taxes a la línea principal via write()
+    #        3) encontrar las tax lines creadas por Odoo y sobreescribir importes con PDF
     if percepcion_lines and move_id:
         try:
-            _perc_total = 0.0
+            # 1. Encontrar tax ID por cuenta contable (repartition)
+            _perc_map = {}  # account_id → {importe, tax_id}
             for _pl in percepcion_lines:
+                _aid = _pl.get("account_id")
                 _amt = float(_pl.get("importe", 0))
-                if not _pl.get("account_id") or _amt <= 0:
+                if not _aid or _amt <= 0:
                     continue
-                models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                    "account.move.line", "create", [{
-                        "move_id":                  move_id,
-                        "account_id":               _pl["account_id"],
-                        "name":                     f"Percepción IIBB {_pl.get('provincia','')}".strip(),
-                        "debit":                    _amt,
-                        "credit":                   0.0,
-                        "amount_currency":          _amt,
-                        "exclude_from_invoice_tab": True,
-                    }])
-                _perc_total += _amt
-            # Actualizar la línea de Proveedores para que el asiento balancee
-            if _perc_total > 0:
+                _reps = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                    "account.tax.repartition.line", "search_read",
+                    [[("account_id", "=", _aid), ("repartition_type", "=", "tax")]],
+                    {"fields": ["tax_id"], "limit": 5})
+                _tid = None
+                for _r in _reps:
+                    _candidate = (_r["tax_id"][0]
+                                  if isinstance(_r["tax_id"], (list, tuple))
+                                  else _r["tax_id"])
+                    if _candidate:
+                        _tid = _candidate
+                        break
+                _perc_map[_aid] = {"importe": _amt, "tax_id": _tid,
+                                   "provincia": _pl.get("provincia", "")}
+
+            # 2. Agregar los taxes encontrados a la línea principal
+            _tax_ids_to_add = list({v["tax_id"] for v in _perc_map.values() if v["tax_id"]})
+            if _tax_ids_to_add:
+                _prod_line = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                    "account.move.line", "search_read",
+                    [[("move_id", "=", move_id), ("product_id", "!=", False)]],
+                    {"fields": ["id", "tax_ids"], "limit": 1})
+                if _prod_line:
+                    _lid = _prod_line[0]["id"]
+                    _cur_taxes = list(_prod_line[0].get("tax_ids") or [])
+                    _all_taxes = list(set(_cur_taxes + _tax_ids_to_add))
+                    models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                        "account.move.line", "write",
+                        [[_lid], {"tax_ids": [(6, 0, _all_taxes)]}])
+
+            # 3. Sobreescribir importes de las tax lines creadas por Odoo con valores del PDF
+            #    (los taxes pueden ser flat $1 — necesitamos los importes reales)
+            _perc_total_override = 0.0
+            for _aid, _info in _perc_map.items():
+                if not _info.get("tax_id"):
+                    continue
+                _tax_lines = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                    "account.move.line", "search_read",
+                    [[("move_id", "=", move_id),
+                      ("tax_line_id", "=", _info["tax_id"]),
+                      ("account_id", "=", _aid)]],
+                    {"fields": ["id", "debit", "amount_currency"], "limit": 1})
+                if _tax_lines:
+                    _cur_amt = float(_tax_lines[0].get("debit", 0))
+                    _new_amt = _info["importe"]
+                    _diff = _new_amt - _cur_amt
+                    if abs(_diff) > 0.001:
+                        models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                            "account.move.line", "write",
+                            [[_tax_lines[0]["id"]], {
+                                "debit":          _new_amt,
+                                "credit":         0.0,
+                                "amount_currency": _new_amt,
+                            }])
+                        _perc_total_override += _diff
+
+            # Ajustar la línea de Proveedores por la diferencia
+            if abs(_perc_total_override) > 0.001:
                 _pay = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                     "account.move.line", "search_read",
                     [[("move_id", "=", move_id),
                       ("account_id.account_type", "in",
                        ["liability_payable", "liability_current"])]],
-                    {"fields": ["id", "credit", "amount_currency"], "limit": 1})
+                    {"fields": ["id", "credit"], "limit": 1})
                 if _pay:
-                    _new_credit = float(_pay[0].get("credit", 0)) + _perc_total
+                    _nc = float(_pay[0].get("credit", 0)) + _perc_total_override
                     models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                         "account.move.line", "write",
-                        [[_pay[0]["id"]], {
-                            "credit":          _new_credit,
-                            "amount_currency": -_new_credit,
-                        }])
+                        [[_pay[0]["id"]], {"credit": _nc, "amount_currency": -_nc}])
         except Exception as _pe:
-            _logger.warning("create_vendor_bill: percepcion Apuntes lines: %s", _pe)
+            _logger.warning("create_vendor_bill: percepcion tax lines: %s", _pe)
     if file_bytes:
         try:
             attach_file(models, uid, api_key, "account.move", move_id, filename, file_bytes, mimetype)
