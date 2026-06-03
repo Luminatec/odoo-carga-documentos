@@ -158,12 +158,21 @@ def _extract_percepcion_iva(text):
             except Exception: return 0.0
 
         detalle = []
+        # Restringir al bloque resumen para evitar duplicados de páginas de detalle
+        _bloque_iva = text
+        _sm2 = _re.search(
+            r"SUBTOTAL\s*SIN\s*IMPUESTOS.*?TOTAL\s*CARGOS\s*DEL\s*MES",
+            text, _re.IGNORECASE | _re.DOTALL)
+        if _sm2:
+            _bloque_iva = _sm2.group(0)
+        _seen_iva = set()
         for m in _re.finditer(
                 r"Percepci[oó]n\s*(?:de\s*)?IVA\s*([A-Za-z0-9/]*)\s*[\d.,]+%\s+([\d.,]+)",
-                text, _re.IGNORECASE):
+                _bloque_iva, _re.IGNORECASE):
             label = ("Percepción IVA " + m.group(1).strip()).strip()
             imp   = _pn(m.group(2))
-            if imp > 0:
+            if imp > 0 and label not in _seen_iva:
+                _seen_iva.add(label)
                 detalle.append({"label": label, "importe": imp})
 
         if detalle:
@@ -224,14 +233,23 @@ def _extract_percepciones_iibb(text):
                 detalle.append({"provincia": prov, "importe": imp})
 
         # Formato 2: Telecom/Personal — "PercepciónIIBBCABA5% 1.882,20"
+        # Solo del bloque resumen (entre SUBTOTALSINIMPUESTOS y TOTALCARGOSDELMES)
         if not detalle:
             import re as _re2
+            _bloque = text
+            _sm = _re2.search(
+                r"SUBTOTAL\s*SIN\s*IMPUESTOS.*?TOTAL\s*CARGOS\s*DEL\s*MES",
+                text, _re2.IGNORECASE | _re2.DOTALL)
+            if _sm:
+                _bloque = _sm.group(0)
+            _seen_provs = set()
             for m in _re2.finditer(
                     r"Percepci[oó]n\s*IIBB\s*([A-Za-záéíóúÁÉÍÓÚ]+(?:\s+[A-Za-záéíóúÁÉÍÓÚ]+)*?)\s*[\d.,]+%\s+([\d.,]+)",
-                    text, _re2.IGNORECASE):
+                    _bloque, _re2.IGNORECASE):
                 prov = m.group(1).strip()
                 imp  = _pn(m.group(2))
-                if imp > 0:
+                if imp > 0 and prov not in _seen_provs:
+                    _seen_provs.add(prov)
                     detalle.append({"provincia": prov, "importe": imp})
 
         if detalle:
