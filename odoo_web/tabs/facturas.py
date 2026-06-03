@@ -379,12 +379,32 @@ def render(models, uid, api_key, models_url, is_admin):
                     f"[Ver factura existente]({_dup_url})"
                 )
 
-            # Resolver diario de facturas desde preferencia
+            # Resolver diario de facturas desde preferencia o heurística
             _fac_jour_id = None
             _fac_pref_jour = _load_prefs_fac().get("diario_facturas_nombre", "")
-            if _fac_pref_jour:
-                _all_purch_j = get_purchase_journals(models_url, uid, api_key)
-                _fac_jour_id = next((jid for jid, jn in _all_purch_j if jn == _fac_pref_jour), None)
+            _all_purch_j = get_purchase_journals(models_url, uid, api_key)
+            if _fac_pref_jour and _all_purch_j:
+                # Match exacto primero, luego insensible a mayúsculas
+                _fac_jour_id = (
+                    next((jid for jid, jn in _all_purch_j if jn == _fac_pref_jour), None)
+                    or next((jid for jid, jn in _all_purch_j
+                              if jn.lower() == _fac_pref_jour.lower()), None)
+                )
+            # Fallback: buscar "proveedor" + "factura" sin "electr" ni "importa"
+            if not _fac_jour_id and _all_purch_j:
+                _fac_jour_id = next(
+                    (jid for jid, jn in _all_purch_j
+                     if "proveedor" in jn.lower()
+                     and "factura" in jn.lower()
+                     and "electr" not in jn.lower()
+                     and "importa" not in jn.lower()),
+                    None
+                )
+                # Guardar el nombre exacto para la próxima vez
+                if _fac_jour_id:
+                    _jn_exact = next((jn for jid, jn in _all_purch_j if jid == _fac_jour_id), "")
+                    if _jn_exact:
+                        _save_prefs_fac({**_load_prefs_fac(), "diario_facturas_nombre": _jn_exact})
 
             with st.form(key=f"bill_form_{uf.name}"):
                 # CUIT ya está fuera del form para lookup en tiempo real
