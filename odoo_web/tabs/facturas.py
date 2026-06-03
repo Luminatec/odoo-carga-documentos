@@ -540,7 +540,8 @@ def render(models, uid, api_key, models_url, is_admin):
                 elif _piva_f > 0:
                     _piva_rows = f"| Percepción IVA | {fmt_ars(_piva_f)} | |\n"
                 _iva27_f = float(extracted.get("iva_27", 0) or 0)
-                _iva21_f = _iva_f - _iva27_f if _iva27_f > 0 else _iva_f
+                _iva_f_num = float(_iva_f) if _iva_f else 0.0
+                _iva21_f = _iva_f_num - _iva27_f if _iva27_f > 0 else _iva_f_num
                 _iva_rows_str = ""
                 if _iva27_f > 0:
                     _iva_rows_str = (
@@ -548,7 +549,7 @@ def render(models, uid, api_key, models_url, is_admin):
                         f"| IVA Crédito Fiscal 27% | {fmt_ars(_iva27_f)} | |\n"
                     )
                 else:
-                    _iva_rows_str = f"| IVA Crédito Fiscal (si aplica) | {fmt_ars(_iva_f)} | |\n"
+                    _iva_rows_str = f"| IVA Crédito Fiscal (si aplica) | {fmt_ars(_iva_f_num)} | |\n"
                 st.markdown(
                     f"| Cuenta | Debe | Haber |\n"
                     f"|---|---|---|\n"
