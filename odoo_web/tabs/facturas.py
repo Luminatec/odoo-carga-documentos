@@ -603,12 +603,25 @@ def render(models, uid, api_key, models_url, is_admin):
                                 _all_accts_perc = get_all_accounts(models_url, uid, api_key)
                                 for _pd in _percep_det:
                                     _prov_low = (_pd.get("provincia") or "").lower()
-                                    # Buscar cuenta que contenga "percep" + nombre de provincia
+                                    # Expandir abreviaturas de provincia para el match de cuenta
+                                    _prov_aliases = {
+                                        "bs as": ["buenos aires", "arba", "bonaerense"],
+                                        "bsas":  ["buenos aires", "arba", "bonaerense"],
+                                        "caba":  ["caba", "ciudad"],
+                                        "santa fe": ["santa fe", "santa fé"],
+                                        "cordoba": ["cordoba", "córdoba"],
+                                        "córdoba": ["cordoba", "córdoba"],
+                                    }
+                                    _prov_kws = (
+                                        _prov_aliases.get(_prov_low)
+                                        or [kw for kw in _prov_low.split() if len(kw) >= 4]
+                                        or [_prov_low]
+                                    )
+                                    # Buscar cuenta que contenga "percep" + keyword de provincia
                                     _pac = next((
                                         aid for aid, albl in _all_accts_perc
                                         if "percep" in albl.lower()
-                                        and any(kw in albl.lower() for kw in _prov_low.split()
-                                                if len(kw) >= 4)
+                                        and any(kw in albl.lower() for kw in _prov_kws)
                                         and "(copia)" not in albl.lower()
                                     ), None)
                                     if not _pac:
