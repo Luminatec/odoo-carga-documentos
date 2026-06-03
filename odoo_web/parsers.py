@@ -196,17 +196,28 @@ def _extract_percepciones_iibb(text):
             if imp > 0:
                 detalle.append({"provincia": prov, "importe": imp})
 
+        # Formato 2: Telecom/Personal — "PercepciónIIBBCABA5% 1.882,20"
+        if not detalle:
+            import re as _re2
+            for m in _re2.finditer(
+                    r"Percepci[oó]n\s*IIBB\s*([A-Za-záéíóúÁÉÍÓÚ]+(?:\s+[A-Za-záéíóúÁÉÍÓÚ]+)*?)\s*[\d.,]+%\s+([\d.,]+)",
+                    text, _re2.IGNORECASE):
+                prov = m.group(1).strip()
+                imp  = _pn(m.group(2))
+                if imp > 0:
+                    detalle.append({"provincia": prov, "importe": imp})
+
         if detalle:
             return sum(d["importe"] for d in detalle), detalle
 
-        # Formato 2: resumen Andreani (solo total)
+        # Formato 3: resumen Andreani (solo total)
         _p1 = "Subtotal[^\n]*IIBB[^\n]*\n\s*([\d.,]+)\s+([\d.,]+)\s+[\d.,]+\s+([\d.,]+)"
         m1 = _re.search(_p1, text, _re.IGNORECASE)
         if m1:
             total = _pn(m1.group(2))
             return total, [{"provincia": "IIBB", "importe": total}]
 
-        # Formato 3: etiqueta
+        # Formato 4: etiqueta
         m3 = _re.search("Percepci[^\n]*IIBB[\s:]+([\d.,]+)", text, _re.IGNORECASE)
         if m3:
             total = _pn(m3.group(1))
