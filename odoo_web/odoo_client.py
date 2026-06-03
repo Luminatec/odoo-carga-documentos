@@ -1048,12 +1048,24 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
         except Exception:
             _all_taxes = []
 
+        # Mapa de alias de provincias para mejorar el match con nombres de taxes
+        _prov_aliases = {
+            "bs as": ["buenos aires", "arba", "pba"],
+            "bsas": ["buenos aires", "arba", "pba"],
+            "caba": ["caba", "ciudad"],
+            "santa fe": ["santa fe", "santa fé"],
+            "córdoba": ["córdoba", "cordoba"],
+            "cordoba": ["córdoba", "cordoba"],
+        }
         for _pl in percepcion_lines:
-            _prov = (_pl.get("provincia") or "").lower()
-            # Buscar tax que coincida con la provincia
+            _prov = (_pl.get("provincia") or "").lower().strip()
+            # Expandir con aliases
+            _search_kws = [_prov] + _prov_aliases.get(_prov, [])
+            _kws = [kw for kw in _prov.split() if len(kw) >= 4]
+            _search_kws += _kws
+            # Buscar tax que coincida con alguna keyword
             _tax = next((t for t in _all_taxes
-                         if any(kw in t["name"].lower()
-                                for kw in _prov.split() if len(kw) >= 4)), None)
+                         if any(kw in t["name"].lower() for kw in _search_kws)), None)
             if _tax:
                 _perc_taxes.append(_tax["id"])
 
@@ -1069,7 +1081,7 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                     first_line[2]["tax_ids"] = (
                         existing_taxes + [(4, tid, 0) for tid in _perc_taxes])
         else:
-            # Fallback: crear como líneas separadas
+            # Fallback: crear como líneas separadas (sin distribución analítica — solo la línea base la lleva)
             _extra_perc = []
             for _pl in percepcion_lines:
                 _perc_lv = {
@@ -1080,8 +1092,7 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                 }
                 if _pl.get("account_id"):
                     _perc_lv["account_id"] = _pl["account_id"]
-                if analytic_account_id:
-                    _perc_lv["analytic_distribution"] = {str(analytic_account_id): 100}
+                # No analytic_distribution en líneas de percepción
                 _extra_perc.append((0, 0, _perc_lv))
             existing = vals.get("invoice_line_ids", [])
             vals["invoice_line_ids"] = existing + _extra_perc
