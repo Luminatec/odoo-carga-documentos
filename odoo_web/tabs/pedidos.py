@@ -28,7 +28,7 @@ from odoo_client import (
     register_processed_file,
     _AR_TZ,
 )
-from parsers import extract_image_oc_fields, extract_oc_fields, extract_excel_oc_fields
+from parsers import extract_image_oc_fields, extract_oc_fields, extract_excel_oc_fields, parse_ar_date
 
 
 def render(models, uid, api_key, models_url, is_admin):
