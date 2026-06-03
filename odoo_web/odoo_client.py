@@ -1048,8 +1048,7 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
             # Buscar taxes de percepción IIBB
             _all_taxes = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                 "account.tax", "search_read",
-                [[("type_tax_use", "=", "purchase"),
-                  ("name", "ilike", "percep"),
+                [[("name", "ilike", "percep"),
                   ("active", "=", True)]],
                 {"fields": ["id", "name"], "limit": 50})
             _prov_aliases = {
@@ -1075,7 +1074,7 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                 _prod_lines = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                     "account.move.line", "search_read",
                     [[("move_id", "=", move_id),
-                      ("display_type", "=", "product")]],
+                      ("product_id", "!=", False)]],
                     {"fields": ["id", "tax_ids"], "limit": 1})
                 if _prod_lines:
                     _line_id = _prod_lines[0]["id"]
