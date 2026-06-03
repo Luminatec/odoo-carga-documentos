@@ -295,6 +295,14 @@ def extract_pdf_fields(file_bytes):
         _piva, _pivad = _extract_percepcion_iva(_raw)
         if _piva: _bot["percepcion_iva"] = _piva
         if _pivad: _bot["percepcion_iva_detalle"] = _pivad
+        # Extraer IVA 27% si existe (telecom: voz/SMS a tasa diferencial)
+        import re as _re_iva27
+        _m27 = _re_iva27.search(r"IVA\s*27\s*%\s*([\d.,]+)", _raw, _re_iva27.IGNORECASE)
+        if _m27:
+            try:
+                from odoo_client import normalize_amount as _na27
+                _bot["iva_27"] = float(_na27(_m27.group(1)))
+            except Exception: pass
         # Normalizar número si falta o tiene formato incorrecto
         _bn = str(_bot.get("numero") or "").strip()
         if not re.match(r"^\d{4,5}-\d{6,8}$", _bn):
@@ -326,6 +334,13 @@ def extract_pdf_fields(file_bytes):
             _piva, _pivad = _extract_percepcion_iva(text)
             if _piva: _ai_fields["percepcion_iva"] = _piva
             if _pivad: _ai_fields["percepcion_iva_detalle"] = _pivad
+            import re as _re_iva27
+            _m27 = _re_iva27.search(r"IVA\s*27\s*%\s*([\d.,]+)", text, _re_iva27.IGNORECASE)
+            if _m27:
+                try:
+                    from odoo_client import normalize_amount as _na27
+                    _ai_fields["iva_27"] = float(_na27(_m27.group(1)))
+                except Exception: pass
             # Normalizar número: si la IA no lo extrajo o no tiene formato XXXXX-XXXXXXXX
             _ai_num = str(_ai_fields.get("numero") or "").strip()
             _ai_num_ok = bool(re.match(r"^\d{4,5}-\d{6,8}$", _ai_num))

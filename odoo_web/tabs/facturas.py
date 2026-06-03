@@ -539,11 +539,21 @@ def render(models, uid, api_key, models_url, is_admin):
                         _piva_rows += f"| {_pd['label']} | {fmt_ars(_pd['importe'])} | |\n"
                 elif _piva_f > 0:
                     _piva_rows = f"| Percepción IVA | {fmt_ars(_piva_f)} | |\n"
+                _iva27_f = float(extracted.get("iva_27", 0) or 0)
+                _iva21_f = _iva_f - _iva27_f if _iva27_f > 0 else _iva_f
+                _iva_rows_str = ""
+                if _iva27_f > 0:
+                    _iva_rows_str = (
+                        f"| IVA Crédito Fiscal 21% | {fmt_ars(_iva21_f)} | |\n"
+                        f"| IVA Crédito Fiscal 27% | {fmt_ars(_iva27_f)} | |\n"
+                    )
+                else:
+                    _iva_rows_str = f"| IVA Crédito Fiscal (si aplica) | {fmt_ars(_iva_f)} | |\n"
                 st.markdown(
                     f"| Cuenta | Debe | Haber |\n"
                     f"|---|---|---|\n"
                     f"| {_cuenta_disp} | {fmt_ars(_neto_f)} | |\n"
-                    f"| IVA Crédito Fiscal (si aplica) | {fmt_ars(_iva_f)} | |\n"
+                    + _iva_rows_str
                     + _percep_rows + _piva_rows +
                     f"| Proveedor (por pagar) | | {fmt_ars(_tot_f)} |"
                 )
