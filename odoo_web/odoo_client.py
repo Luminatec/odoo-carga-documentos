@@ -1042,24 +1042,44 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
     except OdooError as e:
         raise OdooError(f"No se pudo crear la factura '{ref}': {e}") from e
 
-    # Agregar percepciones IIBB como líneas separadas con importes exactos del PDF
-    # (sin distribución analítica — solo la línea de servicio la lleva)
+    # Agregar percepciones IIBB directamente en los apuntes contables
+    # exclude_from_invoice_tab=True → aparecen en Apuntes pero NO en Líneas de factura
     if percepcion_lines and move_id:
         try:
+            _perc_total = 0.0
             for _pl in percepcion_lines:
-                _plv = {
-                    "move_id":    move_id,
-                    "name":       f"Percepción IIBB {_pl.get('provincia','')}".strip(),
-                    "price_unit": float(_pl.get("importe", 0)),
-                    "quantity":   1,
-                    "tax_ids":    [],
-                }
-                if _pl.get("account_id"):
-                    _plv["account_id"] = _pl["account_id"]
+                _amt = float(_pl.get("importe", 0))
+                if not _pl.get("account_id") or _amt <= 0:
+                    continue
                 models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                    "account.move.line", "create", [_plv])
+                    "account.move.line", "create", [{
+                        "move_id":                  move_id,
+                        "account_id":               _pl["account_id"],
+                        "name":                     f"Percepción IIBB {_pl.get('provincia','')}".strip(),
+                        "debit":                    _amt,
+                        "credit":                   0.0,
+                        "amount_currency":          _amt,
+                        "exclude_from_invoice_tab": True,
+                    }])
+                _perc_total += _amt
+            # Actualizar la línea de Proveedores para que el asiento balancee
+            if _perc_total > 0:
+                _pay = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                    "account.move.line", "search_read",
+                    [[("move_id", "=", move_id),
+                      ("account_id.account_type", "in",
+                       ["liability_payable", "liability_current"])]],
+                    {"fields": ["id", "credit", "amount_currency"], "limit": 1})
+                if _pay:
+                    _new_credit = float(_pay[0].get("credit", 0)) + _perc_total
+                    models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                        "account.move.line", "write",
+                        [[_pay[0]["id"]], {
+                            "credit":          _new_credit,
+                            "amount_currency": -_new_credit,
+                        }])
         except Exception as _pe:
-            _logger.warning("create_vendor_bill: percepcion lines: %s", _pe)
+            _logger.warning("create_vendor_bill: percepcion Apuntes lines: %s", _pe)
     if file_bytes:
         try:
             attach_file(models, uid, api_key, "account.move", move_id, filename, file_bytes, mimetype)
