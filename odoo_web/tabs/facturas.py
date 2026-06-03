@@ -513,26 +513,38 @@ def render(models, uid, api_key, models_url, is_admin):
                 _cuenta_disp = (cuenta_sel if (cuenta_sel and cuenta_sel != "— Sin cuenta —")
                                 else "*(cuenta de gasto — seleccioná arriba)*")
                 st.markdown("**📒 Asiento estimado en Odoo:**")
-                _percep_f  = float(extracted.get("percepcion_iibb", 0) or 0)
+                _percep_f   = float(extracted.get("percepcion_iibb", 0) or 0)
                 _percep_det = extracted.get("percepcion_iibb_detalle", [])
-                if _percep_f > 0:
-                    st.info(
-                        f"📋 Esta factura incluye **Percepciones IIBB** por "
-                        f"**ARS {fmt_ars(_percep_f)}** — "
-                        "registralas como líneas adicionales en Odoo.")
-                # Filas de percepciones desglosadas por provincia
+                _piva_f     = float(extracted.get("percepcion_iva", 0) or 0)
+                _piva_det   = extracted.get("percepcion_iva_detalle", [])
+                _total_perc = _percep_f + _piva_f
+                if _total_perc > 0:
+                    _perc_labels = []
+                    if _percep_f > 0:
+                        _perc_labels.append(f"IIBB ARS {fmt_ars(_percep_f)}")
+                    if _piva_f > 0:
+                        _perc_labels.append(f"IVA ARS {fmt_ars(_piva_f)}")
+                    st.info(f"📋 Percepciones: {' + '.join(_perc_labels)} — se registran como líneas en Odoo.")
+                # Filas IIBB
                 _percep_rows = ""
                 if _percep_det:
                     for _pd in _percep_det:
                         _percep_rows += f"| Percepción IIBB {_pd['provincia']} | {fmt_ars(_pd['importe'])} | |\n"
                 elif _percep_f > 0:
                     _percep_rows = f"| Percepciones IIBB | {fmt_ars(_percep_f)} | |\n"
+                # Filas percepción IVA
+                _piva_rows = ""
+                if _piva_det:
+                    for _pd in _piva_det:
+                        _piva_rows += f"| {_pd['label']} | {fmt_ars(_pd['importe'])} | |\n"
+                elif _piva_f > 0:
+                    _piva_rows = f"| Percepción IVA | {fmt_ars(_piva_f)} | |\n"
                 st.markdown(
                     f"| Cuenta | Debe | Haber |\n"
                     f"|---|---|---|\n"
                     f"| {_cuenta_disp} | {fmt_ars(_neto_f)} | |\n"
                     f"| IVA Crédito Fiscal (si aplica) | {fmt_ars(_iva_f)} | |\n"
-                    + _percep_rows +
+                    + _percep_rows + _piva_rows +
                     f"| Proveedor (por pagar) | | {fmt_ars(_tot_f)} |"
                 )
 
@@ -656,6 +668,28 @@ def render(models, uid, api_key, models_url, is_admin):
                                         "provincia":  _pd.get("provincia", ""),
                                         "importe":    _pd.get("importe", 0),
                                         "account_id": _pac,
+                                        "tax_ids":    [],
+                                    })
+
+                            # Agregar percepciones IVA al bloque de líneas
+                            _piva_det_form = extracted.get("percepcion_iva_detalle", [])
+                            if _piva_det_form:
+                                _all_accts_piva = get_all_accounts(models_url, uid, api_key)
+                                for _pvd in _piva_det_form:
+                                    _piva_amt = float(_pvd.get("importe", 0))
+                                    if _piva_amt <= 0:
+                                        continue
+                                    # Buscar cuenta percepción IVA
+                                    _pvac = next((
+                                        aid for aid, albl in _all_accts_piva
+                                        if "percep" in albl.lower()
+                                        and "iva" in albl.lower()
+                                        and "(copia)" not in albl.lower()
+                                    ), None)
+                                    _perc_lines.append({
+                                        "provincia":  _pvd.get("label", "Percepción IVA"),
+                                        "importe":    _piva_amt,
+                                        "account_id": _pvac,
                                         "tax_ids":    [],
                                     })
 

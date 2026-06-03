@@ -145,6 +145,33 @@ Factura:
     return fields
 
 
+
+def _extract_percepcion_iva(text):
+    """Extrae Percepciones de IVA (ej: RG2408/08) — formato Telecom y similares.
+    Retorna (total_float, [{"label": str, "importe": float}]).
+    """
+    try:
+        import re as _re
+        from odoo_client import normalize_amount as _norm
+        def _pn(s):
+            try: return float(_norm(str(s)))
+            except Exception: return 0.0
+
+        detalle = []
+        for m in _re.finditer(
+                r"Percepci[oó]n\s*(?:de\s*)?IVA\s*([A-Za-z0-9/]*)\s*[\d.,]+%\s+([\d.,]+)",
+                text, _re.IGNORECASE):
+            label = ("Percepción IVA " + m.group(1).strip()).strip()
+            imp   = _pn(m.group(2))
+            if imp > 0:
+                detalle.append({"label": label, "importe": imp})
+
+        if detalle:
+            return sum(d["importe"] for d in detalle), detalle
+    except Exception:
+        pass
+    return 0.0, []
+
 def _bot_extract(file_bytes: bytes, filename: str, mime_type: str, doc_type: str) -> dict:
     """
     Llama al endpoint /extract del bot Cloud Run usando Claude Sonnet con soporte nativo PDF.
@@ -247,6 +274,9 @@ def extract_pdf_fields(file_bytes):
         _p, _pd = _extract_percepciones_iibb(_raw)
         if _p: _bot["percepcion_iibb"] = _p
         if _pd: _bot["percepcion_iibb_detalle"] = _pd
+        _piva, _pivad = _extract_percepcion_iva(_raw)
+        if _piva: _bot["percepcion_iva"] = _piva
+        if _pivad: _bot["percepcion_iva_detalle"] = _pivad
         # Normalizar número si falta o tiene formato incorrecto
         _bn = str(_bot.get("numero") or "").strip()
         if not re.match(r"^\d{4,5}-\d{6,8}$", _bn):
@@ -275,6 +305,9 @@ def extract_pdf_fields(file_bytes):
             _p, _pd = _extract_percepciones_iibb(text)
             if _p: _ai_fields["percepcion_iibb"] = _p
             if _pd: _ai_fields["percepcion_iibb_detalle"] = _pd
+            _piva, _pivad = _extract_percepcion_iva(text)
+            if _piva: _ai_fields["percepcion_iva"] = _piva
+            if _pivad: _ai_fields["percepcion_iva_detalle"] = _pivad
             # Normalizar número: si la IA no lo extrajo o no tiene formato XXXXX-XXXXXXXX
             _ai_num = str(_ai_fields.get("numero") or "").strip()
             _ai_num_ok = bool(re.match(r"^\d{4,5}-\d{6,8}$", _ai_num))
