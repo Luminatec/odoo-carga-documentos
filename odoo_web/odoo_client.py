@@ -1045,29 +1045,51 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
     # Agregar percepciones IIBB post-creación via write() en la línea de producto
     if percepcion_lines and move_id:
         try:
-            # Buscar taxes de percepción IIBB
-            _all_taxes = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                "account.tax", "search_read",
-                [[("name", "ilike", "percep"),
-                  ("active", "=", True)]],
-                {"fields": ["id", "name"], "limit": 50})
-            _prov_aliases = {
-                "bs as": ["buenos aires", "arba", "pba"],
-                "bsas": ["buenos aires", "arba", "pba"],
-                "caba": ["caba", "ciudad"],
-                "santa fe": ["santa fe", "santa fé"],
-                "córdoba": ["córdoba", "cordoba"],
-                "cordoba": ["córdoba", "cordoba"],
-            }
+            # Buscar taxes de percepción IIBB por la cuenta contable de cada provincia
+            # (más confiable que buscar por nombre, ya que las cuentas son conocidas)
             _perc_tax_ids = []
             for _pl in percepcion_lines:
-                _prov = (_pl.get("provincia") or "").lower().strip()
-                _skws = [_prov] + _prov_aliases.get(_prov, []) + [
-                    kw for kw in _prov.split() if len(kw) >= 4]
-                _tx = next((t for t in _all_taxes
-                             if any(kw in t["name"].lower() for kw in _skws)), None)
-                if _tx and _tx["id"] not in _perc_tax_ids:
-                    _perc_tax_ids.append(_tx["id"])
+                _acct_id = _pl.get("account_id")
+                if not _acct_id:
+                    continue
+                # Buscar tax cuya repartition line apunta a esta cuenta
+                try:
+                    _reps = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                        "account.tax.repartition.line", "search_read",
+                        [[("account_id", "=", _acct_id),
+                          ("repartition_type", "=", "tax")]],
+                        {"fields": ["tax_id"], "limit": 5})
+                    for _rep in _reps:
+                        _tid = (_rep["tax_id"][0]
+                                if isinstance(_rep["tax_id"], (list, tuple))
+                                else _rep["tax_id"])
+                        if _tid and _tid not in _perc_tax_ids:
+                            _perc_tax_ids.append(_tid)
+                except Exception:
+                    pass
+            # Fallback por nombre si no se encontró ninguno via cuenta
+            if not _perc_tax_ids:
+                try:
+                    _all_taxes = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                        "account.tax", "search_read",
+                        [[("name", "ilike", "percep"), ("active", "=", True)]],
+                        {"fields": ["id", "name"], "limit": 50})
+                    _prov_aliases = {
+                        "bs as": ["buenos aires", "arba", "pba"],
+                        "caba": ["caba", "ciudad"],
+                    }
+                    for _pl in percepcion_lines:
+                        _prov = (_pl.get("provincia") or "").lower().strip()
+                        _skws = ([_prov]
+                                 + _prov_aliases.get(_prov, [])
+                                 + [kw for kw in _prov.split() if len(kw) >= 4])
+                        _tx = next((t for t in _all_taxes
+                                    if any(kw in t["name"].lower()
+                                           for kw in _skws)), None)
+                        if _tx and _tx["id"] not in _perc_tax_ids:
+                            _perc_tax_ids.append(_tx["id"])
+                except Exception:
+                    pass
 
             if _perc_tax_ids:
                 # Obtener la línea de producto de la factura
