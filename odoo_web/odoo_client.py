@@ -1049,7 +1049,8 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
     if percepcion_lines and move_id:
         try:
             # 1. Encontrar tax ID por cuenta contable (repartition)
-            _perc_map = {}  # account_id → {importe, tax_id}
+            # Usar lista para soportar múltiples percepciones con diferente cuenta
+            _perc_list = []
             for _pl in percepcion_lines:
                 _aid = _pl.get("account_id")
                 _amt = float(_pl.get("importe", 0))
@@ -1067,8 +1068,16 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                     if _candidate:
                         _tid = _candidate
                         break
-                _perc_map[_aid] = {"importe": _amt, "tax_id": _tid,
-                                   "provincia": _pl.get("provincia", "")}
+                _perc_list.append({"account_id": _aid, "importe": _amt,
+                                   "tax_id": _tid, "provincia": _pl.get("provincia", "")})
+            # Compatibilidad: construir _perc_map agrupando por account_id (suma)
+            _perc_map = {}
+            for _item in _perc_list:
+                _aid = _item["account_id"]
+                if _aid not in _perc_map:
+                    _perc_map[_aid] = {"importe": 0.0, "tax_id": _item["tax_id"],
+                                       "provincia": _item["provincia"]}
+                _perc_map[_aid]["importe"] += _item["importe"]
 
             # 2. Agregar los taxes encontrados a la línea principal
             _tax_ids_to_add = list({v["tax_id"] for v in _perc_map.values() if v["tax_id"]})

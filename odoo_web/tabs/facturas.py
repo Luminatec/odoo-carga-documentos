@@ -650,6 +650,8 @@ def render(models, uid, api_key, models_url, is_admin):
                                     _prov_aliases = {
                                         "bs as": ["buenos aires", "arba", "bonaerense"],
                                         "bsas":  ["buenos aires", "arba", "bonaerense"],
+                                        "buenosaires": ["buenos aires", "arba", "bonaerense"],
+                                        "buenos aires": ["buenos aires", "arba", "bonaerense"],
                                         "caba":  ["caba", "ciudad"],
                                         "santa fe": ["santa fe", "santa fé"],
                                         "cordoba": ["cordoba", "córdoba"],
