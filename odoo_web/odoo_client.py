@@ -1042,44 +1042,43 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
     except OdooError as e:
         raise OdooError(f"No se pudo crear la factura '{ref}': {e}") from e
 
-    # Agregar percepciones IIBB/IVA como líneas contables directas
-    # Usamos tax_line_id de un tax existente para que exclude_from_invoice_tab=True
-    # (líneas con tax_line_id no aparecen en la pestaña Líneas de factura)
+    # Agregar percepciones IIBB/IVA — líneas contables con tax_line_id correcto
+    # tax_line_id = tax de repartition → exclude_from_invoice_tab=True automáticamente
     if percepcion_lines and move_id:
         try:
-            # Buscar cualquier tax de compra para usar como tax_line_id referencia
-            _ref_tax_id = None
-            try:
-                _ref_taxes = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                    "account.tax", "search_read",
-                    [[("type_tax_use", "in", ["purchase", "all"]),
-                      ("active", "=", True)]],
-                    {"fields": ["id"], "limit": 1})
-                if _ref_taxes:
-                    _ref_tax_id = _ref_taxes[0]["id"]
-            except Exception:
-                pass
-
             _perc_total = 0.0
             for _pl in percepcion_lines:
-                _amt = float(_pl.get("importe", 0))
-                if not _pl.get("account_id") or _amt <= 0:
+                _amt  = float(_pl.get("importe", 0))
+                _aid  = _pl.get("account_id")
+                if not _aid or _amt <= 0:
                     continue
+                # Buscar el tax correcto via repartition line de esta cuenta
+                _tid = None
+                try:
+                    _reps = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                        "account.tax.repartition.line", "search_read",
+                        [[("account_id", "=", _aid), ("repartition_type", "=", "tax")]],
+                        {"fields": ["tax_id"], "limit": 1})
+                    if _reps:
+                        _tv = _reps[0]["tax_id"]
+                        _tid = _tv[0] if isinstance(_tv, (list, tuple)) else _tv
+                except Exception:
+                    pass
                 _lv = {
-                    "move_id":       move_id,
-                    "account_id":    _pl["account_id"],
-                    "name":          str(_pl.get("provincia") or _pl.get("label") or "Percepción").strip(),
-                    "debit":         _amt,
-                    "credit":        0.0,
+                    "move_id":        move_id,
+                    "account_id":     _aid,
+                    "name":           str(_pl.get("provincia") or _pl.get("label") or "Percepción").strip(),
+                    "debit":          _amt,
+                    "credit":         0.0,
                     "amount_currency": _amt,
                 }
-                if _ref_tax_id:
-                    _lv["tax_line_id"] = _ref_tax_id
+                if _tid:
+                    _lv["tax_line_id"] = _tid
                 models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                     "account.move.line", "create", [_lv])
                 _perc_total += _amt
 
-            # Actualizar la línea de Proveedores para que el asiento balancee
+            # Actualizar línea Proveedores para que el asiento balancee
             if _perc_total > 0:
                 _pay = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                     "account.move.line", "search_read",
