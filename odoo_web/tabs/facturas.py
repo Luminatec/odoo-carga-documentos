@@ -726,9 +726,12 @@ def render(models, uid, api_key, models_url, is_admin):
                                         "tax_ids":    [],
                                     })
 
-                            # Solo agregar percepciones si hay línea principal
+                            # Validar que hay línea principal antes de crear
                             _has_main_line = bool(account_id_sel or product_id_sel) and bool(amount_i)
-                            move_id = create_vendor_bill(models, uid, api_key,
+                            if not _has_main_line:
+                                st.error("⚠️ Seleccioná una **cuenta de gasto** o un **producto** e ingresá el importe antes de cargar.")
+                            else:
+                              move_id = create_vendor_bill(models, uid, api_key,
                             partner_id=partner_id, ref=concepto_i.strip() or ref_i,
                             move_type=_move_type,
                             invoice_date=_fecha_i_iso or False,
@@ -742,7 +745,7 @@ def render(models, uid, api_key, models_url, is_admin):
                             l10n_latam_document_number=_latam_num or None,
                             clear_taxes=exenta_i,
                             line_name=concepto_i.strip() or None,
-                            percepcion_lines=_perc_lines if (_perc_lines and _has_main_line) else None)
+                              percepcion_lines=_perc_lines if _perc_lines else None)
                             url = odoo_url("account.move", move_id)
                             _doc_lbl = "NC" if _move_type == "in_refund" else "Factura"
                             st.toast(f"{_doc_lbl} creada en Odoo", icon="✅")
