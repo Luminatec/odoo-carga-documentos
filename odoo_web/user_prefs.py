@@ -24,7 +24,7 @@ _DEFAULTS: dict = {
     "diario_cobros_nombre":   "",                        # nombre del diario de cobros preferido
     "referido_nombre":        "",                        # nombre del ejecutivo / referido por defecto
     "plazo_pago_nombre":      "",                        # nombre del término de pago preferido
-    "diario_facturas_nombre": "Facturas de Proveedores", # default — nunca sobreescribir con electrónicas
+    "diario_facturas_nombre": "Facturas de proveedores", # default — nunca sobreescribir con electrónicas
 }
 
 
