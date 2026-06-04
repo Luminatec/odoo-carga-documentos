@@ -1163,10 +1163,38 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                             [[("move_id","=",move_id),("tax_line_id","in",_badge_tax_ids),
                               ("debit","<=",1.01)]],
                             {"fields":["id","debit"],"limit":20})
-                        if _flat_tl:
-                            _del_ids = [l["id"] for l in _flat_tl]
-                            models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                                "account.move.line","unlink",[_del_ids])
+                        # Eliminar las direct lines de percepción (las que creamos antes, sin tax_line_id)
+                    _direct_perc = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                        "account.move.line","search_read",
+                        [[("move_id","=",move_id),("tax_line_id","=",False),
+                          ("product_id","=",False),("debit","!=",0),
+                          ("account_id","in",[_pl.get("account_id")
+                                              for _pl in percepcion_lines
+                                              if _pl.get("account_id") and "27%" not in _pl.get("label","")])]],
+                        {"fields":["id","debit"],"limit":20})
+                    if _direct_perc:
+                        models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                            "account.move.line","unlink",[[l["id"] for l in _direct_perc]])
+
+                    # Sobrescribir los $1 badge tax lines con el importe correcto del PDF
+                    _aid_to_amt = {_pl["account_id"]: float(_pl.get("importe",0))
+                                   for _pl in percepcion_lines
+                                   if _pl.get("account_id") and "27%" not in _pl.get("label","")}
+                    for _badge_tid in _badge_tax_ids:
+                        for _aid, _correct_amt in _aid_to_amt.items():
+                            _btl = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                                "account.move.line","search_read",
+                                [[("move_id","=",move_id),("tax_line_id","=",_badge_tid),
+                                  ("account_id","=",_aid)]],
+                                {"fields":["id","debit"],"limit":1})
+                            if _btl:
+                                _cur = float(_btl[0].get("debit",0))
+                                if abs(_cur - _correct_amt) > 0.01:
+                                    models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                                        "account.move.line","write",
+                                        [[_btl[0]["id"]],{
+                                            "debit":_correct_amt,"credit":0.0,
+                                            "amount_currency":_correct_amt}])
             except Exception: pass
         except Exception as _pe:
             _logger.warning("create_vendor_bill percepcion: %s", _pe)
