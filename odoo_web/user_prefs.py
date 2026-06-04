@@ -28,16 +28,33 @@ _DEFAULTS: dict = {
 }
 
 
+def _fix_prefs_sanity(prefs: dict) -> dict:
+    """Corrige valores inválidos en las preferencias (ej: diario electrónico)."""
+    _dj = prefs.get("diario_facturas_nombre") or ""
+    if "electr" in _dj.lower() or not _dj.strip():
+        prefs = {**prefs, "diario_facturas_nombre": _DEFAULTS["diario_facturas_nombre"]}
+    return prefs
+
+
 def load_prefs() -> dict:
     """Carga preferencias desde session_state (cache) o desde el archivo JSON."""
     if "user_prefs" in st.session_state:
-        return st.session_state["user_prefs"]
+        prefs = _fix_prefs_sanity(st.session_state["user_prefs"])
+        st.session_state["user_prefs"] = prefs
+        return prefs
     try:
         with open(_PREFS_FILE, encoding="utf-8") as f:
             stored = json.load(f)
         prefs = {**_DEFAULTS, **stored}
     except (FileNotFoundError, json.JSONDecodeError):
         prefs = dict(_DEFAULTS)
+    prefs = _fix_prefs_sanity(prefs)
+    # Persistir corrección si cambió algo
+    try:
+        with open(_PREFS_FILE, "w", encoding="utf-8") as _fw:
+            json.dump(prefs, _fw, indent=2, ensure_ascii=False)
+    except OSError:
+        pass
     st.session_state["user_prefs"] = prefs
     return prefs
 
