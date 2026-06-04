@@ -1042,8 +1042,8 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
     except OdooError as e:
         raise OdooError(f"No se pudo crear la factura '{ref}': {e}") from e
 
-    # Agregar percepciones e IVA 27% como líneas contables directas
-    # Importes exactos del PDF, labels en español, asiento balanceado
+    # Agregar percepciones e IVA 27% como líneas contables directas (Apuntes correctos)
+    # + agregar tax_ids como badges en línea producto (sin crear nuevas tax lines)
     if percepcion_lines and move_id:
         try:
             _perc_total = 0.0
@@ -1052,17 +1052,10 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                 _aid  = _pl.get("account_id")
                 if not _aid or _amt <= 0:
                     continue
-                # Generar label descriptivo en español
-                _raw  = str(_pl.get("provincia") or _pl.get("label") or "").strip()
-                # Construir nombre descriptivo en español
-                # _raw puede ser: "CABA", "BuenosAires", "Percepción IVA RG2408/08", etc.
-                _prov = _raw.replace("BuenosAires","Buenos Aires").replace("SantaFe","Santa Fe").strip()
-                if "percep" in _prov.lower() or "iva" in _prov.lower():
-                    _name = _prov  # Ya es descriptivo
-                elif _prov:
-                    _name = f"Percepción IIBB {_prov}"
-                else:
-                    _name = "Percepción" 
+                _prov = str(_pl.get("provincia") or _pl.get("label") or "").strip()
+                _prov = _prov.replace("BuenosAires","Buenos Aires").replace("SantaFe","Santa Fe")
+                _name = (_prov if "percep" in _prov.lower() or "iva" in _prov.lower()
+                         else f"Percepción IIBB {_prov}" if _prov else "Percepción")
                 models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                     "account.move.line", "create", [{
                         "move_id":         move_id,
@@ -1074,26 +1067,6 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                     }])
                 _perc_total += _amt
 
-            # Renombrar "VAT 21%" → "IVA Crédito Fiscal 21%" en los apuntes
-            try:
-                _iva_lines = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                    "account.move.line", "search_read",
-                    [[("move_id", "=", move_id), ("name", "in", ["VAT 21%", "VAT 27%",
-                       "C_IVA 21%", "C_IVA 27%"])]],
-                    {"fields": ["id", "name"], "limit": 5})
-                for _il in (_iva_lines or []):
-                    _new_iva_name = (_il["name"].replace("VAT 21%", "IVA Crédito Fiscal 21%")
-                                     .replace("VAT 27%", "IVA Crédito Fiscal 27%")
-                                     .replace("C_IVA 21%", "IVA Crédito Fiscal 21%")
-                                     .replace("C_IVA 27%", "IVA Crédito Fiscal 27%"))
-                    if _new_iva_name != _il["name"]:
-                        models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                            "account.move.line", "write",
-                            [[_il["id"]], {"name": _new_iva_name}])
-            except Exception:
-                pass
-
-            # Actualizar la línea Proveedores para que el asiento balancee
             if _perc_total > 0:
                 _pay = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                     "account.move.line", "search_read",
@@ -1106,8 +1079,48 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                     models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                         "account.move.line", "write",
                         [[_pay[0]["id"]], {"credit": _nc, "amount_currency": -_nc}])
+
+            # Agregar perception taxes como BADGES en la línea de producto
+            # skip_account_move_synchronization=True evita que Odoo cree nuevas tax lines
+            _tax_ids_to_add = []
+            for _pl in percepcion_lines:
+                _aid = _pl.get("account_id")
+                if not _aid:
+                    continue
+                try:
+                    _reps = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                        "account.tax.repartition.line", "search_read",
+                        [[("account_id", "=", _aid), ("repartition_type", "=", "tax")]],
+                        {"fields": ["tax_id"], "limit": 10})
+                    if _reps:
+                        _perc_reps = [r for r in _reps
+                                      if "perc" in (r["tax_id"][1]
+                                                    if isinstance(r["tax_id"],(list,tuple))
+                                                    else "").lower()]
+                        _best = _perc_reps[0] if _perc_reps else _reps[0]
+                        _tv = _best["tax_id"]
+                        _tid = (_tv[0] if isinstance(_tv,(list,tuple)) else _tv)
+                        if _tid and _tid not in _tax_ids_to_add:
+                            _tax_ids_to_add.append(_tid)
+                except Exception:
+                    pass
+
+            if _tax_ids_to_add:
+                _prod_line = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                    "account.move.line", "search_read",
+                    [[("move_id", "=", move_id), ("product_id", "!=", False)]],
+                    {"fields": ["id", "tax_ids"], "limit": 1})
+                if _prod_line:
+                    _lid = _prod_line[0]["id"]
+                    _cur = list(_prod_line[0].get("tax_ids") or [])
+                    _all = list(set(_cur + _tax_ids_to_add))
+                    models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                        "account.move.line", "write",
+                        [[_lid], {"tax_ids": [(6, 0, _all)]}],
+                        {"context": {"no_recompute": True,
+                                     "skip_account_move_synchronization": True}})
         except Exception as _pe:
-            _logger.warning("create_vendor_bill: percepcion lines: %s", _pe)
+            _logger.warning("create_vendor_bill: percepcion: %s", _pe)
     if file_bytes:
         try:
             attach_file(models, uid, api_key, "account.move", move_id, filename, file_bytes, mimetype)
