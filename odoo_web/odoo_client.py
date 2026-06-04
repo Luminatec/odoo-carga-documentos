@@ -1139,18 +1139,27 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                         [[_pay[0]["id"]],{"credit":_nc,"amount_currency":-_nc}])
 
             # Renombrar IVA 21/27% a español
+            # Renombrar IVA a español — busca por account_type y tax_line_id
             try:
-                _ivl = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                _iva_mv_lines = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                     "account.move.line","search_read",
-                    [[("move_id","=",move_id),
-                      ("name","in",["VAT 21%","VAT 27%","C_IVA 21%","C_IVA 27%"])]],
+                    [[("move_id","=",move_id),("tax_line_id","!=",False),
+                      ("account_id.account_type","=","asset_receivable_for_tax")]],
                     {"fields":["id","name"],"limit":5})
-                for _il in (_ivl or []):
-                    _nn = (_il["name"].replace("VAT 21%","IVA Crédito Fiscal 21%")
-                                     .replace("VAT 27%","IVA Crédito Fiscal 27%")
-                                     .replace("C_IVA 21%","IVA Crédito Fiscal 21%")
-                                     .replace("C_IVA 27%","IVA Crédito Fiscal 27%"))
-                    if _nn != _il["name"]:
+                # Fallback: buscar por nombre
+                if not _iva_mv_lines:
+                    _iva_mv_lines = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                        "account.move.line","search_read",
+                        [[("move_id","=",move_id),("tax_line_id","!=",False),
+                          ("account_id.code","=","1.1.4.04.010")]],
+                        {"fields":["id","name"],"limit":5})
+                for _il in (_iva_mv_lines or []):
+                    _n = _il.get("name","")
+                    _nn = (_n.replace("VAT 21%","IVA Crédito Fiscal 21%")
+                            .replace("VAT 27%","IVA Crédito Fiscal 27%")
+                            .replace("C_IVA 21%","IVA Crédito Fiscal 21%")
+                            .replace("C_IVA 27%","IVA Crédito Fiscal 27%"))
+                    if _nn != _n:
                         models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                             "account.move.line","write",[[_il["id"]],{"name":_nn}])
             except Exception: pass
