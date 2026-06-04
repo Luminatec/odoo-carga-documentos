@@ -1054,15 +1054,10 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                     continue
                 # Generar label descriptivo en español
                 _raw  = str(_pl.get("provincia") or _pl.get("label") or "").strip()
-                # Normalizar nombres de provincia (sin espacio → con espacio)
-                _prov_display = (_raw
-                    .replace("BuenosAires", "Buenos Aires")
-                    .replace("SantaFe", "Santa Fe")
-                    .replace("RioNegro", "Río Negro")
-                    .strip())
-                _name = (_prov_display if "percep" in _prov_display.lower() or "iva" in _prov_display.lower()
-                         else f"Percepción IIBB {_prov_display}" if _prov_display
-                         else "Percepción")
+                # Usar el nombre de la cuenta de Odoo directamente (ya tiene el formato correcto)
+                # label puede ser el nombre de la cuenta ("Percepción IIBB Buenos Aires sufrida")
+                # o el label/provincia como fallback
+                _name = _raw or "Percepción" 
                 models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                     "account.move.line", "create", [{
                         "move_id":         move_id,
