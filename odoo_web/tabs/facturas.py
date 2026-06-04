@@ -706,6 +706,23 @@ def render(models, uid, api_key, models_url, is_admin):
                                         "tax_ids":    [],
                                     })
 
+                            # Agregar IVA 27% si se detectó en el PDF
+                            _iva27_form = float(extracted.get("iva_27", 0) or 0)
+                            if _iva27_form > 0 and _perc_lines is not None:
+                                # Buscar cuenta IVA crédito fiscal
+                                _iva27_acct = next((
+                                    aid for aid, albl in get_all_accounts(models_url, uid, api_key)
+                                    if "iva" in albl.lower() and "créd" in albl.lower()
+                                    and "(copia)" not in albl.lower()
+                                ), None)
+                                if _iva27_acct:
+                                    _perc_lines.append({
+                                        "label":      "IVA Crédito Fiscal 27%",
+                                        "importe":    _iva27_form,
+                                        "account_id": _iva27_acct,
+                                        "tax_ids":    [],
+                                    })
+
                             # Solo agregar percepciones si hay línea principal
                             _has_main_line = bool(account_id_sel or product_id_sel) and bool(amount_i)
                             move_id = create_vendor_bill(models, uid, api_key,
