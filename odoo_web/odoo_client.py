@@ -1121,8 +1121,16 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                                          "check_move_validity": False}})
                         _payable_adjustment += _diff
 
-            # 4. Ajustar la línea de Proveedores si los montos cambiaron
-            if abs(_payable_adjustment) > 0.001:
+            # 4. Recalcular la línea de Proveedores para que el asiento balancee
+            #    Suma todos los débitos (excluye payable) y los pone como crédito del payable
+            _all_debit = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                "account.move.line", "search_read",
+                [[("move_id", "=", move_id),
+                  ("account_id.account_type", "not in",
+                   ["liability_payable", "liability_current"])]],
+                {"fields": ["debit"], "limit": 50})
+            _correct_total = sum(float(l.get("debit", 0)) for l in (_all_debit or []))
+            if _correct_total > 0:
                 _pay = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                     "account.move.line", "search_read",
                     [[("move_id", "=", move_id),
@@ -1130,10 +1138,12 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                        ["liability_payable", "liability_current"])]],
                     {"fields": ["id", "credit"], "limit": 1})
                 if _pay:
-                    _nc = float(_pay[0].get("credit", 0)) + _payable_adjustment
                     models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                         "account.move.line", "write",
-                        [[_pay[0]["id"]], {"credit": _nc, "amount_currency": -_nc}],
+                        [[_pay[0]["id"]], {
+                            "credit":          _correct_total,
+                            "amount_currency": -_correct_total,
+                        }],
                         {"context": {"no_recompute": True,
                                      "check_move_validity": False}})
         except Exception as _pe:
