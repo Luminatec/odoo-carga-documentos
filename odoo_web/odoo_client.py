@@ -1069,25 +1069,20 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                 _perc_total += _amt
                 _perc_acct_to_amt[_aid] = {"importe": _amt, "label": _lbl}
 
+            _iva27_tax_id = None  # se usa más abajo para badge
             if _iva27_amt > 0:
                 try:
-                    _iva_tl = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                        "account.move.line","search_read",
-                        [[("move_id","=",move_id),("tax_line_id","!=",False)]],
-                        {"fields":["account_id"],"limit":1})
-                    if _iva_tl:
-                        _ia = (_iva_tl[0]["account_id"][0]
-                               if isinstance(_iva_tl[0]["account_id"],(list,tuple))
-                               else _iva_tl[0]["account_id"])
-                        models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                            "account.move.line","create",[{
-                                "move_id":move_id,"account_id":_ia,
-                                "name":"IVA Crédito Fiscal 27%",
-                                "debit":_iva27_amt,"credit":0.0,"amount_currency":_iva27_amt,
-                            }])
-                        _perc_total += _iva27_amt
+                    _t27l = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                        "account.tax","search_read",
+                        [[("amount","=",27),("type_tax_use","=","purchase"),("active","=",True)]],
+                        {"fields":["id","name"],"limit":5})
+                    _t27l = [t for t in (_t27l or [])
+                              if "perc" not in str(t.get("name","")).lower()]
+                    if _t27l:
+                        _iva27_tax_id = _t27l[0]["id"]
+                    _perc_total += _iva27_amt
                 except Exception as _e27:
-                    _logger.warning("iva27: %s", _e27)
+                    _logger.warning("iva27 tax lookup: %s", _e27)
 
             # Actualizar Proveedores (busca por crédito máximo, evita related field XML-RPC)
             if _perc_total > 0:
@@ -1122,6 +1117,23 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                         if _tid and _tid not in _badge_tids:
                             _badge_tids.append(_tid)
                             _badge_aid_map[_tid] = (_aid, _info["label"])
+                # Agregar IVA 27% al badge si se encontró el tax
+                if _iva27_tax_id and _iva27_tax_id not in _badge_tids:
+                    try:
+                        _r27 = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                            "account.tax.repartition.line","search_read",
+                            [[("tax_id","=",_iva27_tax_id),
+                              ("repartition_type","=","tax")]],
+                            {"fields":["account_id"],"limit":1})
+                        if _r27:
+                            _a27 = (_r27[0]["account_id"][0]
+                                    if isinstance(_r27[0]["account_id"],(list,tuple))
+                                    else _r27[0]["account_id"])
+                            _badge_tids.append(_iva27_tax_id)
+                            _badge_aid_map[_iva27_tax_id] = (_a27, "IVA Crédito Fiscal 27%")
+                    except Exception as _e27b:
+                        _logger.warning("iva27 badge prep: %s", _e27b)
+
                 if _badge_tids:
                     _pll = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                         "account.move.line","search_read",
@@ -1148,8 +1160,11 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                             models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                                 "account.move.line","unlink",[[l["id"] for l in _dp]])
                         # Sobreescribir badge amounts con valores del PDF + label correcto
+                        # _iva27 override: usar _iva27_amt directo (no está en _perc_acct_to_amt)
+                        _iva27_override = {_badge_aid_map[_iva27_tax_id][0]: _iva27_amt} if (
+                            _iva27_tax_id and _iva27_tax_id in _badge_aid_map) else {}
                         for _tid, (_aid, _lbl) in _badge_aid_map.items():
-                            _correct = _perc_acct_to_amt.get(_aid,{}).get("importe",0)
+                            _correct = _iva27_override.get(_aid) or _perc_acct_to_amt.get(_aid,{}).get("importe",0)
                             _btl = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                                 "account.move.line","search_read",
                                 [[("move_id","=",move_id),("tax_line_id","=",_tid),
