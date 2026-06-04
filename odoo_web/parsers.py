@@ -255,6 +255,19 @@ def _extract_percepciones_iibb(text):
         if detalle:
             return sum(d["importe"] for d in detalle), detalle
 
+        # Formato 2b: "IIBB BUENOS AIRES (PERCEPCIÓN) 0.00 0.00 0.00 3,918.00" — línea de tabla
+        if not detalle:
+            for m2b in _re.finditer(
+                    "^IIBB\s+([\w\s]+?)(?:\s+\([^)]*PERCEP[^)]*\))?\s+"
+                    "[\d.,]+\s+[\d.,]+\s+[\d.,]+\s+([\d.,]+)",
+                    text, _re.IGNORECASE | _re.MULTILINE):
+                prov = m2b.group(1).strip()
+                imp  = _pn(m2b.group(2))
+                if imp > 0 and prov not in [d["provincia"] for d in detalle]:
+                    detalle.append({"provincia": prov, "importe": imp})
+        if detalle:
+            return sum(d["importe"] for d in detalle), detalle
+
         # Formato 3: resumen Andreani (solo total)
         _p1 = "Subtotal[^\n]*IIBB[^\n]*\n\s*([\d.,]+)\s+([\d.,]+)\s+[\d.,]+\s+([\d.,]+)"
         m1 = _re.search(_p1, text, _re.IGNORECASE)
