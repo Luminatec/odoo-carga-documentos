@@ -1068,6 +1068,25 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                     }])
                 _perc_total += _amt
 
+            # Renombrar "VAT 21%" → "IVA Crédito Fiscal 21%" en los apuntes
+            try:
+                _iva_lines = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                    "account.move.line", "search_read",
+                    [[("move_id", "=", move_id), ("name", "in", ["VAT 21%", "VAT 27%",
+                       "C_IVA 21%", "C_IVA 27%"])]],
+                    {"fields": ["id", "name"], "limit": 5})
+                for _il in (_iva_lines or []):
+                    _new_iva_name = (_il["name"].replace("VAT 21%", "IVA Crédito Fiscal 21%")
+                                     .replace("VAT 27%", "IVA Crédito Fiscal 27%")
+                                     .replace("C_IVA 21%", "IVA Crédito Fiscal 21%")
+                                     .replace("C_IVA 27%", "IVA Crédito Fiscal 27%"))
+                    if _new_iva_name != _il["name"]:
+                        models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                            "account.move.line", "write",
+                            [[_il["id"]], {"name": _new_iva_name}])
+            except Exception:
+                pass
+
             # Actualizar la línea Proveedores para que el asiento balancee
             if _perc_total > 0:
                 _pay = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
