@@ -1089,18 +1089,20 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                 except Exception as _e27:
                     _logger.warning("iva27: %s", _e27)
 
-            # Actualizar Proveedores
+            # Actualizar Proveedores — busca la línea de mayor crédito (evita related field)
             if _perc_total > 0:
-                _pay = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                    "account.move.line","search_read",
-                    [[("move_id","=",move_id),
-                      ("account_id.account_type","in",["liability_payable","liability_current"])]],
-                    {"fields":["id","credit"],"limit":1})
-                if _pay:
-                    _nc = float(_pay[0].get("credit",0)) + _perc_total
-                    models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                        "account.move.line","write",
-                        [[_pay[0]["id"]],{"credit":_nc,"amount_currency":-_nc}])
+                try:
+                    _pay = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                        "account.move.line","search_read",
+                        [[("move_id","=",move_id),("credit","!=",0)]],
+                        {"fields":["id","credit"],"order":"credit desc","limit":1})
+                    if _pay:
+                        _nc = float(_pay[0].get("credit",0)) + _perc_total
+                        models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                            "account.move.line","write",
+                            [[_pay[0]["id"]],{"credit":_nc,"amount_currency":-_nc}])
+                except Exception as _eP:
+                    _logger.warning("payable update: %s", _eP)
 
             # Renombrar IVA a español — todas las tax lines de la factura
             try:
