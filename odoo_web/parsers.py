@@ -94,11 +94,11 @@ Reglas:
 - Números como decimales sin símbolo de moneda (ej: 318124.13, no "$318.124,13")
 
 Factura:
-""" + text
+""" + text[:3000]
 
     resp = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=512,
+        model="claude-haiku-4-5-20251001",
+        max_tokens=300,
         messages=[{"role": "user", "content": _prompt}]
     )
 
@@ -292,10 +292,10 @@ def _extract_percepciones_iibb(text):
 def extract_pdf_fields(file_bytes):
     """
     Parser para facturas electrónicas argentinas.
-    Intenta primero el bot (Claude Sonnet nativo PDF), luego IA local, luego regex.
+    Orden: 1) Bot Cloud Run  2) Regex  3) Haiku IA (solo si regex falla en campos críticos)
     Retorna (fields_dict, raw_text).
     """
-    # ── Bot Cloud Run (Claude Sonnet, soporte nativo PDF) ─────────────────
+    # ── 1. Bot Cloud Run (Claude Sonnet nativo PDF) ───────────────────────
     _bot = _bot_extract(file_bytes, "factura.pdf", "application/pdf", "factura")
     if _bot.get("proveedor") or _bot.get("numero"):
         _bot["_source"] = "bot"
@@ -311,7 +311,6 @@ def extract_pdf_fields(file_bytes):
         _piva, _pivad = _extract_percepcion_iva(_raw)
         if _piva: _bot["percepcion_iva"] = _piva
         if _pivad: _bot["percepcion_iva_detalle"] = _pivad
-        # Extraer IVA 27% si existe (telecom: voz/SMS a tasa diferencial)
         import re as _re_iva27
         _m27 = _re_iva27.search(r"IVA\s*27\s*%\s*([\d.,]+)", _raw, _re_iva27.IGNORECASE)
         if _m27:
@@ -319,7 +318,6 @@ def extract_pdf_fields(file_bytes):
                 from odoo_client import normalize_amount as _na27
                 _bot["iva_27"] = float(_na27(_m27.group(1)))
             except Exception: pass
-        # Normalizar número si falta o tiene formato incorrecto
         _bn = str(_bot.get("numero") or "").strip()
         if not re.match(r"^\d{4,5}-\d{6,8}$", _bn):
             for _bnp in [r"Nro\.Comprobante[:\s]*(\d{4,5}-\d{6,8})", r"\b(\d{4,5}-\d{6,8})\b"]:
@@ -330,6 +328,7 @@ def extract_pdf_fields(file_bytes):
                     break
         return _bot, _raw
 
+    # ── 2. Extraer texto del PDF ──────────────────────────────────────────
     try:
         import pdfplumber
         with pdfplumber.open(BytesIO(file_bytes)) as pdf:
@@ -339,46 +338,7 @@ def extract_pdf_fields(file_bytes):
     if not text.strip():
         return {}, ""
 
-    # ── Intentar extracción con IA local (Claude Haiku) ───────────────────
-    try:
-        _ai_fields = _ai_extract_invoice_fields(text)
-        # Considerar exitoso si al menos tiene proveedor o número
-        if _ai_fields.get("proveedor") or _ai_fields.get("numero"):
-            _p, _pd = _extract_percepciones_iibb(text)
-            if _p: _ai_fields["percepcion_iibb"] = _p
-            if _pd: _ai_fields["percepcion_iibb_detalle"] = _pd
-            _piva, _pivad = _extract_percepcion_iva(text)
-            if _piva: _ai_fields["percepcion_iva"] = _piva
-            if _pivad: _ai_fields["percepcion_iva_detalle"] = _pivad
-            import re as _re_iva27
-            _m27 = _re_iva27.search(r"IVA\s*27\s*%\s*([\d.,]+)", text, _re_iva27.IGNORECASE)
-            if _m27:
-                try:
-                    from odoo_client import normalize_amount as _na27
-                    _ai_fields["iva_27"] = float(_na27(_m27.group(1)))
-                except Exception: pass
-            # Normalizar número: si la IA no lo extrajo o no tiene formato XXXXX-XXXXXXXX
-            _ai_num = str(_ai_fields.get("numero") or "").strip()
-            _ai_num_ok = bool(re.match(r"^\d{4,5}-\d{6,8}$", _ai_num))
-            if not _ai_num_ok:
-                for _np in [
-                    r"Nro\.Comprobante[:\s]*(\d{4,5}-\d{6,8})",
-                    r"\b(\d{4,5}-\d{6,8})\b",
-                ]:
-                    _nm = re.search(_np, text, re.IGNORECASE)
-                    if _nm:
-                        _raw_n = _nm.group(1)
-                        _parts = _raw_n.split("-")
-                        if len(_parts) == 2:
-                            _ai_fields["numero"] = f"{_parts[0].zfill(5)}-{_parts[1].zfill(8)}"
-                        else:
-                            _ai_fields["numero"] = _raw_n
-                        break
-            return _ai_fields, text
-    except Exception:
-        pass  # silencioso: caer al parser regex
-
-    # ── Fallback: parser regex original ──────────────────────────────────
+    # ── 3. Parser regex ───────────────────────────────────────────────────
 
     fields = {"numero": "", "fecha": "", "fecha_iso": "", "fecha_vencimiento": "",
               "fecha_vto_iso": "", "proveedor": "", "total": "", "neto": "", "iva": "",
@@ -602,6 +562,56 @@ def extract_pdf_fields(file_bytes):
     if cuit_m:
         fields["cuit"] = re.sub(r'[\s\-]', '', cuit_m.group(1))
 
+    # ── 4. Enriquecer con percepciones (extractor especializado) ──────────
+    _p2, _pd2 = _extract_percepciones_iibb(text)
+    if _p2:
+        fields["percepcion_iibb"] = _p2
+        fields["percepcion_iibb_detalle"] = _pd2
+    _piva2, _pivad2 = _extract_percepcion_iva(text)
+    if _piva2:
+        fields["percepcion_iva"] = _piva2
+        fields["percepcion_iva_detalle"] = _pivad2
+    _m27r = re.search(r"IVA\s*27\s*%\s*([\d.,]+)", text, re.IGNORECASE)
+    if _m27r:
+        try:
+            fields["iva_27"] = float(normalize_amount(_m27r.group(1)))
+        except Exception:
+            pass
+
+    # ── 5. Si regex obtuvo los campos críticos, retornar sin llamar a la IA
+    if fields.get("numero") and fields.get("total"):
+        return fields, text
+
+    # ── 6. Fallback IA: Haiku con texto truncado ──────────────────────────
+    try:
+        _ai_fields = _ai_extract_invoice_fields(text)
+        if _ai_fields.get("proveedor") or _ai_fields.get("numero"):
+            # Preservar percepciones del regex (son más confiables que la IA)
+            for _k in ("percepcion_iibb", "percepcion_iibb_detalle",
+                       "percepcion_iva", "percepcion_iva_detalle", "iva_27"):
+                if fields.get(_k):
+                    _ai_fields[_k] = fields[_k]
+            # Normalizar número si la IA no lo trajo en formato estándar
+            _ai_num = str(_ai_fields.get("numero") or "").strip()
+            if not re.match(r"^\d{4,5}-\d{6,8}$", _ai_num):
+                for _np in [
+                    r"Nro\.Comprobante[:\s]*(\d{4,5}-\d{6,8})",
+                    r"\b(\d{4,5}-\d{6,8})\b",
+                ]:
+                    _nm = re.search(_np, text, re.IGNORECASE)
+                    if _nm:
+                        _raw_n = _nm.group(1)
+                        _parts = _raw_n.split("-")
+                        if len(_parts) == 2:
+                            _ai_fields["numero"] = f"{_parts[0].zfill(5)}-{_parts[1].zfill(8)}"
+                        else:
+                            _ai_fields["numero"] = _raw_n
+                        break
+            return _ai_fields, text
+    except Exception:
+        pass
+
+    # ── 7. Retornar lo que haya sacado el regex ───────────────────────────
     return fields, text
 
 
@@ -1163,7 +1173,7 @@ def _claude_api_extract_oc(file_bytes: bytes, mime_type: str = "application/pdf"
         )
         _resp2 = _client2.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=2048,
+            max_tokens=1024,
             messages=[{"role": "user", "content": [
                 {"type": "document", "source": {
                     "type": "base64", "media_type": mime_type,
