@@ -1042,11 +1042,12 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
     except OdooError as e:
         raise OdooError(f"No se pudo crear la factura '{ref}': {e}") from e
 
-    # Percepciones: líneas directas con importes exactos del PDF + labels en español
+    # Percepciones: líneas directas + badge + rename labels
     if percepcion_lines and move_id:
         try:
             _perc_total = 0.0
             _iva27_amt  = 0.0
+            _perc_acct_to_amt = {}  # account_id -> {importe, label}
 
             for _pl in percepcion_lines:
                 _amt = float(_pl.get("importe", 0))
@@ -1057,17 +1058,17 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                     _iva27_amt = _amt
                     continue
                 _prov = str(_pl.get("provincia") or _pl.get("label") or "").strip()
-                _prov = _prov.replace("BuenosAires","Buenos Aires").replace("SantaFe","Santa Fe")
-                _name = (_prov if "percep" in _prov.lower() or "iva" in _prov.lower()
+                _prov = _prov.replace("BuenosAires","Buenos Aires").replace("BUENOS AIRES","Buenos Aires").replace("SantaFe","Santa Fe")
+                _lbl  = (_prov if "percep" in _prov.lower() or "iva" in _prov.lower()
                          else f"Percepción IIBB {_prov}" if _prov else "Percepción")
                 models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                     "account.move.line","create",[{
-                        "move_id": move_id, "account_id": _aid, "name": _name,
-                        "debit": _amt, "credit": 0.0, "amount_currency": _amt,
+                        "move_id": move_id,"account_id": _aid,"name": _lbl,
+                        "debit": _amt,"credit": 0.0,"amount_currency": _amt,
                     }])
                 _perc_total += _amt
+                _perc_acct_to_amt[_aid] = {"importe": _amt, "label": _lbl}
 
-            # IVA 27% usando la cuenta del IVA ya existente en la factura
             if _iva27_amt > 0:
                 try:
                     _iva_tl = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
@@ -1080,16 +1081,15 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                                else _iva_tl[0]["account_id"])
                         models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                             "account.move.line","create",[{
-                                "move_id": move_id, "account_id": _ia,
-                                "name": "IVA Crédito Fiscal 27%",
-                                "debit": _iva27_amt, "credit": 0.0,
-                                "amount_currency": _iva27_amt,
+                                "move_id":move_id,"account_id":_ia,
+                                "name":"IVA Crédito Fiscal 27%",
+                                "debit":_iva27_amt,"credit":0.0,"amount_currency":_iva27_amt,
                             }])
                         _perc_total += _iva27_amt
                 except Exception as _e27:
                     _logger.warning("iva27: %s", _e27)
 
-            # Actualizar Proveedores — busca la línea de mayor crédito (evita related field)
+            # Actualizar Proveedores (busca por crédito máximo, evita related field XML-RPC)
             if _perc_total > 0:
                 try:
                     _pay = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
@@ -1102,34 +1102,13 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                             "account.move.line","write",
                             [[_pay[0]["id"]],{"credit":_nc,"amount_currency":-_nc}])
                 except Exception as _eP:
-                    _logger.warning("payable update: %s", _eP)
+                    _logger.warning("payable: %s", _eP)
 
-            # Renombrar IVA a español — todas las tax lines de la factura
+            # Agregar badges via invoice_line_ids (skip_account_move_synchronization)
             try:
-                import re as _re_ren
-                _all_tax_ln = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                    "account.move.line","search_read",
-                    [[("move_id","=",move_id),("tax_line_id","!=",False)]],
-                    {"fields":["id","name"],"limit":20})
-                for _il in (_all_tax_ln or []):
-                    _n = _il.get("name","")
-                    _nn = (_re_ren.sub(r"(?i)^VAT\s*21%$","IVA Crédito Fiscal 21%",
-                           _re_ren.sub(r"(?i)^VAT\s*27%$","IVA Crédito Fiscal 27%",
-                           _re_ren.sub(r"(?i)^C_IVA\s*21%$","IVA Crédito Fiscal 21%",
-                           _re_ren.sub(r"(?i)^C_IVA\s*27%$","IVA Crédito Fiscal 27%",
-                           _n)))))
-                    if _nn != _n:
-                        models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                            "account.move.line","write",[[_il["id"]],{"name":_nn}])
-            except Exception: pass
-
-            # Agregar perception taxes como badges Y eliminar el $1 que Odoo crea
-            try:
-                _badge_tax_ids = []
-                for _pl in percepcion_lines:
-                    _aid = _pl.get("account_id")
-                    if not _aid or "27%" in _pl.get("label",""):
-                        continue
+                _badge_tids = []
+                _badge_aid_map = {}  # tax_id -> (account_id, label)
+                for _aid, _info in _perc_acct_to_amt.items():
                     _reps = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                         "account.tax.repartition.line","search_read",
                         [[("account_id","=",_aid),("repartition_type","=","tax")]],
@@ -1137,65 +1116,68 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                     if _reps:
                         _pr = [r for r in _reps if "perc" in
                                (r["tax_id"][1] if isinstance(r["tax_id"],(list,tuple)) else "").lower()]
-                        _b = _pr[0] if _pr else _reps[0]
+                        _b  = _pr[0] if _pr else _reps[0]
                         _tv = _b["tax_id"]
                         _tid = _tv[0] if isinstance(_tv,(list,tuple)) else _tv
-                        if _tid and _tid not in _badge_tax_ids:
-                            _badge_tax_ids.append(_tid)
-                if _badge_tax_ids:
-                    _pl_ln = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                        if _tid and _tid not in _badge_tids:
+                            _badge_tids.append(_tid)
+                            _badge_aid_map[_tid] = (_aid, _info["label"])
+                if _badge_tids:
+                    _pll = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                         "account.move.line","search_read",
                         [[("move_id","=",move_id),("product_id","!=",False)]],
                         {"fields":["id","tax_ids"],"limit":1})
-                    if _pl_ln:
-                        _plid = _pl_ln[0]["id"]
-                        _cur  = list(_pl_ln[0].get("tax_ids") or [])
-                        _all  = list(set(_cur + _badge_tax_ids))
-                        # Escribir badges sin sincronizar nuevas tax lines
+                    if _pll:
+                        _plid = _pll[0]["id"]
+                        _cur  = list(_pll[0].get("tax_ids") or [])
+                        _all  = list(set(_cur + _badge_tids))
                         models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                             "account.move","write",
                             [[move_id],{"invoice_line_ids":[(1,_plid,{"tax_ids":[(6,0,_all)]})]}],
-                            {"context":{"no_recompute":True,"skip_account_move_synchronization":True,
+                            {"context":{"no_recompute":True,
+                                        "skip_account_move_synchronization":True,
                                         "check_move_validity":False}})
-                        # Eliminar las $1 tax lines que haya creado Odoo (si alguna se creó)
-                        _flat_tl = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                        # Eliminar direct lines de percepción (incluye $0 placeholders)
+                        _dp = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                             "account.move.line","search_read",
-                            [[("move_id","=",move_id),("tax_line_id","in",_badge_tax_ids),
-                              ("debit","<=",1.01)]],
-                            {"fields":["id","debit"],"limit":20})
-                        # Eliminar direct lines de percepción (sin tax_line_id, sin producto)
-                    # incluye tanto debit=3918 como debit=0 (placeholders)
-                    _perc_acct_ids = [_pl.get("account_id") for _pl in percepcion_lines
-                                      if _pl.get("account_id") and "27%" not in _pl.get("label","")]
-                    _direct_perc = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                        "account.move.line","search_read",
-                        [[("move_id","=",move_id),("tax_line_id","=",False),
-                          ("product_id","=",False),
-                          ("account_id","in",_perc_acct_ids)]],
-                        {"fields":["id","debit"],"limit":20})
-                    if _direct_perc:
-                        models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                            "account.move.line","unlink",[[l["id"] for l in _direct_perc]])
-
-                    # Sobrescribir los $1 badge tax lines con el importe correcto del PDF
-                    _aid_to_amt = {_pl["account_id"]: float(_pl.get("importe",0))
-                                   for _pl in percepcion_lines
-                                   if _pl.get("account_id") and "27%" not in _pl.get("label","")}
-                    for _badge_tid in _badge_tax_ids:
-                        for _aid, _correct_amt in _aid_to_amt.items():
+                            [[("move_id","=",move_id),("tax_line_id","=",False),
+                              ("product_id","=",False),
+                              ("account_id","in",list(_perc_acct_to_amt.keys()))]],
+                            {"fields":["id"],"limit":20})
+                        if _dp:
+                            models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                                "account.move.line","unlink",[[l["id"] for l in _dp]])
+                        # Sobreescribir badge amounts con valores del PDF + label correcto
+                        for _tid, (_aid, _lbl) in _badge_aid_map.items():
+                            _correct = _perc_acct_to_amt.get(_aid,{}).get("importe",0)
                             _btl = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                                 "account.move.line","search_read",
-                                [[("move_id","=",move_id),("tax_line_id","=",_badge_tid),
+                                [[("move_id","=",move_id),("tax_line_id","=",_tid),
                                   ("account_id","=",_aid)]],
                                 {"fields":["id","debit"],"limit":1})
-                            if _btl:
-                                _cur = float(_btl[0].get("debit",0))
-                                if abs(_cur - _correct_amt) > 0.01:
-                                    models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                                        "account.move.line","write",
-                                        [[_btl[0]["id"]],{
-                                            "debit":_correct_amt,"credit":0.0,
-                                            "amount_currency":_correct_amt}])
+                            if _btl and _correct > 0:
+                                models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                                    "account.move.line","write",
+                                    [[_btl[0]["id"]],{"debit":_correct,"credit":0.0,
+                                                       "amount_currency":_correct,"name":_lbl}])
+            except Exception: pass
+
+            # Renombrar IVA a español (DESPUÉS del badge para capturar todas las tax lines)
+            try:
+                import re as _re_ren
+                _all_tl = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                    "account.move.line","search_read",
+                    [[("move_id","=",move_id),("tax_line_id","!=",False)]],
+                    {"fields":["id","name"],"limit":20})
+                for _il in (_all_tl or []):
+                    _n  = _il.get("name","")
+                    _nn = (_re_ren.sub(r"(?i)^VAT\s*21%$","IVA Crédito Fiscal 21%",
+                           _re_ren.sub(r"(?i)^VAT\s*27%$","IVA Crédito Fiscal 27%",
+                           _re_ren.sub(r"(?i)^C_IVA\s*21%$","IVA Crédito Fiscal 21%",
+                           _re_ren.sub(r"(?i)^C_IVA\s*27%$","IVA Crédito Fiscal 27%",_n)))))
+                    if _nn != _n:
+                        models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                            "account.move.line","write",[[_il["id"]],{"name":_nn}])
             except Exception: pass
         except Exception as _pe:
             _logger.warning("create_vendor_bill percepcion: %s", _pe)
