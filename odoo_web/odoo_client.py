@@ -1072,14 +1072,42 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
             _iva27_tax_id = None  # se usa más abajo para badge
             if _iva27_amt > 0:
                 try:
-                    _t27l = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                        "account.tax","search_read",
-                        [[("amount","=",27),("type_tax_use","=","purchase"),("active","=",True)]],
-                        {"fields":["id","name"],"limit":5})
-                    _t27l = [t for t in (_t27l or [])
-                              if "perc" not in str(t.get("name","")).lower()]
-                    if _t27l:
-                        _iva27_tax_id = _t27l[0]["id"]
+                    # Buscar C_IVA 27% via la cuenta IVA que ya tiene la factura
+                    # (más robusto que buscar por amount=27 que puede variar)
+                    _iva_tl_27 = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                        "account.move.line","search_read",
+                        [[("move_id","=",move_id),("tax_line_id","!=",False)]],
+                        {"fields":["account_id"],"limit":1})
+                    if _iva_tl_27:
+                        _ia_27 = (_iva_tl_27[0]["account_id"][0]
+                                  if isinstance(_iva_tl_27[0]["account_id"],(list,tuple))
+                                  else _iva_tl_27[0]["account_id"])
+                        # Buscar todos los taxes de compra que usan esa cuenta
+                        _reps_27 = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                            "account.tax.repartition.line","search_read",
+                            [[("account_id","=",_ia_27),
+                              ("repartition_type","=","tax")]],
+                            {"fields":["tax_id"],"limit":20})
+                        for _r27 in (_reps_27 or []):
+                            _tdata = _r27.get("tax_id")
+                            _tname = str(_tdata[1] if isinstance(_tdata,(list,tuple)) else "")
+                            _tid27 = (_tdata[0] if isinstance(_tdata,(list,tuple)) else _tdata)
+                            if "27" in _tname and "perc" not in _tname.lower():
+                                _iva27_tax_id = _tid27
+                                break
+                        # Fallback: buscar por nombre en account.tax
+                        if not _iva27_tax_id:
+                            _t27l = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                                "account.tax","search_read",
+                                [[("name","ilike","27"),
+                                  ("type_tax_use","in",["purchase","all"]),
+                                  ("active","=",True)]],
+                                {"fields":["id","name"],"limit":10})
+                            _t27l = [t for t in (_t27l or [])
+                                      if "27" in str(t.get("name",""))
+                                      and "perc" not in str(t.get("name","")).lower()]
+                            if _t27l:
+                                _iva27_tax_id = _t27l[0]["id"]
                     _perc_total += _iva27_amt
                 except Exception as _e27:
                     _logger.warning("iva27 tax lookup: %s", _e27)
