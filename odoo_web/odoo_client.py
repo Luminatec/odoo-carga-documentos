@@ -1042,16 +1042,17 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
     except OdooError as e:
         raise OdooError(f"No se pudo crear la factura '{ref}': {e}") from e
 
-    # Agregar percepciones como tax badges en la línea de producto
-    # Busca el tax correcto via repartition line y lo agrega a tax_ids del producto
-    # Odoo genera las líneas en Apuntes automáticamente (excluidas de Líneas de factura)
+    # Agregar percepciones como tax badges + sobrescribir montos con valores del PDF
     if percepcion_lines and move_id:
         try:
-            _tax_ids_to_add = []
+            # 1. Encontrar tax IDs via repartition por cuenta contable
+            _perc_tax_map = {}  # account_id → {tax_id, importe, label}
             for _pl in percepcion_lines:
                 _aid = _pl.get("account_id")
-                if not _aid:
+                _amt = float(_pl.get("importe", 0))
+                if not _aid or _amt <= 0:
                     continue
+                _tid = None
                 try:
                     _reps = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                         "account.tax.repartition.line", "search_read",
@@ -1060,26 +1061,74 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                     if _reps:
                         _tv = _reps[0]["tax_id"]
                         _tid = (_tv[0] if isinstance(_tv, (list, tuple)) else _tv)
-                        if _tid and _tid not in _tax_ids_to_add:
-                            _tax_ids_to_add.append(_tid)
                 except Exception:
                     pass
+                if _tid:
+                    _perc_tax_map[_aid] = {"tax_id": _tid, "importe": _amt,
+                                           "label": str(_pl.get("provincia") or _pl.get("label") or "")}
 
-            if _tax_ids_to_add:
-                # Agregar taxes a la línea de producto principal
-                _prod_line = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+            if not _perc_tax_map:
+                return move_id
+
+            # 2. Agregar perception taxes como badges en la línea de producto
+            _prod_line = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                "account.move.line", "search_read",
+                [[("move_id", "=", move_id), ("product_id", "!=", False)]],
+                {"fields": ["id", "tax_ids"], "limit": 1})
+            if not _prod_line:
+                return move_id
+
+            _lid      = _prod_line[0]["id"]
+            _cur_tax  = list(_prod_line[0].get("tax_ids") or [])
+            _new_tids = list(set(_cur_tax + [v["tax_id"] for v in _perc_tax_map.values()]))
+            models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                "account.move.line", "write",
+                [[_lid], {"tax_ids": [(6, 0, _new_tids)]}])
+
+            # 3. Sobrescribir los montos de las tax lines creadas por Odoo
+            #    Usar no_recompute=True para evitar que Odoo los resetee
+            _perc_total_override = 0.0
+            _payable_adjustment  = 0.0
+            for _aid, _info in _perc_tax_map.items():
+                _tlines = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                     "account.move.line", "search_read",
-                    [[("move_id", "=", move_id), ("product_id", "!=", False)]],
-                    {"fields": ["id", "tax_ids"], "limit": 1})
-                if _prod_line:
-                    _lid  = _prod_line[0]["id"]
-                    _cur  = list(_prod_line[0].get("tax_ids") or [])
-                    _all  = list(set(_cur + _tax_ids_to_add))
+                    [[("move_id", "=", move_id),
+                      ("tax_line_id", "=", _info["tax_id"]),
+                      ("account_id", "=", _aid)]],
+                    {"fields": ["id", "debit", "amount_currency"], "limit": 1})
+                if _tlines:
+                    _cur_deb  = float(_tlines[0].get("debit", 0))
+                    _new_deb  = _info["importe"]
+                    _diff     = _new_deb - _cur_deb
+                    if abs(_diff) > 0.001:
+                        models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                            "account.move.line", "write",
+                            [[_tlines[0]["id"]], {
+                                "debit":          _new_deb,
+                                "credit":         0.0,
+                                "amount_currency": _new_deb,
+                            }],
+                            {"context": {"no_recompute": True,
+                                         "check_move_validity": False}})
+                        _payable_adjustment += _diff
+
+            # 4. Ajustar la línea de Proveedores si los montos cambiaron
+            if abs(_payable_adjustment) > 0.001:
+                _pay = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                    "account.move.line", "search_read",
+                    [[("move_id", "=", move_id),
+                      ("account_id.account_type", "in",
+                       ["liability_payable", "liability_current"])]],
+                    {"fields": ["id", "credit"], "limit": 1})
+                if _pay:
+                    _nc = float(_pay[0].get("credit", 0)) + _payable_adjustment
                     models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                         "account.move.line", "write",
-                        [[_lid], {"tax_ids": [(6, 0, _all)]}])
+                        [[_pay[0]["id"]], {"credit": _nc, "amount_currency": -_nc}],
+                        {"context": {"no_recompute": True,
+                                     "check_move_validity": False}})
         except Exception as _pe:
-            _logger.warning("create_vendor_bill: percepcion badges: %s", _pe)
+            _logger.warning("create_vendor_bill: percepcion badges+override: %s", _pe)
     if file_bytes:
         try:
             attach_file(models, uid, api_key, "account.move", move_id, filename, file_bytes, mimetype)
