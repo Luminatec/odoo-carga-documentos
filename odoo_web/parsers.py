@@ -477,9 +477,11 @@ def extract_pdf_fields(file_bytes):
         r"(?:Gravado)\s*:\s*\$?\s*([\d.,]+)",
         # 2. "Subtotal:" con dos puntos
         r"(?:SUBTOTAL|Subtotal)\s*:\s*\$?\s*([\d.,]+)",
-        # 3. "Subtotal" + newline opcional + "$" + monto (Odoo/columnas separadas en PDF)
+        # 3. "Subtotal sin impuestos" — formato Telecom (concatenado o con espacios)
+        r"SUBTOTAL\s*SIN\s*IMPUESTOS\s*\$?\s*([\d.,]+)",
+        # 4. "Subtotal" + newline opcional + "$" + monto (Odoo/columnas separadas en PDF)
         r"(?:SUBTOTAL|Subtotal)[^\n]*\n?\s*\$\s*([\d.,]+)",
-        # 4. "Subtotal" + espacios + monto con separadores de miles (sin $)
+        # 5. "Subtotal" + espacios + monto con separadores de miles (sin $)
         #    Exige X.XXX,XX o X,XXX.XX para no capturar "1,00" de tablas
         r"(?:SUBTOTAL|Subtotal)\s+([\d]{1,3}(?:[.,][\d]{3})+(?:[.,][\d]{2}))",
     ]
