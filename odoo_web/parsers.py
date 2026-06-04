@@ -617,6 +617,9 @@ def extract_pdf_fields(file_bytes):
             # Si el regex calculó IVA total desde iva_21+iva_27, preservarlo
             if fields.get("iva_21") and fields.get("iva"):
                 _ai_fields["iva"] = fields["iva"]
+            # Preservar neto del regex si Haiku no lo extrajo (ej: Telecom pág 2)
+            if not _ai_fields.get("neto") and fields.get("neto"):
+                _ai_fields["neto"] = fields["neto"]
             # Normalizar número si la IA no lo trajo en formato estándar
             _ai_num = str(_ai_fields.get("numero") or "").strip()
             if not re.match(r"^\d{4,5}-\d{6,8}$", _ai_num):
