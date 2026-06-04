@@ -1102,19 +1102,19 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                         "account.move.line","write",
                         [[_pay[0]["id"]],{"credit":_nc,"amount_currency":-_nc}])
 
-            # Renombrar IVA a español
+            # Renombrar IVA a español — busca todas las tax lines de esta factura
             try:
-                _iva_lines = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                _all_tax_ln = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                     "account.move.line","search_read",
-                    [[("move_id","=",move_id),("tax_line_id","!=",False),
-                      ("account_id.code","like","1.1.4.04")]],
-                    {"fields":["id","name"],"limit":5})
-                for _il in (_iva_lines or []):
+                    [[("move_id","=",move_id),("tax_line_id","!=",False)]],
+                    {"fields":["id","name"],"limit":20})
+                _iva_map = {"VAT 21%":"IVA Crédito Fiscal 21%",
+                            "VAT 27%":"IVA Crédito Fiscal 27%",
+                            "C_IVA 21%":"IVA Crédito Fiscal 21%",
+                            "C_IVA 27%":"IVA Crédito Fiscal 27%"}
+                for _il in (_all_tax_ln or []):
                     _n = _il.get("name","")
-                    _nn = (_n.replace("VAT 21%","IVA Crédito Fiscal 21%")
-                            .replace("VAT 27%","IVA Crédito Fiscal 27%")
-                            .replace("C_IVA 21%","IVA Crédito Fiscal 21%")
-                            .replace("C_IVA 27%","IVA Crédito Fiscal 27%"))
+                    _nn = _iva_map.get(_n, _n)
                     if _nn != _n:
                         models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                             "account.move.line","write",[[_il["id"]],{"name":_nn}])
