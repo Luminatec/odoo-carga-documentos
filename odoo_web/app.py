@@ -346,6 +346,10 @@ from odoo_client import get_referidos as _get_refs
 
 with st.sidebar:
     st.divider()
+    if st.button("🔄 Refrescar datos de Odoo", key="sidebar_refresh_cache",
+                 help="Limpia el caché y recarga productos, cuentas y datos de Odoo"):
+        st.cache_data.clear()
+        st.rerun()
     with st.expander("⚙️ Preferencias", expanded=False):
         _prefs    = load_prefs()
         _pj_raw   = _get_pj(models_url, uid, api_key)
