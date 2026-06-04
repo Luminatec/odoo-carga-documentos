@@ -1042,12 +1042,15 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
     except OdooError as e:
         raise OdooError(f"No se pudo crear la factura '{ref}': {e}") from e
 
-    # Agregar percepciones como tax badges — Odoo computa los importes automáticamente
-    # La factura siempre balancea, los importes se calculan por % configurado en Odoo
+    # Agregar percepciones como tax badges con importes correctos del PDF
+    # 1) Escribir tax_ids → Odoo crea tax lines con $1 (configuración actual)
+    # 2) Sobreescribir todos los importes de una sola vez via account.move.write()
+    #    para que Odoo mantenga la integridad del asiento
     if percepcion_lines and move_id:
         try:
-            # Encontrar tax IDs via repartition por cuenta contable
+            # Encontrar tax IDs via repartition (preferir "perc" taxes)
             _tax_ids_to_add = []
+            _aid_to_tid = {}  # account_id → tax_id
             for _pl in percepcion_lines:
                 _aid = _pl.get("account_id")
                 if not _aid:
@@ -1058,7 +1061,6 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                         [[("account_id", "=", _aid), ("repartition_type", "=", "tax")]],
                         {"fields": ["tax_id"], "limit": 10})
                     if _reps:
-                        # Preferir taxes con "perc" en el nombre sobre taxes de IVA puro
                         _perc_reps = [r for r in _reps
                                       if "perc" in (r["tax_id"][1]
                                                     if isinstance(r["tax_id"], (list,tuple))
@@ -1066,26 +1068,93 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                         _best = _perc_reps[0] if _perc_reps else _reps[0]
                         _tv = _best["tax_id"]
                         _tid = (_tv[0] if isinstance(_tv, (list, tuple)) else _tv)
-                        if _tid and _tid not in _tax_ids_to_add:
-                            _tax_ids_to_add.append(_tid)
+                        if _tid:
+                            _aid_to_tid[_aid] = _tid
+                            if _tid not in _tax_ids_to_add:
+                                _tax_ids_to_add.append(_tid)
                 except Exception:
                     pass
 
-            if _tax_ids_to_add:
-                # Agregar perception taxes a la línea de producto
-                _prod_line = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                    "account.move.line", "search_read",
-                    [[("move_id", "=", move_id), ("product_id", "!=", False)]],
-                    {"fields": ["id", "tax_ids"], "limit": 1})
-                if _prod_line:
-                    _lid = _prod_line[0]["id"]
-                    _cur = list(_prod_line[0].get("tax_ids") or [])
-                    _all = list(set(_cur + _tax_ids_to_add))
-                    models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                        "account.move.line", "write",
-                        [[_lid], {"tax_ids": [(6, 0, _all)]}])
+            if not _tax_ids_to_add:
+                return move_id
+
+            # Agregar taxes a la línea de producto
+            _prod_line = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                "account.move.line", "search_read",
+                [[("move_id", "=", move_id), ("product_id", "!=", False)]],
+                {"fields": ["id", "tax_ids"], "limit": 1})
+            if not _prod_line:
+                return move_id
+            _lid = _prod_line[0]["id"]
+            _cur = list(_prod_line[0].get("tax_ids") or [])
+            _all = list(set(_cur + _tax_ids_to_add))
+            models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                "account.move.line", "write",
+                [[_lid], {"tax_ids": [(6, 0, _all)]}])
+
+            # Leer las tax lines creadas y construir updates
+            _all_lines = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                "account.move.line", "search_read",
+                [[("move_id", "=", move_id)]],
+                {"fields": ["id", "account_id", "tax_line_id", "debit", "credit",
+                             "amount_currency", "account_id.account_type"], "limit": 50})
+
+            _line_updates = []  # (1, line_id, vals)
+            _total_debit   = 0.0
+
+            # Map account_id → PDF importe
+            _aid_to_amount = {}
+            for _pl in percepcion_lines:
+                _aid = _pl.get("account_id")
+                if _aid:
+                    _aid_to_amount[_aid] = float(_pl.get("importe", 0))
+
+            _payable_id = None
+            for _l in _all_lines:
+                _acct_type = _l.get("account_id.account_type") or ""
+                _acct_id   = (_l["account_id"][0] if isinstance(_l["account_id"], (list,tuple))
+                              else _l["account_id"])
+                _tline_id  = (_l["tax_line_id"][0] if isinstance(_l.get("tax_line_id"), (list,tuple))
+                              else _l.get("tax_line_id"))
+                if _acct_type in ("liability_payable", "liability_current"):
+                    _payable_id = _l["id"]
+                    continue
+                # Corregir importes de tax lines cuya cuenta tiene un importe en el PDF
+                if _tline_id and _acct_id in _aid_to_amount:
+                    _new_amt = _aid_to_amount[_acct_id]
+                    _raw_lbl = next(
+                        (str(_p.get("provincia") or _p.get("label") or "")
+                         for _p in percepcion_lines if _p.get("account_id") == _acct_id),
+                        "")
+                    _disp_lbl = (_raw_lbl if "percep" in _raw_lbl.lower()
+                                 else f"Percepción IIBB {_raw_lbl}" if _raw_lbl
+                                 else "Percepción")
+                    _line_updates.append((1, _l["id"], {
+                        "name":            _disp_lbl,
+                        "debit":           _new_amt,
+                        "credit":          0.0,
+                        "amount_currency": _new_amt,
+                    }))
+                    _total_debit += _new_amt
+                else:
+                    _total_debit += float(_l.get("debit", 0))
+
+            # Actualizar payable
+            if _payable_id and _total_debit > 0:
+                _line_updates.append((1, _payable_id, {
+                    "credit":          _total_debit,
+                    "amount_currency": -_total_debit,
+                }))
+
+            # Aplicar todos los cambios en una sola llamada
+            if _line_updates:
+                models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                    "account.move", "write",
+                    [[move_id], {"line_ids": _line_updates}],
+                    {"context": {"no_recompute": True,
+                                 "check_move_validity": False}})
         except Exception as _pe:
-            _logger.warning("create_vendor_bill: percepcion badges: %s", _pe)
+            _logger.warning("create_vendor_bill: percepcion badges+amounts: %s", _pe)
     if file_bytes:
         try:
             attach_file(models, uid, api_key, "account.move", move_id, filename, file_bytes, mimetype)
