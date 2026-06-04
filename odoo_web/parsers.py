@@ -318,6 +318,15 @@ def extract_pdf_fields(file_bytes):
                 from odoo_client import normalize_amount as _na27
                 _bot["iva_27"] = float(_na27(_m27.group(1)))
             except Exception: pass
+        _m21b = _re_iva27.search(r"IVA\s*21\s*%\s*([\d.,]+)", _raw, _re_iva27.IGNORECASE)
+        if _m21b:
+            try:
+                from odoo_client import normalize_amount as _na21b
+                _v21b = float(_na21b(_m21b.group(1)))
+                if _v21b > 100:
+                    _bot["iva_21"] = _v21b
+                    _bot["iva"] = f"{(_v21b + float(_bot.get('iva_27') or 0)):.2f}"
+            except Exception: pass
         _bn = str(_bot.get("numero") or "").strip()
         if not re.match(r"^\d{4,5}-\d{6,8}$", _bn):
             for _bnp in [r"Nro\.Comprobante[:\s]*(\d{4,5}-\d{6,8})", r"\b(\d{4,5}-\d{6,8})\b"]:
@@ -490,7 +499,7 @@ def extract_pdf_fields(file_bytes):
 
     # ── IVA ───────────────────────────────────────────────────────────────
     iva_pats = [
-        r"IVA\s+(?:21|10[.,]5|27)\s*%\s*\$?\s*([\d.,]+)",  # IVA 21 % $ amount
+        r"IVA\s*(?:21|10[.,]5|27)\s*%\s+([\d.,]+)",  # IVA 21% o IVA27% seguido de espacio + monto
         r"I\.?V\.?A[^:\n]*(?:21|10\.5|27)[^:\n]*:[:\s$]*\$?\s*([\d.,]+)",
         r"I\.?V\.?A[:\s$%\d.]*:\s*([\d.,]+)",
         r"(?:Impuesto\s+)?IVA[:\s$]*\$?\s*([\d.,]+)",
@@ -575,6 +584,18 @@ def extract_pdf_fields(file_bytes):
     if _m27r:
         try:
             fields["iva_27"] = float(normalize_amount(_m27r.group(1)))
+        except Exception:
+            pass
+    # IVA 21% explícito (facturas Telecom separan IVA27% e IVA21% en líneas distintas)
+    _m21r = re.search(r"IVA\s*21\s*%\s*([\d.,]+)", text, re.IGNORECASE)
+    if _m21r:
+        try:
+            _iva21_val = float(normalize_amount(_m21r.group(1)))
+            if _iva21_val > 100:  # monto real, no un porcentaje
+                fields["iva_21"] = _iva21_val
+                # Total IVA = IVA21 + IVA27 (si hay ambos)
+                _iva27_existing = float(fields.get("iva_27") or 0)
+                fields["iva"] = f"{(_iva21_val + _iva27_existing):.2f}"
         except Exception:
             pass
 

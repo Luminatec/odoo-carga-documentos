@@ -541,7 +541,12 @@ def render(models, uid, api_key, models_url, is_admin):
                     _piva_rows = f"| Percepción IVA | {fmt_ars(_piva_f)} | |\n"
                 _iva27_f = float(extracted.get("iva_27", 0) or 0)
                 _iva_f_num = float(_iva_f) if _iva_f else 0.0
-                _iva21_f = _iva_f_num - _iva27_f if _iva27_f > 0 else _iva_f_num
+                _iva21_explicit = float(extracted.get("iva_21", 0) or 0)
+                if _iva27_f > 0:
+                    # Usar iva_21 explícito si el parser lo detectó; sino estimar
+                    _iva21_f = _iva21_explicit if _iva21_explicit > 0 else max(0.0, _iva_f_num - _iva27_f)
+                else:
+                    _iva21_f = _iva_f_num
                 _iva_rows_str = ""
                 if _iva27_f > 0:
                     _iva_rows_str = (
