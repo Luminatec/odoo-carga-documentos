@@ -255,15 +255,18 @@ def _extract_percepciones_iibb(text):
         if detalle:
             return sum(d["importe"] for d in detalle), detalle
 
-        # Formato 2b: "IIBB BUENOS AIRES (PERCEPCIÓN) 0.00 0.00 0.00 3,918.00" — línea de tabla
+        # Formato 2b: línea de tabla con IIBB / Ingresos Brutos como línea de producto
+        # Cubre: "IIBB BUENOS AIRES 0.00 0.00 3,918.00", "Ingresos Brutos CABA 5% 638.97", etc.
         if not detalle:
-            for m2b in _re.finditer(
-                    "^IIBB\s+([\w\s]+?)(?:\s+\([^)]*PERCEP[^)]*\))?\s+"
-                    "[\d.,]+\s+[\d.,]+\s+[\d.,]+\s+([\d.,]+)",
-                    text, _re.IGNORECASE | _re.MULTILINE):
-                prov = m2b.group(1).strip()
+            _pat2b = (r"^(?:(?:Perc[ep.]*\s+)?(?:IIBB|Ing\.?\s*Brutos?|Ingresos\s+Brutos?|"
+                      r"Retenci[oó]n\s+Ing\.?\s*Brutos?)\s*((?:[A-Za-z\xc1\xe1\xc9\xe9"
+                      r"\xcd\xed\xd3\xf3\xda\xfa\s]+?))(?:\s+\([^)]*(?:PERCEP|RETEN)[^)]*\))?"
+                      r"\s+(?:[\d.,]+\s+)*?([\d.,]+))\s*$")
+            for m2b in _re.finditer(_pat2b, text, _re.IGNORECASE | _re.MULTILINE):
+                prov = _re.sub(r"[\d.,%\s]+$", "", m2b.group(1)).strip()
+                prov = _re.sub(r"\s+", " ", prov).strip()
                 imp  = _pn(m2b.group(2))
-                if imp > 0 and prov not in [d["provincia"] for d in detalle]:
+                if imp > 0 and prov and prov not in [d["provincia"] for d in detalle]:
                     detalle.append({"provincia": prov, "importe": imp})
         if detalle:
             return sum(d["importe"] for d in detalle), detalle
