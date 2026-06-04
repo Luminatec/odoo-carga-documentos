@@ -1054,8 +1054,14 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                     continue
                 # Generar label descriptivo en español
                 _raw  = str(_pl.get("provincia") or _pl.get("label") or "").strip()
-                _name = (_raw if "percep" in _raw.lower() or "iva" in _raw.lower()
-                         else f"Percepción IIBB {_raw}" if _raw
+                # Normalizar nombres de provincia (sin espacio → con espacio)
+                _prov_display = (_raw
+                    .replace("BuenosAires", "Buenos Aires")
+                    .replace("SantaFe", "Santa Fe")
+                    .replace("RioNegro", "Río Negro")
+                    .strip())
+                _name = (_prov_display if "percep" in _prov_display.lower() or "iva" in _prov_display.lower()
+                         else f"Percepción IIBB {_prov_display}" if _prov_display
                          else "Percepción")
                 models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                     "account.move.line", "create", [{
