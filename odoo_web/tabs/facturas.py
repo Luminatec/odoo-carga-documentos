@@ -677,12 +677,8 @@ def render(models, uid, api_key, models_url, is_admin):
                                             and "iibb" in albl.lower()
                                             and "(copia)" not in albl.lower()
                                         ), None)
-                                    # Usar nombre de la cuenta de Odoo como etiqueta
-                                    _pac_name = next((albl for aid, albl in _all_accts_perc
-                                                      if aid == _pac), "") if _pac else ""
                                     _perc_lines.append({
                                         "provincia":  _pd.get("provincia", ""),
-                                        "label":      _pac_name or _pd.get("provincia", ""),
                                         "importe":    _pd.get("importe", 0),
                                         "account_id": _pac,
                                         "tax_ids":    [],
@@ -703,10 +699,8 @@ def render(models, uid, api_key, models_url, is_admin):
                                         and ("iva" in albl.lower() or "vat" in albl.lower())
                                         and "(copia)" not in albl.lower()
                                     ), None)
-                                    _pvac_name = next((albl for aid, albl in _all_accts_piva
-                                                       if aid == _pvac), "") if _pvac else ""
                                     _perc_lines.append({
-                                        "label":      _pvac_name or _pvd.get("label", "Percepción IVA"),
+                                        "label":      _pvd.get("label", "Percepción IVA"),
                                         "importe":    _piva_amt,
                                         "account_id": _pvac,
                                         "tax_ids":    [],
