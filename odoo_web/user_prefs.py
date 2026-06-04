@@ -21,10 +21,10 @@ _logger = logging.getLogger("lumidoo.user_prefs")
 _PREFS_FILE = "user_prefs.json"
 
 _DEFAULTS: dict = {
-    "diario_cobros_nombre": "",   # nombre del diario de cobros preferido
-    "referido_nombre":      "",   # nombre del ejecutivo / referido por defecto
-    "plazo_pago_nombre":    "",   # nombre del término de pago preferido
-    "diario_facturas_nombre": "",  # nombre del diario de facturas de proveedor
+    "diario_cobros_nombre":   "",                        # nombre del diario de cobros preferido
+    "referido_nombre":        "",                        # nombre del ejecutivo / referido por defecto
+    "plazo_pago_nombre":      "",                        # nombre del término de pago preferido
+    "diario_facturas_nombre": "Facturas de Proveedores", # default — nunca sobreescribir con electrónicas
 }
 
 

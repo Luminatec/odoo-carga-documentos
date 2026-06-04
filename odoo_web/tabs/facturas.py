@@ -757,8 +757,12 @@ def render(models, uid, api_key, models_url, is_admin):
                                     [[move_id]], {"fields": ["journal_id"]})
                                 if _inv_data and _inv_data[0].get("journal_id"):
                                     _jname_used = _inv_data[0]["journal_id"][1]
+                                    # Solo aprender si NO es diario electrónico ni de importaciones
+                                    _skip_learn = ("electr" in _jname_used.lower()
+                                                   or "importa" in _jname_used.lower())
                                     _cur_pref = _load_prefs_fac()
-                                    if _cur_pref.get("diario_facturas_nombre") != _jname_used:
+                                    if (not _skip_learn
+                                            and _cur_pref.get("diario_facturas_nombre") != _jname_used):
                                         _save_prefs_fac({**_cur_pref, "diario_facturas_nombre": _jname_used})
                             except Exception:
                                 pass
