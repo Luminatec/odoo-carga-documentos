@@ -1057,9 +1057,13 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                     _reps = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                         "account.tax.repartition.line", "search_read",
                         [[("account_id", "=", _aid), ("repartition_type", "=", "tax")]],
-                        {"fields": ["tax_id"], "limit": 1})
+                        {"fields": ["tax_id"], "limit": 10})
                     if _reps:
-                        _tv = _reps[0]["tax_id"]
+                        # Preferir taxes con "perc" en el nombre (percepción) sobre taxes de IVA puro
+                        _perc_reps = [r for r in _reps
+                                      if "perc" in (r["tax_id"][1] if isinstance(r["tax_id"], (list,tuple)) else "").lower()]
+                        _best = _perc_reps[0] if _perc_reps else _reps[0]
+                        _tv = _best["tax_id"]
                         _tid = (_tv[0] if isinstance(_tv, (list, tuple)) else _tv)
                 except Exception:
                     pass
@@ -1100,10 +1104,15 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                     _cur_deb  = float(_tlines[0].get("debit", 0))
                     _new_deb  = _info["importe"]
                     _diff     = _new_deb - _cur_deb
-                    if abs(_diff) > 0.001:
+                    if abs(_diff) > 0.001 or True:  # always update name/label
+                        _raw_lbl = _info.get("label", "")
+                        _disp_lbl = (_raw_lbl if "percep" in _raw_lbl.lower()
+                                     else f"Percepción IIBB {_raw_lbl}" if _raw_lbl
+                                     else "Percepción")
                         models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                             "account.move.line", "write",
                             [[_tlines[0]["id"]], {
+                                "name":           _disp_lbl,
                                 "debit":          _new_deb,
                                 "credit":         0.0,
                                 "amount_currency": _new_deb,

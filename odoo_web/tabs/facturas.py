@@ -692,19 +692,13 @@ def render(models, uid, api_key, models_url, is_admin):
                                     _piva_amt = float(_pvd.get("importe", 0))
                                     if _piva_amt <= 0:
                                         continue
-                                    # Buscar cuenta percepción IVA
-                                    # Prioridad: "Percepción IVA" (cuenta 1.1.4.04.020)
-                                    # Fallback: cualquier cuenta con percep + iva
-                                    _pvac = (
-                                        next((aid for aid, albl in _all_accts_piva
-                                              if ("percepción iva" in albl.lower() or
-                                                  "percepcion iva" in albl.lower())
-                                              and "(copia)" not in albl.lower()), None)
-                                        or next((aid for aid, albl in _all_accts_piva
-                                                 if "percep" in albl.lower()
-                                                 and "iva" in albl.lower()
-                                                 and "(copia)" not in albl.lower()), None)
-                                    )
+                                    # Buscar cuenta percepción IVA/VAT (puede estar en español o inglés)
+                                    _pvac = next((
+                                        aid for aid, albl in _all_accts_piva
+                                        if "percep" in albl.lower()
+                                        and ("iva" in albl.lower() or "vat" in albl.lower())
+                                        and "(copia)" not in albl.lower()
+                                    ), None)
                                     _perc_lines.append({
                                         "provincia":  _pvd.get("label", "Percepción IVA"),
                                         "importe":    _piva_amt,
