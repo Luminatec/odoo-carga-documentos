@@ -1163,14 +1163,15 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                             [[("move_id","=",move_id),("tax_line_id","in",_badge_tax_ids),
                               ("debit","<=",1.01)]],
                             {"fields":["id","debit"],"limit":20})
-                        # Eliminar las direct lines de percepción (las que creamos antes, sin tax_line_id)
+                        # Eliminar direct lines de percepción (sin tax_line_id, sin producto)
+                    # incluye tanto debit=3918 como debit=0 (placeholders)
+                    _perc_acct_ids = [_pl.get("account_id") for _pl in percepcion_lines
+                                      if _pl.get("account_id") and "27%" not in _pl.get("label","")]
                     _direct_perc = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                         "account.move.line","search_read",
                         [[("move_id","=",move_id),("tax_line_id","=",False),
-                          ("product_id","=",False),("debit","!=",0),
-                          ("account_id","in",[_pl.get("account_id")
-                                              for _pl in percepcion_lines
-                                              if _pl.get("account_id") and "27%" not in _pl.get("label","")])]],
+                          ("product_id","=",False),
+                          ("account_id","in",_perc_acct_ids)]],
                         {"fields":["id","debit"],"limit":20})
                     if _direct_perc:
                         models.execute_kw(_cfg.ODOO_DB, uid, api_key,
