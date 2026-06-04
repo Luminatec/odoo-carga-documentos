@@ -607,11 +607,14 @@ def extract_pdf_fields(file_bytes):
     try:
         _ai_fields = _ai_extract_invoice_fields(text)
         if _ai_fields.get("proveedor") or _ai_fields.get("numero"):
-            # Preservar percepciones del regex (son más confiables que la IA)
+            # Preservar percepciones y IVA del regex (más confiables que la IA)
             for _k in ("percepcion_iibb", "percepcion_iibb_detalle",
-                       "percepcion_iva", "percepcion_iva_detalle", "iva_27"):
+                       "percepcion_iva", "percepcion_iva_detalle", "iva_27", "iva_21"):
                 if fields.get(_k):
                     _ai_fields[_k] = fields[_k]
+            # Si el regex calculó IVA total desde iva_21+iva_27, preservarlo
+            if fields.get("iva_21") and fields.get("iva"):
+                _ai_fields["iva"] = fields["iva"]
             # Normalizar número si la IA no lo trajo en formato estándar
             _ai_num = str(_ai_fields.get("numero") or "").strip()
             if not re.match(r"^\d{4,5}-\d{6,8}$", _ai_num):
