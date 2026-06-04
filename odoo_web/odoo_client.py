@@ -1109,6 +1109,23 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                         "account.move.line", "write",
                         [[_pay[0]["id"]], {"credit": _nc, "amount_currency": -_nc}])
 
+            # Renombrar "VAT 21%"/"VAT 27%" a español en los apuntes
+            try:
+                _iva_ln = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                    "account.move.line", "search_read",
+                    [[("move_id","=",move_id),("name","in",["VAT 21%","VAT 27%","C_IVA 21%","C_IVA 27%"])]],
+                    {"fields":["id","name"],"limit":5})
+                for _il in (_iva_ln or []):
+                    _nn = (_il["name"].replace("VAT 21%","IVA Crédito Fiscal 21%")
+                                     .replace("VAT 27%","IVA Crédito Fiscal 27%")
+                                     .replace("C_IVA 21%","IVA Crédito Fiscal 21%")
+                                     .replace("C_IVA 27%","IVA Crédito Fiscal 27%"))
+                    if _nn != _il["name"]:
+                        models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                            "account.move.line","write",[[_il["id"]],{"name":_nn}])
+            except Exception:
+                pass
+
             # Badges en línea producto via repartition (fix229 approach)
             _tax_ids_badges = []
             for _pl in percepcion_lines:
@@ -1140,11 +1157,13 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                     _lid = _pl_line[0]["id"]
                     _cur = list(_pl_line[0].get("tax_ids") or [])
                     _all = list(set(_cur + _tax_ids_badges))
+                    # Usar invoice_line_ids en account.move para evitar sync de tax lines
                     models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                        "account.move.line", "write",
-                        [[_lid], {"tax_ids": [(6,0,_all)]}],
+                        "account.move", "write",
+                        [[move_id], {"invoice_line_ids": [(1, _lid, {"tax_ids": [(6,0,_all)]})]}],
                         {"context": {"no_recompute": True,
-                                     "skip_account_move_synchronization": True}})
+                                     "skip_account_move_synchronization": True,
+                                     "check_move_validity": False}})
         except Exception as _pe:
             _logger.warning("create_vendor_bill percepcion: %s", _pe)
     if file_bytes:
