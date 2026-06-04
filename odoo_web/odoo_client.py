@@ -1042,11 +1042,12 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
     except OdooError as e:
         raise OdooError(f"No se pudo crear la factura '{ref}': {e}") from e
 
-    # Agregar percepciones e IVA 27% como líneas contables directas (Apuntes correctos)
-    # + agregar tax_ids como badges en línea producto (sin crear nuevas tax lines)
+    # Agregar percepciones: líneas directas (importes exactos PDF) + badges en línea producto
     if percepcion_lines and move_id:
         try:
             _perc_total = 0.0
+            _iva27_amt  = 0.0
+
             for _pl in percepcion_lines:
                 _amt  = float(_pl.get("importe", 0))
                 _aid  = _pl.get("account_id")
@@ -1056,6 +1057,10 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                 _prov = _prov.replace("BuenosAires","Buenos Aires").replace("SantaFe","Santa Fe")
                 _name = (_prov if "percep" in _prov.lower() or "iva" in _prov.lower()
                          else f"Percepción IIBB {_prov}" if _prov else "Percepción")
+                # Separar IVA 27% — necesita la cuenta del IVA existente, no la percepción
+                if "27%" in _pl.get("label",""):
+                    _iva27_amt = _amt
+                    continue
                 models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                     "account.move.line", "create", [{
                         "move_id":         move_id,
@@ -1067,12 +1072,36 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                     }])
                 _perc_total += _amt
 
+            # IVA 27%: reutilizar la cuenta del IVA crédito fiscal que ya está en la factura
+            if _iva27_amt > 0:
+                try:
+                    _iva_lines = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                        "account.move.line", "search_read",
+                        [[("move_id", "=", move_id), ("tax_line_id", "!=", False)]],
+                        {"fields": ["id", "account_id"], "limit": 1})
+                    if _iva_lines:
+                        _iva_acct = (_iva_lines[0]["account_id"][0]
+                                     if isinstance(_iva_lines[0]["account_id"], (list,tuple))
+                                     else _iva_lines[0]["account_id"])
+                        models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                            "account.move.line", "create", [{
+                                "move_id":         move_id,
+                                "account_id":      _iva_acct,
+                                "name":            "IVA Crédito Fiscal 27%",
+                                "debit":           _iva27_amt,
+                                "credit":          0.0,
+                                "amount_currency": _iva27_amt,
+                            }])
+                        _perc_total += _iva27_amt
+                except Exception as _e27:
+                    _logger.warning("iva27 line: %s", _e27)
+
+            # Actualizar Proveedores para balancear
             if _perc_total > 0:
                 _pay = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                     "account.move.line", "search_read",
                     [[("move_id", "=", move_id),
-                      ("account_id.account_type", "in",
-                       ["liability_payable", "liability_current"])]],
+                      ("account_id.account_type", "in", ["liability_payable","liability_current"])]],
                     {"fields": ["id", "credit"], "limit": 1})
                 if _pay:
                     _nc = float(_pay[0].get("credit", 0)) + _perc_total
@@ -1080,47 +1109,44 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                         "account.move.line", "write",
                         [[_pay[0]["id"]], {"credit": _nc, "amount_currency": -_nc}])
 
-            # Agregar perception taxes como BADGES en la línea de producto
-            # skip_account_move_synchronization=True evita que Odoo cree nuevas tax lines
-            _tax_ids_to_add = []
+            # Badges en línea producto via repartition (fix229 approach)
+            _tax_ids_badges = []
             for _pl in percepcion_lines:
                 _aid = _pl.get("account_id")
-                if not _aid:
+                if not _aid or "27%" in _pl.get("label",""):
                     continue
                 try:
                     _reps = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                         "account.tax.repartition.line", "search_read",
-                        [[("account_id", "=", _aid), ("repartition_type", "=", "tax")]],
-                        {"fields": ["tax_id"], "limit": 10})
+                        [[("account_id","=",_aid),("repartition_type","=","tax")]],
+                        {"fields":["tax_id"],"limit":10})
                     if _reps:
-                        _perc_reps = [r for r in _reps
-                                      if "perc" in (r["tax_id"][1]
-                                                    if isinstance(r["tax_id"],(list,tuple))
-                                                    else "").lower()]
-                        _best = _perc_reps[0] if _perc_reps else _reps[0]
-                        _tv = _best["tax_id"]
+                        _pr = [r for r in _reps if "perc" in
+                               (r["tax_id"][1] if isinstance(r["tax_id"],(list,tuple)) else "").lower()]
+                        _b = _pr[0] if _pr else _reps[0]
+                        _tv = _b["tax_id"]
                         _tid = (_tv[0] if isinstance(_tv,(list,tuple)) else _tv)
-                        if _tid and _tid not in _tax_ids_to_add:
-                            _tax_ids_to_add.append(_tid)
+                        if _tid and _tid not in _tax_ids_badges:
+                            _tax_ids_badges.append(_tid)
                 except Exception:
                     pass
 
-            if _tax_ids_to_add:
-                _prod_line = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+            if _tax_ids_badges:
+                _pl_line = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                     "account.move.line", "search_read",
-                    [[("move_id", "=", move_id), ("product_id", "!=", False)]],
-                    {"fields": ["id", "tax_ids"], "limit": 1})
-                if _prod_line:
-                    _lid = _prod_line[0]["id"]
-                    _cur = list(_prod_line[0].get("tax_ids") or [])
-                    _all = list(set(_cur + _tax_ids_to_add))
+                    [[("move_id","=",move_id),("product_id","!=",False)]],
+                    {"fields":["id","tax_ids"],"limit":1})
+                if _pl_line:
+                    _lid = _pl_line[0]["id"]
+                    _cur = list(_pl_line[0].get("tax_ids") or [])
+                    _all = list(set(_cur + _tax_ids_badges))
                     models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                         "account.move.line", "write",
-                        [[_lid], {"tax_ids": [(6, 0, _all)]}],
+                        [[_lid], {"tax_ids": [(6,0,_all)]}],
                         {"context": {"no_recompute": True,
                                      "skip_account_move_synchronization": True}})
         except Exception as _pe:
-            _logger.warning("create_vendor_bill: percepcion: %s", _pe)
+            _logger.warning("create_vendor_bill percepcion: %s", _pe)
     if file_bytes:
         try:
             attach_file(models, uid, api_key, "account.move", move_id, filename, file_bytes, mimetype)
