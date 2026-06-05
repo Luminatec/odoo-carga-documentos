@@ -406,6 +406,14 @@ def render(models, uid, api_key, models_url, is_admin):
                     if _jn_exact:
                         _save_prefs_fac({**_load_prefs_fac(), "diario_facturas_nombre": _jn_exact})
 
+            # DEBUG TEMPORAL — borrar después de diagnosticar el diario de Rayen
+            with st.expander("🔍 Debug diario (admin)", expanded=False):
+                st.caption(f"Preferencia guardada: `{_fac_pref_jour}`")
+                st.caption(f"Diario seleccionado ID: `{_fac_jour_id}`")
+                st.caption("Diarios disponibles:")
+                for _dj_id, _dj_nm in (_all_purch_j or []):
+                    st.caption(f"  • ID {_dj_id}: {_dj_nm}")
+
             with st.form(key=f"bill_form_{uf.name}"):
                 # CUIT ya está fuera del form para lookup en tiempo real
                 cuit_i = _cuit_raw
