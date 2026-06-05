@@ -24,14 +24,19 @@ _DEFAULTS: dict = {
     "diario_cobros_nombre":   "",                        # nombre del diario de cobros preferido
     "referido_nombre":        "",                        # nombre del ejecutivo / referido por defecto
     "plazo_pago_nombre":      "",                        # nombre del término de pago preferido
-    "diario_facturas_nombre": "Facturas de proveedores", # default — nunca sobreescribir con electrónicas
+    "diario_facturas_nombre": "Facturas de proveedores", # nombre del diario de compras
+    "diario_facturas_id":     10,                        # ID directo — independiente del idioma
 }
 
 
 def _fix_prefs_sanity(prefs: dict) -> dict:
-    """Corrige valores inválidos en las preferencias (ej: diario electrónico)."""
+    """Corrige valores inválidos en las preferencias (ej: diario de ventas guardado por error)."""
     _dj = prefs.get("diario_facturas_nombre") or ""
-    if "electr" in _dj.lower() or not _dj.strip():
+    _bad = ("electr" in _dj.lower()   # diario electrónico
+            or "venta" in _dj.lower()  # diario de ventas (ej: "Ventas Preimpreso")
+            or "sale" in _dj.lower()   # en inglés
+            or not _dj.strip())
+    if _bad:
         prefs = {**prefs, "diario_facturas_nombre": _DEFAULTS["diario_facturas_nombre"]}
     return prefs
 

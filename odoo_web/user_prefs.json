@@ -2,5 +2,6 @@
   "diario_cobros_nombre": "",
   "referido_nombre": "",
   "plazo_pago_nombre": "",
-  "diario_facturas_nombre": "Facturas de proveedores"
+  "diario_facturas_nombre": "Facturas de proveedores",
+  "diario_facturas_id": 10
 }

@@ -387,11 +387,13 @@ with st.sidebar:
                 index=_pt_def, key="sb_pt",
                 help="Plazo pre-seleccionado en Pedidos")
             if st.form_submit_button("💾 Guardar", use_container_width=True):
+                _pfj_save_id = next((jid for jid, jn in _pfj_raw if jn == _pfj_sel), 0)
                 save_prefs({
-                    "diario_cobros_nombre": "" if _pj_sel  == "— Sin preferencia —" else _pj_sel,
+                    "diario_cobros_nombre":  "" if _pj_sel  == "— Sin preferencia —" else _pj_sel,
                     "diario_facturas_nombre": "" if _pfj_sel == "— Sin preferencia —" else _pfj_sel,
-                    "referido_nombre":      "" if _ref_sel == "— Sin preferencia —" else _ref_sel,
-                    "plazo_pago_nombre":    "" if _pt_sel  == "— Sin preferencia —" else _pt_sel,
+                    "diario_facturas_id":    _pfj_save_id,
+                    "referido_nombre":       "" if _ref_sel == "— Sin preferencia —" else _ref_sel,
+                    "plazo_pago_nombre":     "" if _pt_sel  == "— Sin preferencia —" else _pt_sel,
                 })
                 st.toast("Preferencias guardadas", icon="⚙️")
 

@@ -379,40 +379,43 @@ def render(models, uid, api_key, models_url, is_admin):
                     f"[Ver factura existente]({_dup_url})"
                 )
 
-            # Resolver diario de facturas desde preferencia o heurística
-            _fac_jour_id = None
-            _fac_pref_jour = _load_prefs_fac().get("diario_facturas_nombre", "")
-            _all_purch_j = get_purchase_journals(models_url, uid, api_key)
-            if _fac_pref_jour and _all_purch_j:
-                # Match exacto primero, luego insensible a mayúsculas
+            # Resolver diario de facturas — primero por ID (independiente del idioma)
+            _fac_prefs    = _load_prefs_fac()
+            _fac_jour_id  = None
+            _fac_pref_id  = int(_fac_prefs.get("diario_facturas_id") or 0)
+            _fac_pref_jour = _fac_prefs.get("diario_facturas_nombre", "")
+            _all_purch_j  = get_purchase_journals(models_url, uid, api_key)
+            _purch_ids    = [jid for jid, _ in _all_purch_j]
+
+            # 1. Coincidencia por ID guardado (funciona aunque el nombre esté en otro idioma)
+            if _fac_pref_id and _fac_pref_id in _purch_ids:
+                _fac_jour_id = _fac_pref_id
+
+            # 2. Coincidencia por nombre (exacto → insensible a mayúsculas)
+            if not _fac_jour_id and _fac_pref_jour and _all_purch_j:
                 _fac_jour_id = (
                     next((jid for jid, jn in _all_purch_j if jn == _fac_pref_jour), None)
                     or next((jid for jid, jn in _all_purch_j
                               if jn.lower() == _fac_pref_jour.lower()), None)
                 )
-            # Fallback: buscar "proveedor" + "factura" sin "electr" ni "importa"
+
+            # 3. Heurístico: español ("factura"+"proveedor") o inglés ("vendor"+"bill")
             if not _fac_jour_id and _all_purch_j:
                 _fac_jour_id = next(
                     (jid for jid, jn in _all_purch_j
-                     if "proveedor" in jn.lower()
-                     and "factura" in jn.lower()
+                     if (("proveedor" in jn.lower() and "factura" in jn.lower())
+                         or ("vendor" in jn.lower() and "bill" in jn.lower()))
                      and "electr" not in jn.lower()
                      and "importa" not in jn.lower()),
                     None
                 )
-                # Guardar el nombre exacto para la próxima vez
+                # Guardar nombre e ID exactos para la próxima vez
                 if _fac_jour_id:
                     _jn_exact = next((jn for jid, jn in _all_purch_j if jid == _fac_jour_id), "")
                     if _jn_exact:
-                        _save_prefs_fac({**_load_prefs_fac(), "diario_facturas_nombre": _jn_exact})
-
-            # DEBUG TEMPORAL — borrar después de diagnosticar el diario de Rayen
-            with st.expander("🔍 Debug diario (admin)", expanded=False):
-                st.caption(f"Preferencia guardada: `{_fac_pref_jour}`")
-                st.caption(f"Diario seleccionado ID: `{_fac_jour_id}`")
-                st.caption("Diarios disponibles:")
-                for _dj_id, _dj_nm in (_all_purch_j or []):
-                    st.caption(f"  • ID {_dj_id}: {_dj_nm}")
+                        _save_prefs_fac({**_fac_prefs,
+                                         "diario_facturas_nombre": _jn_exact,
+                                         "diario_facturas_id":     _fac_jour_id})
 
             with st.form(key=f"bill_form_{uf.name}"):
                 # CUIT ya está fuera del form para lookup en tiempo real
