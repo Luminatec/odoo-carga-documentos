@@ -431,3 +431,17 @@ with tab_chat:
 
 with tab_history:
     historial.render(models, uid, api_key, models_url, is_admin)
+
+# ── Keepalive: evita que Streamlit Cloud cierre la sesión por inactividad ──
+import streamlit.components.v1 as _components
+_components.html("""
+<script>
+(function() {
+    // Hace ping al health endpoint cada 8 minutos para mantener la sesión activa
+    // Sin reruns, sin tocar el formulario
+    setInterval(function() {
+        fetch('/_stcore/health').catch(function() {});
+    }, 8 * 60 * 1000);
+})();
+</script>
+""", height=0, scrolling=False)
