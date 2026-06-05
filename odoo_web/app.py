@@ -349,13 +349,16 @@ with st.sidebar:
     if st.button("🔄 Refrescar datos de Odoo", key="sidebar_refresh_cache",
                  help="Limpia el caché y recarga productos, cuentas y datos de Odoo"):
         st.cache_data.clear()
-        # Limpiar session_state de widgets de formulario para que se reinicialicen
-        # con los datos frescos de Odoo (sin necesidad de sacar y volver a poner el archivo)
-        _keep = {"sidebar_refresh_cache", "user_prefs", "odoo_uid", "odoo_password",
-                 "history", "processed_files", "bills_upload", "orders_upload",
-                 "receipts_upload", "contacts_upload"}
-        _to_del = [k for k in list(st.session_state.keys()) if k not in _keep
-                   and not k.startswith("FormSubmitter:")]
+        # Limpiar SOLO los widget-keys de formularios de archivos
+        # (prefijos conocidos + keys que contengan un "." típico de nombres de archivo)
+        _form_prefixes = ("bill_form_", "amount_i_", "prod_g_", "cc_g_", "exenta_",
+                          "notas_", "bill_is_nc_", "vend_search_", "vend_sel_",
+                          "new_vendor_form_", "batchok_f_", "batch_confirm_",
+                          "partner_override_", "partner_name_",
+                          "bp_", "bf_", "br_", "bt_", "load_bills_xls_",
+                          "oc_form_", "oc_is_nc_", "receipt_",)
+        _to_del = [k for k in list(st.session_state.keys())
+                   if any(k.startswith(p) for p in _form_prefixes)]
         for _k in _to_del:
             del st.session_state[_k]
         st.rerun()
