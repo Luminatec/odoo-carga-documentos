@@ -379,38 +379,39 @@ def render(models, uid, api_key, models_url, is_admin):
                     f"[Ver factura existente]({_dup_url})"
                 )
 
-            # Resolver diario de facturas — primero por ID (independiente del idioma)
+            # Resolver diario de facturas — ID directo (independiente del idioma/empresa)
             _fac_prefs    = _load_prefs_fac()
             _fac_jour_id  = None
             _fac_pref_id  = int(_fac_prefs.get("diario_facturas_id") or 0)
-            _fac_pref_jour = _fac_prefs.get("diario_facturas_nombre", "")
             _all_purch_j  = get_purchase_journals(models_url, uid, api_key)
             _purch_ids    = [jid for jid, _ in _all_purch_j]
 
-            # 1. Coincidencia por ID guardado (funciona aunque el nombre esté en otro idioma)
+            # 1. ID guardado en preferencias
             if _fac_pref_id and _fac_pref_id in _purch_ids:
                 _fac_jour_id = _fac_pref_id
 
-            # 2. Coincidencia por nombre (exacto → insensible a mayúsculas)
-            if not _fac_jour_id and _fac_pref_jour and _all_purch_j:
-                _fac_jour_id = (
-                    next((jid for jid, jn in _all_purch_j if jn == _fac_pref_jour), None)
-                    or next((jid for jid, jn in _all_purch_j
-                              if jn.lower() == _fac_pref_jour.lower()), None)
-                )
+            # 2. Nombre exacto o insensible
+            if not _fac_jour_id:
+                _fac_pref_jour = _fac_prefs.get("diario_facturas_nombre", "")
+                if _fac_pref_jour:
+                    _fac_jour_id = (
+                        next((jid for jid, jn in _all_purch_j if jn == _fac_pref_jour), None)
+                        or next((jid for jid, jn in _all_purch_j
+                                  if jn.lower() == _fac_pref_jour.lower()), None)
+                    )
 
-            # 3. Heurístico: español ("factura"+"proveedor") o inglés ("vendor"+"bill")
+            # 3. Heurístico: busca "bill" o "proveedor" evitando "electr" e "importa"
+            #    Si hay varios matches, prefiere el de ID menor (journal principal)
             if not _fac_jour_id and _all_purch_j:
-                _fac_jour_id = next(
-                    (jid for jid, jn in _all_purch_j
-                     if (("proveedor" in jn.lower() and "factura" in jn.lower())
-                         or ("vendor" in jn.lower() and "bill" in jn.lower()))
-                     and "electr" not in jn.lower()
-                     and "importa" not in jn.lower()),
-                    None
-                )
-                # Guardar nombre e ID exactos para la próxima vez
-                if _fac_jour_id:
+                _candidates = [
+                    jid for jid, jn in sorted(_all_purch_j, key=lambda x: x[0])
+                    if (("proveedor" in jn.lower() and "factura" in jn.lower())
+                        or ("vendor" in jn.lower() and "bill" in jn.lower()))
+                    and "electr" not in jn.lower()
+                    and "importa" not in jn.lower()
+                ]
+                if _candidates:
+                    _fac_jour_id = _candidates[0]
                     _jn_exact = next((jn for jid, jn in _all_purch_j if jid == _fac_jour_id), "")
                     if _jn_exact:
                         _save_prefs_fac({**_fac_prefs,
