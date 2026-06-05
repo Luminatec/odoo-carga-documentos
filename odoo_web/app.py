@@ -348,17 +348,11 @@ with st.sidebar:
     st.divider()
     if st.button("🔄 Refrescar datos de Odoo", key="sidebar_refresh_cache",
                  help="Limpia el caché y recarga productos, cuentas y datos de Odoo"):
-        # Guardar bytes de archivos subidos ANTES del rerun
-        # (Streamlit puede perder la referencia después de cache clear)
-        for _up_key in ("bills_upload", "orders_upload"):
-            for _cf in (st.session_state.get(_up_key) or []):
-                try:
-                    _cf.seek(0)
-                    st.session_state[f"_saved_bytes_{_cf.name}_{_cf.size}"] = _cf.read()
-                except Exception:
-                    pass
+        # Limpiar cache sin st.rerun() para no perder archivos cargados en el uploader.
+        # Los datos frescos se usarán en el próximo rerender natural (próxima interacción).
         st.cache_data.clear()
-        st.rerun()
+        st.session_state.pop("user_prefs", None)  # fuerza recarga de prefs también
+        st.toast("✅ Datos de Odoo actualizados", icon="🔄")
     with st.expander("⚙️ Preferencias", expanded=False):
         _prefs    = load_prefs()
         _pj_raw   = _get_pj(models_url, uid, api_key)

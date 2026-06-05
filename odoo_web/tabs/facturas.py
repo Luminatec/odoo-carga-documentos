@@ -79,8 +79,12 @@ def render(models, uid, api_key, models_url, is_admin):
      for _uf_idx, uf in enumerate(files or []):
         st.divider()
         ext        = uf.name.rsplit(".", 1)[-1].lower()
-        file_bytes = uf.read()
-        # Si Streamlit perdió los bytes tras un rerun (refrescar cache), recuperarlos
+        # getvalue() siempre retorna bytes completos independientemente del puntero
+        try:
+            file_bytes = uf.getvalue()
+        except Exception:
+            uf.seek(0)
+            file_bytes = uf.read()
         if not file_bytes:
             _saved_k = f"_saved_bytes_{uf.name}_{uf.size}"
             file_bytes = st.session_state.pop(_saved_k, b"")
