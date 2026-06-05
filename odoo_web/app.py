@@ -349,6 +349,15 @@ with st.sidebar:
     if st.button("🔄 Refrescar datos de Odoo", key="sidebar_refresh_cache",
                  help="Limpia el caché y recarga productos, cuentas y datos de Odoo"):
         st.cache_data.clear()
+        # Limpiar session_state de widgets de formulario para que se reinicialicen
+        # con los datos frescos de Odoo (sin necesidad de sacar y volver a poner el archivo)
+        _keep = {"sidebar_refresh_cache", "user_prefs", "odoo_uid", "odoo_password",
+                 "history", "processed_files", "bills_upload", "orders_upload",
+                 "receipts_upload", "contacts_upload"}
+        _to_del = [k for k in list(st.session_state.keys()) if k not in _keep
+                   and not k.startswith("FormSubmitter:")]
+        for _k in _to_del:
+            del st.session_state[_k]
         st.rerun()
     with st.expander("⚙️ Preferencias", expanded=False):
         _prefs    = load_prefs()
