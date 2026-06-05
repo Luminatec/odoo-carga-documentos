@@ -1183,25 +1183,26 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
                                                        "amount_currency":_correct,"name":_lbl}])
             except Exception: pass
 
-            # Renombrar IVA a español (DESPUÉS del badge para capturar todas las tax lines)
-            try:
-                import re as _re_ren
-                _all_tl = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                    "account.move.line","search_read",
-                    [[("move_id","=",move_id),("tax_line_id","!=",False)]],
-                    {"fields":["id","name"],"limit":20})
-                for _il in (_all_tl or []):
-                    _n  = _il.get("name","")
-                    _nn = (_re_ren.sub(r"(?i)^VAT\s*21%$","IVA Crédito Fiscal 21%",
-                           _re_ren.sub(r"(?i)^VAT\s*27%$","IVA Crédito Fiscal 27%",
-                           _re_ren.sub(r"(?i)^C_IVA\s*21%$","IVA Crédito Fiscal 21%",
-                           _re_ren.sub(r"(?i)^C_IVA\s*27%$","IVA Crédito Fiscal 27%",_n)))))
-                    if _nn != _n:
-                        models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                            "account.move.line","write",[[_il["id"]],{"name":_nn}])
-            except Exception: pass
         except Exception as _pe:
             _logger.warning("create_vendor_bill percepcion: %s", _pe)
+    # Renombrar IVA a español — aplica a TODAS las facturas, con o sin percepciones
+    if move_id:
+        try:
+            import re as _re_ren
+            _all_tl = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                "account.move.line","search_read",
+                [[("move_id","=",move_id),("tax_line_id","!=",False)]],
+                {"fields":["id","name"],"limit":20})
+            for _il in (_all_tl or []):
+                _n  = _il.get("name","")
+                _nn = (_re_ren.sub(r"(?i)^VAT\s*21%$","IVA Crédito Fiscal 21%",
+                       _re_ren.sub(r"(?i)^VAT\s*27%$","IVA Crédito Fiscal 27%",
+                       _re_ren.sub(r"(?i)^C_IVA\s*21%$","IVA Crédito Fiscal 21%",
+                       _re_ren.sub(r"(?i)^C_IVA\s*27%$","IVA Crédito Fiscal 27%",_n)))))
+                if _nn != _n:
+                    models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                        "account.move.line","write",[[_il["id"]],{"name":_nn}])
+        except Exception: pass
     if file_bytes:
         try:
             attach_file(models, uid, api_key, "account.move", move_id, filename, file_bytes, mimetype)
