@@ -38,6 +38,9 @@ def _fix_prefs_sanity(prefs: dict) -> dict:
             or not _dj.strip())
     if _bad:
         prefs = {**prefs, "diario_facturas_nombre": _DEFAULTS["diario_facturas_nombre"]}
+    # Garantizar que diario_facturas_id esté siempre seteado (puede faltar en sesiones viejas)
+    if not prefs.get("diario_facturas_id"):
+        prefs = {**prefs, "diario_facturas_id": _DEFAULTS["diario_facturas_id"]}
     return prefs
 
 

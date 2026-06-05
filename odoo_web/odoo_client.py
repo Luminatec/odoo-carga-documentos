@@ -888,14 +888,24 @@ def _calc_cost_breakdown(po_lines, bills, tc_usd):
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_purchase_journals(models_url, uid, api_key):
-    """Retorna lista de (id, name) de diarios de tipo 'purchase'."""
+    """Retorna lista de (id, name) de diarios de tipo 'purchase', filtrados por empresa del usuario."""
     try:
         common_url = models_url.replace("/object", "/common").replace("xmlrpc/2/object", "xmlrpc/2/common")
         _pj_models = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        # Obtener la empresa actual del usuario para filtrar journals
+        try:
+            _udata = _pj_models.execute_kw(_cfg.ODOO_DB, uid, api_key, "res.users", "read",
+                [[uid]], {"fields": ["company_id"]})
+            _cid = _udata[0]["company_id"][0] if _udata else None
+        except Exception:
+            _cid = None
+        _domain = [("type", "=", "purchase")]
+        if _cid:
+            _domain.append(("company_id", "=", _cid))
         rows = _pj_models.execute_kw(
             _cfg.ODOO_DB, uid, api_key, "account.journal", "search_read",
-            [[("type", "=", "purchase")]],
-            {"fields": ["id", "name", "code", "company_id"], "order": "name asc", "limit": 50})
+            [_domain],
+            {"fields": ["id", "name", "code", "company_id"], "order": "id asc", "limit": 50})
         result = []
         for r in rows:
             label = r["name"]
