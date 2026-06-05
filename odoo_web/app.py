@@ -348,19 +348,16 @@ with st.sidebar:
     st.divider()
     if st.button("🔄 Refrescar datos de Odoo", key="sidebar_refresh_cache",
                  help="Limpia el caché y recarga productos, cuentas y datos de Odoo"):
+        # Guardar bytes de archivos subidos ANTES del rerun
+        # (Streamlit puede perder la referencia después de cache clear)
+        for _up_key in ("bills_upload", "orders_upload"):
+            for _cf in (st.session_state.get(_up_key) or []):
+                try:
+                    _cf.seek(0)
+                    st.session_state[f"_saved_bytes_{_cf.name}_{_cf.size}"] = _cf.read()
+                except Exception:
+                    pass
         st.cache_data.clear()
-        # Limpiar SOLO los widget-keys de formularios de archivos
-        # (prefijos conocidos + keys que contengan un "." típico de nombres de archivo)
-        _form_prefixes = ("bill_form_", "amount_i_", "prod_g_", "cc_g_", "exenta_",
-                          "notas_", "bill_is_nc_", "vend_search_", "vend_sel_",
-                          "new_vendor_form_", "batchok_f_", "batch_confirm_",
-                          "partner_override_", "partner_name_",
-                          "bp_", "bf_", "br_", "bt_", "load_bills_xls_",
-                          "oc_form_", "oc_is_nc_", "receipt_",)
-        _to_del = [k for k in list(st.session_state.keys())
-                   if any(k.startswith(p) for p in _form_prefixes)]
-        for _k in _to_del:
-            del st.session_state[_k]
         st.rerun()
     with st.expander("⚙️ Preferencias", expanded=False):
         _prefs    = load_prefs()

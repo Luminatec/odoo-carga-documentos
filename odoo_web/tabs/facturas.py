@@ -80,6 +80,10 @@ def render(models, uid, api_key, models_url, is_admin):
         st.divider()
         ext        = uf.name.rsplit(".", 1)[-1].lower()
         file_bytes = uf.read()
+        # Si Streamlit perdió los bytes tras un rerun (refrescar cache), recuperarlos
+        if not file_bytes:
+            _saved_k = f"_saved_bytes_{uf.name}_{uf.size}"
+            file_bytes = st.session_state.pop(_saved_k, b"")
         mimetype   = _cfg.MIMETYPES.get(ext, "application/octet-stream")
         _file_lbl = f"({_uf_idx + 1}/{_total_upfiles}) " if _total_upfiles > 1 else ""
         st.markdown(f"**📎 {_file_lbl}{uf.name}**  `{ext.upper()}`  ({len(file_bytes)//1024} KB)")
