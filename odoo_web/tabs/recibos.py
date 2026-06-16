@@ -132,7 +132,7 @@ def render(models, uid, api_key, models_url, is_admin):
                             and re.search(r"CONSTANCIA\s+DE\s+RETENCI[OÓ]N", _txt, re.IGNORECASE)
                             and re.search(r"ING\.?\s*BRUTOS?", _txt, re.IGNORECASE)):
                         # Nombre: primera línea "EMPRESA SRL  CONSTANCIA DE RETENCION"
-                        _m_nom = re.match(r"^(.+?)\s{2,}CONSTANCIA", _lines[0]) if _lines else None
+                        _m_nom = re.match(r"^(.+?)\s+CONSTANCIA\b", _lines[0]) if _lines else None
                         if _m_nom:
                             _r["nombre"] = _m_nom.group(1).strip()
                         elif not _r.get("nombre") and _lines:
@@ -286,28 +286,73 @@ def render(models, uid, api_key, models_url, is_admin):
             else:
                 show_odoo_warning(f"No se pudo parsear la retención en {_rf.name}.", "parsear retención")
 
-    # ── Retenciones sin CUIT — asignación manual ────────────────────────────
+    # ── Retenciones sin CUIT — asignación manual o por búsqueda en Odoo ───────
     _rets_no_cuit = st.session_state["rc_retenciones"].get("", [])
     if _rets_no_cuit:
         st.warning(
-            "⚠️ Las siguientes retenciones no tienen CUIT del agente. "
-            "Ingresá el CUIT del cliente para asociarlas al recibo correspondiente:")
+            "⚠️ Las siguientes retenciones no tienen CUIT del agente de retención. "
+            "Asignalas ingresando el CUIT o buscando el cliente por nombre:")
         _reassign_map = {}
         for _nci, _nc in enumerate(_rets_no_cuit):
-            _c1, _c2 = st.columns([3, 2])
-            _nc_label = (
-                f"{_nc.get('nombre','')} — "
-                f"ARS {fmt_ars(_nc.get('importe',0))} — "
-                f"Cert. {_nc.get('nro_certificado','')} — "
-                f"{_nc.get('fecha','')} — {_nc.get('concepto','IIBB')}"
-            )
-            _c1.markdown(f"**{_nc_label}**")
-            _inp = _c2.text_input(
-                "CUIT cliente", key=f"rc_assign_cuit_{_nci}",
-                placeholder="30-12345678-9", label_visibility="collapsed")
-            _cuit_digits = re.sub(r"[^\d]", "", _inp)
-            if len(_cuit_digits) == 11:
-                _reassign_map[_nci] = _cuit_digits
+            with st.container(border=True):
+                _ch1, _ch2 = st.columns([3, 2])
+                _ch1.markdown(
+                    f"**{_nc.get('nombre','')}**  ·  "
+                    f"ARS {fmt_ars(_nc.get('importe',0))}  ·  "
+                    f"Cert. {_nc.get('nro_certificado','')}  ·  "
+                    f"{_nc.get('fecha','')}  ·  {_nc.get('concepto','IIBB')}")
+
+                _mode_key = f"rc_ret_mode_{_nci}"
+                if _mode_key not in st.session_state:
+                    st.session_state[_mode_key] = "CUIT"
+                _mode = _ch2.radio(
+                    "Asignar por", ["CUIT", "Nombre"],
+                    key=_mode_key, horizontal=True, label_visibility="collapsed")
+
+                if _mode == "CUIT":
+                    _inp = st.text_input(
+                        "CUIT del cliente (XX-XXXXXXXX-X)",
+                        key=f"rc_assign_cuit_{_nci}",
+                        placeholder="30-12345678-9")
+                    _cuit_digits = re.sub(r"[^\d]", "", _inp)
+                    if len(_cuit_digits) == 11:
+                        _reassign_map[_nci] = _cuit_digits
+                else:
+                    # Búsqueda por nombre en Odoo
+                    _srch_key  = f"rc_ret_srch_{_nci}"
+                    _sel_key   = f"rc_ret_sel_{_nci}"
+                    _srch_val  = st.text_input(
+                        "Nombre del cliente en Odoo",
+                        key=_srch_key,
+                        placeholder="Ej: Trivisonno")
+                    if _srch_val and len(_srch_val) >= 3:
+                        try:
+                            _srch_res = models.execute_kw(
+                                _cfg.ODOO_DB, uid, api_key, "res.partner", "search_read",
+                                [[("name", "ilike", _srch_val),
+                                  ("customer_rank", ">", 0),
+                                  ("active", "=", True)]],
+                                {"fields": ["id", "name", "vat"], "limit": 10})
+                        except Exception:
+                            _srch_res = []
+                        if _srch_res:
+                            _srch_opts = {
+                                f"{r['name']}  —  CUIT {r.get('vat') or '?'}": r.get("vat","")
+                                for r in _srch_res}
+                            _sel = st.selectbox(
+                                "Seleccioná el cliente",
+                                list(_srch_opts.keys()),
+                                key=_sel_key)
+                            _vat_sel = _srch_opts.get(_sel, "")
+                            _vat_digits = re.sub(r"[^\d]", "", _vat_sel)
+                            if len(_vat_digits) == 11:
+                                _reassign_map[_nci] = _vat_digits
+                                st.success(f"CUIT detectado: {_vat_sel}")
+                        else:
+                            st.caption("Sin resultados. Probá con otro nombre.")
+                    elif _srch_val:
+                        st.caption("Ingresá al menos 3 caracteres.")
+
         if _reassign_map:
             _remaining_nc = []
             for _nci, _nc in enumerate(_rets_no_cuit):
