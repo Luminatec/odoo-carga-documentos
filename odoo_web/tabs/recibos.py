@@ -125,7 +125,41 @@ def render(models, uid, api_key, models_url, is_admin):
                     if _m:
                         _r["importe_sujeto"] = _rc_parse_monto(_m.group(1))
 
-                    if _r.get("cuit") and _r.get("importe"):
+                    # ── Formato "Constancia Retención CM" (Trivisonno y similares) ──
+                    # pdfplumber fusiona las dos columnas: nombre aparece en la primera línea
+                    # junto con "CONSTANCIA DE RETENCION". El CUIT del agente NO está en el PDF.
+                    if (not _r.get("importe")
+                            and re.search(r"CONSTANCIA\s+DE\s+RETENCI[OÓ]N", _txt, re.IGNORECASE)
+                            and re.search(r"ING\.?\s*BRUTOS?", _txt, re.IGNORECASE)):
+                        # Nombre: primera línea "EMPRESA SRL  CONSTANCIA DE RETENCION"
+                        _m_nom = re.match(r"^(.+?)\s{2,}CONSTANCIA", _lines[0]) if _lines else None
+                        if _m_nom:
+                            _r["nombre"] = _m_nom.group(1).strip()
+                        elif not _r.get("nombre") and _lines:
+                            _r["nombre"] = _lines[0].strip()
+                        # Fecha: DD-MM-YYYY en header ("...CM 921-759430 12-06-2026 16:43")
+                        _mf = re.search(r"\b(\d{2})-(\d{2})-(\d{4})\b", _txt)
+                        if _mf and not _r.get("fecha"):
+                            _r["fecha"]     = f"{_mf.group(1)}/{_mf.group(2)}/{_mf.group(3)}"
+                            _r["fecha_iso"] = f"{_mf.group(3)}-{_mf.group(2)}-{_mf.group(1)}"
+                        # Nro certificado: "ORIGINAL NNNNNNNN"
+                        _mnro = re.search(r"ORIGINAL\s+(\d{6,10})", _txt, re.IGNORECASE)
+                        if _mnro:
+                            _r["nro_certificado"] = _mnro.group(1)
+                        # Importe: última columna de la fila REMESA
+                        # Ej: "12/06/26  REMESA: 001RPX001700008706  3266797.81  0.80  22245.05"
+                        _mimp = re.search(
+                            r"REMESA:\s*\S+\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)",
+                            _txt, re.IGNORECASE)
+                        if _mimp:
+                            _r["importe"] = _rc_parse_monto(_mimp.group(3))
+                        # CUIT del agente de retención: no figura en este formato
+                        if not _r.get("cuit"):
+                            _r["cuit"] = ""
+                        _r.setdefault("concepto", "IIBB")
+                        _r.setdefault("provincia", "")
+
+                    if _r.get("importe"):
                         results.append(_r)
             return results
         except Exception:
@@ -251,6 +285,45 @@ def render(models, uid, api_key, models_url, is_admin):
                         st.session_state["rc_retenciones"][_rcuit_ret] = _existing
             else:
                 show_odoo_warning(f"No se pudo parsear la retención en {_rf.name}.", "parsear retención")
+
+    # ── Retenciones sin CUIT — asignación manual ────────────────────────────
+    _rets_no_cuit = st.session_state["rc_retenciones"].get("", [])
+    if _rets_no_cuit:
+        st.warning(
+            "⚠️ Las siguientes retenciones no tienen CUIT del agente. "
+            "Ingresá el CUIT del cliente para asociarlas al recibo correspondiente:")
+        _reassign_map = {}
+        for _nci, _nc in enumerate(_rets_no_cuit):
+            _c1, _c2 = st.columns([3, 2])
+            _nc_label = (
+                f"{_nc.get('nombre','')} — "
+                f"ARS {fmt_ars(_nc.get('importe',0))} — "
+                f"Cert. {_nc.get('nro_certificado','')} — "
+                f"{_nc.get('fecha','')} — {_nc.get('concepto','IIBB')}"
+            )
+            _c1.markdown(f"**{_nc_label}**")
+            _inp = _c2.text_input(
+                "CUIT cliente", key=f"rc_assign_cuit_{_nci}",
+                placeholder="30-12345678-9", label_visibility="collapsed")
+            _cuit_digits = re.sub(r"[^\d]", "", _inp)
+            if len(_cuit_digits) == 11:
+                _reassign_map[_nci] = _cuit_digits
+        if _reassign_map:
+            _remaining_nc = []
+            for _nci, _nc in enumerate(_rets_no_cuit):
+                if _nci in _reassign_map:
+                    _cuit_r = _reassign_map[_nci]
+                    _bucket = st.session_state["rc_retenciones"].setdefault(_cuit_r, [])
+                    _dup_kr = f"{_nc.get('concepto','')}|{_nc.get('importe',0)}"
+                    if not any(
+                        f"{r.get('concepto','')}|{r.get('importe',0)}" == _dup_kr
+                        for r in _bucket
+                    ):
+                        _bucket.append({**_nc, "cuit": _cuit_r})
+                else:
+                    _remaining_nc.append(_nc)
+            st.session_state["rc_retenciones"][""] = _remaining_nc
+            st.rerun()
 
     # Mostrar retenciones cargadas
     if st.session_state["rc_retenciones"]:
