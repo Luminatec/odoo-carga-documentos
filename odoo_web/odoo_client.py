@@ -26,8 +26,8 @@ def _xmlrpc_proxy(url: str, allow_none: bool = True) -> xmlrpc.client.ServerProx
         _ctx.verify_mode = _ssl.CERT_NONE
         _transport = (xmlrpc.client.SafeTransport(context=_ctx)
                       if url.startswith("https") else xmlrpc.client.Transport())
-        return _xmlrpc_proxy(url, transport=_transport, allow_none=allow_none)
-    return _xmlrpc_proxy(url, allow_none=allow_none)
+        return xmlrpc.client.ServerProxy(url, transport=_transport, allow_none=allow_none)
+    return xmlrpc.client.ServerProxy(url, allow_none=allow_none)
 
 _logger = logging.getLogger("lumidoo.odoo_client")
 
