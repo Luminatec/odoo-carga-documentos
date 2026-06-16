@@ -3,6 +3,7 @@ Luminatec · Odoo — Funciones helper para la API de Odoo (XML-RPC)
 Todas las funciones @st.cache_data y helpers de creación/búsqueda van aquí.
 """
 import xmlrpc.client
+import ssl as _ssl
 import base64
 import re
 import time
@@ -13,6 +14,20 @@ from datetime import datetime as _dt_now
 from zoneinfo import ZoneInfo
 import pandas as pd
 import config as _cfg
+
+
+def _xmlrpc_proxy(url: str, allow_none: bool = True) -> xmlrpc.client.ServerProxy:
+    """Crea un ServerProxy con SSL bypass automático para URLs de dev/testing.
+    Odoo.sh dev instances usan certificados que no coinciden con el hostname."""
+    _is_dev = any(p in url for p in (".dev.odoo.com", ".staging.odoo.com", ".dev."))
+    if _is_dev:
+        _ctx = _ssl.create_default_context()
+        _ctx.check_hostname = False
+        _ctx.verify_mode = _ssl.CERT_NONE
+        _transport = (xmlrpc.client.SafeTransport(context=_ctx)
+                      if url.startswith("https") else xmlrpc.client.Transport())
+        return _xmlrpc_proxy(url, transport=_transport, allow_none=allow_none)
+    return _xmlrpc_proxy(url, allow_none=allow_none)
 
 _logger = logging.getLogger("lumidoo.odoo_client")
 
@@ -151,7 +166,7 @@ def check_duplicate_vendor_bill(models_url, uid, api_key, partner_id, document_n
     if not partner_id or not document_number:
         return False, None, None
     try:
-        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        m = _xmlrpc_proxy(models_url, allow_none=True)
         _doc_search = str(document_number).strip()
         rows = m.execute_kw(
             _cfg.ODOO_DB, uid, api_key, "account.move", "search_read",
@@ -177,7 +192,7 @@ def check_duplicate_sale_order(models_url, uid, api_key, partner_id, client_orde
     if not partner_id or not client_order_ref:
         return False, None, None
     try:
-        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        m = _xmlrpc_proxy(models_url, allow_none=True)
         rows = m.execute_kw(
             _cfg.ODOO_DB, uid, api_key, "sale.order", "search_read",
             [[("client_order_ref", "=", str(client_order_ref).strip()),
@@ -197,7 +212,7 @@ def check_duplicate_cheque(models_url, uid, api_key, nro, issuer_vat):
     if not nro or not issuer_vat:
         return False, None, None
     try:
-        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        m = _xmlrpc_proxy(models_url, allow_none=True)
         # Buscar en l10n_latam_new_check (cheques de terceros en Odoo AR)
         rows = m.execute_kw(
             _cfg.ODOO_DB, uid, api_key, "l10n_latam.check", "search_read",
@@ -253,7 +268,7 @@ def register_processed_file(file_bytes: bytes, filename: str,
 
 def get_models_proxy():
     """ServerProxy para account.move, etc. Es stateless — uid y password van por llamada."""
-    return xmlrpc.client.ServerProxy(f"{_cfg.ODOO_URL}/xmlrpc/2/object", allow_none=True)
+    return _xmlrpc_proxy(f"{_cfg.ODOO_URL}/xmlrpc/2/object", allow_none=True)
 
 def odoo_authenticate(email: str, password: str):
     """
@@ -261,7 +276,7 @@ def odoo_authenticate(email: str, password: str):
     Devuelve (uid, "") si OK, (None, mensaje_error) si falla.
     """
     try:
-        common = xmlrpc.client.ServerProxy(f"{_cfg.ODOO_URL}/xmlrpc/2/common", allow_none=True)
+        common = _xmlrpc_proxy(f"{_cfg.ODOO_URL}/xmlrpc/2/common", allow_none=True)
         uid = common.authenticate(_cfg.ODOO_DB, email.strip().lower(), password, {})
         if uid:
             return uid, ""
@@ -334,7 +349,7 @@ def call(models, uid, api_key, model, method, args, kw=None):
 
 @st.cache_data(ttl=300, show_spinner=False)
 def search_partners(models_url, uid, api_key, name, limit=8):
-    m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+    m = _xmlrpc_proxy(models_url, allow_none=True)
     rows = m.execute_kw(_cfg.ODOO_DB, uid, api_key, "res.partner", "search_read",
         [[("name", "ilike", name), ("active", "=", True)]],
         {"fields": ["id", "name"], "limit": limit, "order": "name asc"})
@@ -344,7 +359,7 @@ def search_partners(models_url, uid, api_key, name, limit=8):
 def get_all_accounts(models_url, uid, api_key):
     """Carga todas las cuentas contables activas de Odoo (cacheado 10 min)."""
     try:
-        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        m = _xmlrpc_proxy(models_url, allow_none=True)
         rows = m.execute_kw(_cfg.ODOO_DB, uid, api_key, "account.account", "search_read",
             [[("deprecated", "=", False)]],
             {"fields": ["id", "code", "name"], "order": "code asc"})
@@ -362,7 +377,7 @@ def get_partner_default_account(models_url, uid, api_key, partner_id):
     Solo usa cuentas configuradas en el producto — NO recurre a facturas históricas.
     Retorna None si no se puede determinar."""
     try:
-        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        m = _xmlrpc_proxy(models_url, allow_none=True)
 
         # --- Estrategia 1: producto del proveedor → cuenta de gasto del producto ---
         sinfo = m.execute_kw(_cfg.ODOO_DB, uid, api_key, "product.supplierinfo", "search_read",
@@ -413,7 +428,7 @@ def get_partner_default_account(models_url, uid, api_key, partner_id):
 def get_expense_products(models_url, uid, api_key):
     """Carga variantes de productos activos y aptos para compra (product.product → IDs válidos para lineas de factura)."""
     try:
-        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        m = _xmlrpc_proxy(models_url, allow_none=True)
         rows = m.execute_kw(_cfg.ODOO_DB, uid, api_key, "product.product", "search_read",
             [[("active", "=", True), ("purchase_ok", "=", True), ("type", "=", "service")]],
             {"fields": ["id", "name", "default_code"], "order": "name asc", "limit": 500})
@@ -430,7 +445,7 @@ def get_expense_products(models_url, uid, api_key):
 def get_partner_default_product(models_url, uid, api_key, partner_id):
     """Devuelve (product_product_id, label) del primer producto configurado para el proveedor."""
     try:
-        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        m = _xmlrpc_proxy(models_url, allow_none=True)
         # Intentar campo product_id (variante específica) primero
         sinfo = m.execute_kw(_cfg.ODOO_DB, uid, api_key, "product.supplierinfo", "search_read",
             [[("partner_id", "=", partner_id)]],
@@ -457,7 +472,7 @@ def get_partner_default_product(models_url, uid, api_key, partner_id):
 def get_analytic_accounts(models_url, uid, api_key):
     """Carga cuentas analíticas activas (Centros de Costo) de Odoo."""
     try:
-        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        m = _xmlrpc_proxy(models_url, allow_none=True)
         rows = m.execute_kw(_cfg.ODOO_DB, uid, api_key, "account.analytic.account", "search_read",
             [[("active", "=", True)]],
             {"fields": ["id", "name", "code"], "order": "name asc"})
@@ -473,7 +488,7 @@ def get_analytic_accounts(models_url, uid, api_key):
 def get_currency_id(models_url, uid, api_key, name):
     """Retorna el ID de la moneda por nombre (ej: 'USD', 'ARS')."""
     try:
-        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        m = _xmlrpc_proxy(models_url, allow_none=True)
         rows = m.execute_kw(_cfg.ODOO_DB, uid, api_key, "res.currency", "search_read",
             [[("name", "=", name)]],
             {"fields": ["id", "name"], "limit": 1})
@@ -483,7 +498,7 @@ def get_currency_id(models_url, uid, api_key, name):
 
 @st.cache_data(ttl=120, show_spinner=False)
 def search_purchase_orders(models_url, uid, api_key, query):
-    m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+    m = _xmlrpc_proxy(models_url, allow_none=True)
     rows = m.execute_kw(_cfg.ODOO_DB, uid, api_key, "purchase.order", "search_read",
         [[("name", "ilike", query), ("state", "in", ["purchase", "done"])]],
         {"fields": ["id", "name", "partner_id", "date_order", "amount_total"], "limit": 10})
@@ -491,7 +506,7 @@ def search_purchase_orders(models_url, uid, api_key, query):
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_pickings_for_po(models_url, uid, api_key, po_id):
-    m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+    m = _xmlrpc_proxy(models_url, allow_none=True)
     rows = m.execute_kw(_cfg.ODOO_DB, uid, api_key, "stock.picking", "search_read",
         [[("purchase_id", "=", po_id), ("state", "!=", "cancel")]],
         {"fields": ["id", "name", "state", "location_dest_id"], "limit": 10})
@@ -499,7 +514,7 @@ def get_pickings_for_po(models_url, uid, api_key, po_id):
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_bills_for_carpeta(models_url, uid, api_key, carpeta_ref):
-    m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+    m = _xmlrpc_proxy(models_url, allow_none=True)
     rows = m.execute_kw(_cfg.ODOO_DB, uid, api_key, "account.move", "search_read",
         [[("move_type", "=", "in_invoice"), ("ref", "ilike", carpeta_ref), ("state", "!=", "cancel")]],
         {"fields": ["id", "name", "partner_id", "invoice_date", "amount_total", "state", "journal_id"], "limit": 50})
@@ -610,7 +625,7 @@ def _parse_odoo_rate(r):
 def get_usd_rate_odoo(models_url, uid, api_key, date_str):
     """TC ARS/USD del día o el más reciente anterior en Odoo."""
     try:
-        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        m = _xmlrpc_proxy(models_url, allow_none=True)
         rows = m.execute_kw(_cfg.ODOO_DB, uid, api_key, "res.currency.rate", "search_read",
             [[("currency_id.name", "=", "USD"), ("name", "<=", date_str)]],
             {"fields": ["name", "rate", "inverse_company_rate", "company_rate"],
@@ -627,7 +642,7 @@ def get_usd_rate_odoo(models_url, uid, api_key, date_str):
 def get_po_lines(models_url, uid, api_key, po_id):
     """Líneas de una OC con productos, cantidades y precios."""
     try:
-        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        m = _xmlrpc_proxy(models_url, allow_none=True)
         return m.execute_kw(_cfg.ODOO_DB, uid, api_key, "purchase.order.line", "search_read",
             [[("order_id", "=", po_id), ("state", "!=", "cancel")]],
             {"fields": ["product_id", "product_qty", "price_unit", "price_subtotal", "name"]})
@@ -643,7 +658,7 @@ def load_carpeta_full(models_url, uid, api_key, carpeta_id):
     result = {"bills": [], "po": None, "pickings": [], "lc_ids": [],
               "stages": {}, "tc_oc": None, "error": None}
     try:
-        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        m = _xmlrpc_proxy(models_url, allow_none=True)
 
         # 1. OC por partner_ref (campo "Referencia de proveedor")
         po_fields_ext = ["id", "name", "partner_id", "amount_total", "currency_id",
@@ -752,7 +767,7 @@ def get_bill_lines(models_url, uid, api_key, bill_ids):
     if not bill_ids:
         return {}
     try:
-        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        m = _xmlrpc_proxy(models_url, allow_none=True)
         lines = m.execute_kw(
             _cfg.ODOO_DB, uid, api_key, "account.move.line", "search_read",
             [[("move_id", "in", bill_ids),
@@ -891,7 +906,7 @@ def get_purchase_journals(models_url, uid, api_key):
     """Retorna lista de (id, name) de diarios de tipo 'purchase', filtrados por empresa del usuario."""
     try:
         common_url = models_url.replace("/object", "/common").replace("xmlrpc/2/object", "xmlrpc/2/common")
-        _pj_models = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        _pj_models = _xmlrpc_proxy(models_url, allow_none=True)
         # Obtener la empresa actual del usuario para filtrar journals
         try:
             _udata = _pj_models.execute_kw(_cfg.ODOO_DB, uid, api_key, "res.users", "read",
@@ -932,7 +947,7 @@ def get_journal_purchase_account(models_url, uid, api_key, journal_id):
     4. Cualquier cuenta con tipo 'expense' o 'other' activa
     """
     try:
-        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        m = _xmlrpc_proxy(models_url, allow_none=True)
         from collections import Counter
 
         def _most_common(rows):
@@ -1456,7 +1471,7 @@ def search_partner_by_cuit(models_url, uid, api_key, cuit):
     if len(cuit_norm) < 10:
         return None
     try:
-        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        m = _xmlrpc_proxy(models_url, allow_none=True)
         # Intentar con formato estándar XX-XXXXXXXX-X y sin guiones
         variants = [cuit_norm]
         if len(cuit_norm) == 11:
@@ -1488,7 +1503,7 @@ def search_partner_by_cuit_or_name(models_url, uid, api_key, query, limit=8):
     if not query or not query.strip():
         return []
     try:
-        m   = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        m   = _xmlrpc_proxy(models_url, allow_none=True)
         q   = query.strip()
         digits = re.sub(r"[^\d]", "", q)
         results = []
@@ -1534,7 +1549,7 @@ def check_invoice_exists(models_url, uid, api_key, ref):
     if not ref or not ref.strip():
         return False, None, None
     try:
-        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        m = _xmlrpc_proxy(models_url, allow_none=True)
         rows = m.execute_kw(_cfg.ODOO_DB, uid, api_key, "account.move", "search_read",
             [[("ref", "=", ref.strip()),
               ("move_type", "=", "in_invoice"),
@@ -1553,7 +1568,7 @@ def check_invoice_exists(models_url, uid, api_key, ref):
 def get_all_payment_terms(models_url, uid, api_key):
     """Retorna lista de (id, name) de plazos de pago activos en Odoo."""
     try:
-        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        m = _xmlrpc_proxy(models_url, allow_none=True)
         rows = m.execute_kw(_cfg.ODOO_DB, uid, api_key, "account.payment.term", "search_read",
             [[("active", "=", True)]],
             {"fields": ["id", "name"], "order": "name asc"})
@@ -1565,7 +1580,7 @@ def get_all_payment_terms(models_url, uid, api_key):
 def get_customer_payment_terms(models_url, uid, api_key, partner_id):
     """Retorna (payment_term_id, payment_term_name) del cliente, o (None, None)."""
     try:
-        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        m = _xmlrpc_proxy(models_url, allow_none=True)
         rows = m.execute_kw(_cfg.ODOO_DB, uid, api_key, "res.partner", "read",
             [[partner_id]],
             {"fields": ["property_payment_term_id"]})
@@ -1588,7 +1603,7 @@ def search_product_by_code_or_name(models_url, uid, api_key,
     Siempre prefiere default_code que empiece con 'L' y mayor standard_price.
     """
     try:
-        m   = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        m   = _xmlrpc_proxy(models_url, allow_none=True)
         F   = ["id", "name", "default_code", "standard_price", "list_price", "qty_available"]
 
         def _best(rows):
@@ -1757,7 +1772,7 @@ def get_ejecutivo_field(models_url, uid, api_key):
     En Odoo 17 AR el campo nativo es 'referrer_id' (Many2one → res.partner).
     Como fallback busca campos x_ con keywords ejecutivo/referido."""
     try:
-        _mx = xmlrpc.client.ServerProxy(models_url)
+        _mx = _xmlrpc_proxy(models_url)
         fields = _mx.execute_kw(_cfg.ODOO_DB, uid, api_key,
             "sale.order", "fields_get", [],
             {"attributes": ["string", "type", "relation"]})
@@ -1780,7 +1795,7 @@ def get_ejecutivo_field(models_url, uid, api_key):
 def get_referidos(models_url, uid, api_key):
     """Devuelve lista de (id, nombre) de partners usados como Referido en Odoo."""
     try:
-        _mx = xmlrpc.client.ServerProxy(models_url)
+        _mx = _xmlrpc_proxy(models_url)
         groups = _mx.execute_kw(
             _cfg.ODOO_DB, uid, api_key,
             "res.partner", "read_group",
@@ -1824,7 +1839,7 @@ def create_vendor_partner(models, uid, api_key, name, vat, street="", phone="", 
 def get_ar_states(_models_url, uid, api_key):
     """Provincias argentinas: lista de (id, name)."""
     try:
-        m = xmlrpc.client.ServerProxy(_models_url, allow_none=True)
+        m = _xmlrpc_proxy(_models_url, allow_none=True)
         rows = m.execute_kw(_cfg.ODOO_DB, uid, api_key, "res.country.state", "search_read",
             [[["country_id.code", "=", "AR"]]],
             {"fields": ["id", "name"], "order": "name asc"})
@@ -1837,7 +1852,7 @@ def get_ar_states(_models_url, uid, api_key):
 def get_afip_resp_types(_models_url, uid, api_key):
     """Tipos de responsabilidad AFIP: lista de (id, name)."""
     try:
-        m = xmlrpc.client.ServerProxy(_models_url, allow_none=True)
+        m = _xmlrpc_proxy(_models_url, allow_none=True)
         rows = m.execute_kw(_cfg.ODOO_DB, uid, api_key, "l10n_ar.afip.responsibility.type", "search_read",
             [[]], {"fields": ["id", "name"], "order": "sequence asc"})
         return [(r["id"], r["name"]) for r in rows]
@@ -1849,7 +1864,7 @@ def get_afip_resp_types(_models_url, uid, api_key):
 def get_cuit_id_type(_models_url, uid, api_key):
     """ID del tipo de identificación CUIT en Odoo."""
     try:
-        m = xmlrpc.client.ServerProxy(_models_url, allow_none=True)
+        m = _xmlrpc_proxy(_models_url, allow_none=True)
         rows = m.execute_kw(_cfg.ODOO_DB, uid, api_key, "l10n_latam.identification.type", "search_read",
             [[["name", "ilike", "CUIT"]]],
             {"fields": ["id", "name"], "limit": 1})
@@ -1862,7 +1877,7 @@ def get_cuit_id_type(_models_url, uid, api_key):
 def get_odoo_users(_models_url, uid, api_key):
     """Usuarios activos de Odoo: lista de (id, name)."""
     try:
-        m = xmlrpc.client.ServerProxy(_models_url, allow_none=True)
+        m = _xmlrpc_proxy(_models_url, allow_none=True)
         rows = m.execute_kw(_cfg.ODOO_DB, uid, api_key, "res.users", "search_read",
             [[["active", "=", True], ["share", "=", False]]],
             {"fields": ["id", "name"], "order": "name asc"})
@@ -1875,7 +1890,7 @@ def get_odoo_users(_models_url, uid, api_key):
 def get_pricelists(_models_url, uid, api_key):
     """Listas de precios activas."""
     try:
-        m = xmlrpc.client.ServerProxy(_models_url, allow_none=True)
+        m = _xmlrpc_proxy(_models_url, allow_none=True)
         rows = m.execute_kw(_cfg.ODOO_DB, uid, api_key, "product.pricelist", "search_read",
             [[["active", "=", True]]],
             {"fields": ["id", "name"], "order": "name asc"})
@@ -1888,7 +1903,7 @@ def get_pricelists(_models_url, uid, api_key):
 def get_ar_accounts(_models_url, uid, api_key, account_type=None):
     """Cuentas contables filtradas por tipo (asset_receivable / liability_payable)."""
     try:
-        m = xmlrpc.client.ServerProxy(_models_url, allow_none=True)
+        m = _xmlrpc_proxy(_models_url, allow_none=True)
         domain = []
         if account_type:
             domain = [["account_type", "=", account_type]]
@@ -1933,7 +1948,7 @@ def match_ar_state(province_name, ar_states):
 def get_pending_bills(models_url, uid, api_key):
     """Todas las FAs de proveedor confirmadas y con saldo pendiente."""
     try:
-        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        m = _xmlrpc_proxy(models_url, allow_none=True)
         rows = m.execute_kw(_cfg.ODOO_DB, uid, api_key, "account.move", "search_read",
             [[("move_type",     "=",  "in_invoice"),
               ("state",         "=",  "posted"),
@@ -1955,7 +1970,7 @@ def get_payment_journals(models_url, uid, api_key):
     Incluye diarios sin moneda (= ARS de la empresa) y los que dicen ARS/PESO.
     """
     try:
-        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        m = _xmlrpc_proxy(models_url, allow_none=True)
         rows = m.execute_kw(_cfg.ODOO_DB, uid, api_key, "account.journal", "search_read",
             [[]],
             {"fields": ["id", "name", "currency_id", "type", "active"], "order": "name asc",
@@ -1985,7 +2000,7 @@ def get_payment_journals(models_url, uid, api_key):
 def get_all_banks(_models_url, uid, api_key):
     """Lista de (id, name) de res.bank para matchear bancos de cheques."""
     try:
-        m = xmlrpc.client.ServerProxy(_models_url, allow_none=True)
+        m = _xmlrpc_proxy(_models_url, allow_none=True)
         rows = m.execute_kw(_cfg.ODOO_DB, uid, api_key, "res.bank", "search_read",
             [[]], {"fields": ["id", "name"], "limit": 500, "order": "name asc"})
         return [(r["id"], r["name"]) for r in rows]
@@ -2068,7 +2083,7 @@ def create_advance_payment(models, uid, api_key, partner_id, amount,
 def get_pending_expense_sheets(models_url, uid, api_key):
     """Notas de gastos aprobadas pendientes de pago (hr.expense.sheet state=post)."""
     try:
-        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        m = _xmlrpc_proxy(models_url, allow_none=True)
         rows = m.execute_kw(_cfg.ODOO_DB, uid, api_key, "hr.expense.sheet", "search_read",
             [[("state", "=", "post")]],
             {"fields": ["id", "name", "employee_id", "total_amount",
@@ -2103,7 +2118,7 @@ def search_partners_by_cuits(models_url, uid, api_key, cuits_tuple):
     """Busca socios en Odoo por tupla de CUITs. Retorna dict {cuit_sin_guiones: (id, name)}.
     Maneja que Odoo puede guardar el VAT con guiones (30-71189948-7) o sin (30711899487)."""
     try:
-        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        m = _xmlrpc_proxy(models_url, allow_none=True)
 
         def _cuit_variants(c):
             """Devuelve variantes de un CUIT para cubrir todos los formatos de Odoo:
@@ -2171,7 +2186,7 @@ def get_customer_unpaid_invoices(models_url, uid, api_key, partner_ids_tuple):
     Incluye in_payment porque en Odoo AR muchas FAs quedan en ese estado
     cuando el pago está registrado pero sin conciliar con extracto bancario."""
     try:
-        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        m = _xmlrpc_proxy(models_url, allow_none=True)
         rows = m.execute_kw(_cfg.ODOO_DB, uid, api_key, "account.move", "search_read",
             [[("move_type", "=", "out_invoice"),
               ("state", "=", "posted"),
@@ -2189,7 +2204,7 @@ def get_customer_unpaid_invoices(models_url, uid, api_key, partner_ids_tuple):
 def get_customer_pending_credit_notes(models_url, uid, api_key, partner_ids_tuple):
     """Notas de crédito de cliente con saldo pendiente de aplicar (out_refund posted, not_paid/partial)."""
     try:
-        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        m = _xmlrpc_proxy(models_url, allow_none=True)
         rows = m.execute_kw(_cfg.ODOO_DB, uid, api_key, "account.move", "search_read",
             [[("move_type", "=", "out_refund"),
               ("state", "=", "posted"),
@@ -2219,7 +2234,7 @@ def search_registered_orders(models_url, uid, api_key,
     """Busca pedidos de venta ya registrados en Odoo.
     Retorna lista de dicts con id, name, partner, fecha, total, estado, url."""
     try:
-        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        m = _xmlrpc_proxy(models_url, allow_none=True)
         domain = [("state", "not in", ["cancel"])]
         if partner_id:
             domain.append(("partner_id", "=", partner_id))
@@ -2264,7 +2279,7 @@ def search_registered_payments(models_url, uid, api_key,
     Retorna lista de dicts con id, name, partner, date, amount, state, url.
     """
     try:
-        m = xmlrpc.client.ServerProxy(models_url, allow_none=True)
+        m = _xmlrpc_proxy(models_url, allow_none=True)
         domain = [("state", "=", "posted")]
         if partner_id:
             domain.append(("partner_id", "=", partner_id))
