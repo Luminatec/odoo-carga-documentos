@@ -318,7 +318,7 @@ def extract_pdf_fields(file_bytes):
                 from odoo_client import normalize_amount as _na27
                 _bot["iva_27"] = float(_na27(_m27.group(1)))
             except Exception: pass
-        _m21b = _re_iva27.search(r"IVA\s*21\s*%\s*([\d.,]+)", _raw, _re_iva27.IGNORECASE)
+        _m21b = _re_iva27.search(r"IVA(?:\s+\w+)?\s*21[.,]?\d*\s*%\s*\$?\s*([\d.,]+)", _raw, _re_iva27.IGNORECASE)
         if _m21b:
             try:
                 from odoo_client import normalize_amount as _na21b
@@ -501,7 +501,8 @@ def extract_pdf_fields(file_bytes):
 
     # ── IVA ───────────────────────────────────────────────────────────────
     iva_pats = [
-        r"IVA\s*(?:21|10[.,]5|27)\s*%\s+([\d.,]+)",  # IVA 21% o IVA27% seguido de espacio + monto
+        r"IVA\s+\w+\s+(?:21|10[.,]5|27)[.,]?\d*\s*%\s*\$?\s*([\d.,]+)",  # Iva Inscripto 21,00 % $ monto
+        r"IVA\s*(?:21|10[.,]5|27)[.,\d]*\s*%\s*\$?\s*([\d.,]+)",  # IVA 21% / IVA 21,00% seguido de monto
         r"I\.?V\.?A[^:\n]*(?:21|10\.5|27)[^:\n]*:[:\s$]*\$?\s*([\d.,]+)",
         r"I\.?V\.?A[:\s$%\d.]*:\s*([\d.,]+)",
         r"(?:Impuesto\s+)?IVA[:\s$]*\$?\s*([\d.,]+)",
@@ -589,7 +590,7 @@ def extract_pdf_fields(file_bytes):
         except Exception:
             pass
     # IVA 21% explícito (facturas Telecom separan IVA27% e IVA21% en líneas distintas)
-    _m21r = re.search(r"IVA\s*21\s*%\s*([\d.,]+)", text, re.IGNORECASE)
+    _m21r = re.search(r"IVA(?:\s+\w+)?\s*21[.,]?\d*\s*%\s*\$?\s*([\d.,]+)", text, re.IGNORECASE)
     if _m21r:
         try:
             _iva21_val = float(normalize_amount(_m21r.group(1)))
