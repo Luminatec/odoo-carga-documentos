@@ -483,8 +483,17 @@ def render(models, uid, api_key, models_url, is_admin):
                     f"IVA: {fmt_ars(_iva_ref)}  |  "
                     f"Total: {fmt_ars(_total_ref)}"
                 )
-                # Exenta: sin IVA extraído → pre-marcar
-                _exenta_default = not bool(safe_float(_iva_ref))
+                # Exenta: sin IVA extraído ni inferible → pre-marcar
+                # Si total y neto ambos presentes y total > neto * 1.02 → hay impuesto implícito
+                _iva_explicit  = safe_float(_iva_ref)
+                _neto_f  = safe_float(_neto_ref)
+                _total_f = safe_float(_total_ref)
+                _iva_implied = (
+                    (_total_f - _neto_f)
+                    if (_neto_f > 0 and _total_f > _neto_f * 1.02)
+                    else 0.0
+                )
+                _exenta_default = not bool(_iva_explicit or _iva_implied)
                 exenta_i = st.checkbox(
                     "🔒 Factura exenta / Monotributo (sin impuestos)",
                     value=_exenta_default,
