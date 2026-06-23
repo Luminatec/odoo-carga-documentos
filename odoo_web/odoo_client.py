@@ -1729,6 +1729,28 @@ def search_product_by_code_or_name(models_url, uid, api_key,
                     r = _best(_tmpl(base2))
                     if r: return r
 
+            # ── 2b-iv. LETRA + NÚMERO separados por espacio → unir como código de modelo ──
+            # Maneja "Fanttik V 10 Apex" → "V10" + ctx "Apex" → "V10 Apex Aspiradora de Mano"
+            # También: "T 1 Max" → "T1", "W 10 Apex" → "W10", "S 10 Pro" → "S10"
+            _biv_split = re.sub(r"[^\w\s]", " ", name_keywords).split()
+            for _biv_i in range(len(_biv_split) - 1):
+                _bw1, _bw2 = _biv_split[_biv_i], _biv_split[_biv_i + 1]
+                _letter_num = _bw1.isalpha() and len(_bw1) == 1 and _bw2.isdigit()
+                _num_letter = _bw1.isdigit() and _bw2.isalpha() and len(_bw2) == 1
+                if _letter_num or _num_letter:
+                    _joined = _bw1 + _bw2  # "V"+"10"→"V10", "T"+"1"→"T1"
+                    _ctx_biv = [w for wi, w in enumerate(_biv_split)
+                                if wi not in (_biv_i, _biv_i + 1) and len(w) >= 3]
+                    for _cw in _ctx_biv:
+                        r = _best(_tmpl([("active", "=", True),
+                                         ("name", "ilike", _joined),
+                                         ("name", "ilike", _cw)], 10))
+                        if r: return r
+                    r = _best(_tmpl([("active", "=", True),
+                                     ("name", "ilike", _joined)], 10))
+                    if r: return r
+                    break  # solo el primer par letra+número encontrado
+
             # ── 2c. Fallback texto puro: palabras largas, sin dígitos ──────────────
             # Cubre productos como "sillas gamer", "linterna recargable", etc.
             _stops_txt = {"para", "con", "por", "original", "pack", "color",
