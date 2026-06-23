@@ -1405,7 +1405,7 @@ def extract_oc_fields(file_bytes):
                 col_map["cantidad"] = i
             elif re.search(r"detal|descri|product|nombre|item", h) and "descripcion" not in col_map:
                 col_map["descripcion"] = i
-            elif re.search(r"\bneto\b|p\.?\s*unit|precio\s*unit|unitario|unit\s*price", h) and "precio_unit" not in col_map:
+            elif re.search(r"\bneto\b|p\.?\s*unit|precio\s*unit|unitario|unit\s*price|\bprecio(?!\s*final)\b", h) and "precio_unit" not in col_map:
                 col_map["precio_unit"] = i
             elif re.search(r"\biva\b|tax|%\s*iva|alicuota", h) and "iva_pct" not in col_map:
                 col_map["iva_pct"] = i
@@ -1789,7 +1789,9 @@ def extract_excel_oc_fields(file_bytes, filename=""):
     def _norm(s):
         s = str(s or "").lower().strip()
         s = s.replace(".", "").replace("á","a").replace("é","e").replace("í","i")
-        s  = s.replace("ó","o").replace("ú","u").replace("  "," ")
+        s = s.replace("ó","o").replace("ú","u")
+        s = re.sub(r"[\(\)\$\\/]", "", s)   # "precio ($)" → "precio ", "importe ($)" → "importe "
+        s = re.sub(r"\s+", " ", s).strip()
         return s
 
     # SKU / código
