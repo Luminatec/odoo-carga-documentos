@@ -1732,6 +1732,10 @@ def search_product_by_code_or_name(models_url, uid, api_key,
             # ── 2b-iv. LETRA + NÚMERO separados por espacio → unir como código de modelo ──
             # Maneja "Fanttik V 10 Apex" → "V10" + ctx "Apex" → "V10 Apex Aspiradora de Mano"
             # También: "T 1 Max" → "T1", "W 10 Apex" → "W10", "S 10 Pro" → "S10"
+            def _biv_standalone(prods, code):
+                """Filtra productos donde `code` aparece como token standalone (no embebido)."""
+                _pat = re.compile(r'(?<![A-Za-z0-9])' + re.escape(code) + r'(?![A-Za-z0-9])', re.IGNORECASE)
+                return [p for p in prods if _pat.search(p.get('name', '') or '')]
             _biv_split = re.sub(r"[^\w\s]", " ", name_keywords).split()
             for _biv_i in range(len(_biv_split) - 1):
                 _bw1, _bw2 = _biv_split[_biv_i], _biv_split[_biv_i + 1]
@@ -1742,12 +1746,14 @@ def search_product_by_code_or_name(models_url, uid, api_key,
                     _ctx_biv = [w for wi, w in enumerate(_biv_split)
                                 if wi not in (_biv_i, _biv_i + 1) and len(w) >= 3]
                     for _cw in _ctx_biv:
-                        r = _best(_tmpl([("active", "=", True),
-                                         ("name", "ilike", _joined),
-                                         ("name", "ilike", _cw)], 10))
+                        _raw = _tmpl([("active", "=", True),
+                                      ("name", "ilike", _joined),
+                                      ("name", "ilike", _cw)], 10)
+                        r = _best(_biv_standalone(_raw, _joined))
                         if r: return r
-                    r = _best(_tmpl([("active", "=", True),
-                                     ("name", "ilike", _joined)], 10))
+                    _raw = _tmpl([("active", "=", True),
+                                  ("name", "ilike", _joined)], 10)
+                    r = _best(_biv_standalone(_raw, _joined))
                     if r: return r
                     break  # solo el primer par letra+número encontrado
 
