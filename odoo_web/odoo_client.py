@@ -2375,7 +2375,8 @@ def register_customer_payment(models, uid, api_key,
                                move_ids=None, memo="", cheques=None,
                                withholdings=None,
                                writeoff_account_id=None,
-                               writeoff_label="Diferencia de redondeo"):
+                               writeoff_label="Diferencia de redondeo",
+                               reconcile_fully=False):
     """Registra un recibo de cobro de cliente usando account.payment.group.
     Flujo correcto para Odoo AR (módulo account_payments_group):
       1. Crear account.payment.group con payment_type='receivable'
@@ -2552,16 +2553,16 @@ def register_customer_payment(models, uid, api_key,
                 # Retornar los errores como advertencia (el recibo principal ya quedó)
                 return True, f"__WH_WARN__{'|'.join(_wh_errors)}"
 
-        # 3d. Configurar writeoff si hay diferencia de redondeo a saldar
-        if writeoff_account_id and inv_line_ids:
+        # 3d. Configurar writeoff / reconcile_fully
+        if inv_line_ids and (writeoff_account_id or reconcile_fully):
+            _wo_vals = {"payment_difference_handling": "reconcile"}
+            if writeoff_account_id:
+                _wo_vals["writeoff_account_id"] = writeoff_account_id
+                _wo_vals["writeoff_label"] = writeoff_label or "Diferencia de redondeo"
             try:
                 models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                     "account.payment.group", "write",
-                    [[group_id], {
-                        "payment_difference_handling": "reconcile",
-                        "writeoff_account_id": writeoff_account_id,
-                        "writeoff_label": writeoff_label or "Diferencia de redondeo",
-                    }])
+                    [[group_id], _wo_vals])
             except Exception as _wo_err:
                 _logger.warning("register_customer_payment: writeoff config: %s", _wo_err)
 

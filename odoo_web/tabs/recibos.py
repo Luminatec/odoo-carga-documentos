@@ -868,6 +868,7 @@ def render(models, uid, api_key, models_url, is_admin):
                         key=f"rc_memo_{_rcuit}")
 
                     _rc_neto = _rc_amount - _rc_ajuste_total - _rcncsel_total
+                    _rc_reconcile_fully = False  # se actualiza abajo si pendiente ~ 0
                     _rc_info = f"**Cheques:** ARS {fmt_ars(_rc_amount)}"
                     if _rc_ajuste_total > 0:
                         _rc_info += f"  ·  Deducciones: ARS {fmt_ars(_rc_ajuste_total)}"
@@ -880,6 +881,7 @@ def render(models, uid, api_key, models_url, is_admin):
                         # Pendiente = saldo FC - NC - cheques bruto + retenciones
                         _rc_pendiente = _rcsel_saldo - _rcncsel_total - _rc_amount + _rc_ajuste_total
                         if abs(_rc_pendiente) < 1.0:
+                            _rc_reconcile_fully = True
                             _rc_info += "  ·  **Saldo: CERO**"
                         elif _rc_pendiente > 0:
                             _rc_info += f"  ·  Pendiente: ARS {fmt_ars(_rc_pendiente)}"
@@ -1066,7 +1068,8 @@ def render(models, uid, api_key, models_url, is_admin):
                                             cheques=_rc_cheque_vals if _rc_cheque_vals else None,
                                             withholdings=_rc_withholdings,
                                             writeoff_account_id=_rc_writeoff_account_id,
-                                            writeoff_label=_rc_writeoff_label)
+                                            writeoff_label=_rc_writeoff_label,
+                                            reconcile_fully=_rc_reconcile_fully)
                                         if _rc_ok:
                                             _rc_status.update(
                                                 label="✅ Cobro registrado",
