@@ -867,10 +867,12 @@ def render(models, uid, api_key, models_url, is_admin):
                         value=f"Recibo cheques — {_rchs[0]['nombre']}",
                         key=f"rc_memo_{_rcuit}")
 
-                    _rc_neto = _rc_amount - _rc_ajuste_total
+                    _rc_neto = _rc_amount - _rc_ajuste_total - _rcncsel_total
                     _rc_info = f"**Importe neto:** ARS {fmt_ars(_rc_neto)}"
                     if _rc_ajuste_total > 0:
                         _rc_info += f"  ·  Deducciones: ARS {fmt_ars(_rc_ajuste_total)}"
+                    if _rcncsel_total > 0:
+                        _rc_info += f"  ·  NC aplicada: ARS {fmt_ars(_rcncsel_total)}"
                     if _rcsel_ids:
                         _rc_info += (
                             f"  ·  {len(_rcsel_ids)} factura(s) seleccionada(s) "

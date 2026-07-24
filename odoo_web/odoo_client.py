@@ -1238,11 +1238,12 @@ def create_landed_cost(models, uid, api_key, picking_ids, cost_lines):
 
 def create_sale_order(models, uid, api_key, partner_id, note, lines, filename, file_bytes, mimetype,
                       client_order_ref=None, payment_term_id=None, date_order=None,
-                      ejecutivo_field=None, ejecutivo_id=None):
+                      ejecutivo_field=None, ejecutivo_id=None, user_id=None):
     vals = {"partner_id": partner_id, "note": note or ""}
     if client_order_ref: vals["client_order_ref"] = client_order_ref
     if payment_term_id:  vals["payment_term_id"]  = payment_term_id
     if date_order:       vals["date_order"]        = date_order
+    if user_id:          vals["user_id"]           = user_id
     if ejecutivo_field and ejecutivo_id:
         vals[ejecutivo_field] = ejecutivo_id
     try:
@@ -1839,6 +1840,32 @@ def get_referidos(models_url, uid, api_key):
         return sorted(result, key=lambda x: x[1])
     except Exception:
         return []
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_sales_users(models_url, uid, api_key):
+    """Devuelve lista de (id, nombre) de usuarios internos activos de Odoo (para Vendedor)."""
+    try:
+        _mx = _xmlrpc_proxy(models_url)
+        users = _mx.execute_kw(_cfg.ODOO_DB, uid, api_key,
+            "res.users", "search_read",
+            [[["active", "=", True], ["share", "=", False]]],
+            {"fields": ["id", "name"], "order": "name asc"})
+        return [(u["id"], u["name"]) for u in users]
+    except Exception:
+        return []
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def find_partner_by_name(models_url, uid, api_key, name):
+    """Busca un partner por nombre (ilike). Retorna (id, nombre) o None."""
+    try:
+        _mx = _xmlrpc_proxy(models_url)
+        res = _mx.execute_kw(_cfg.ODOO_DB, uid, api_key,
+            "res.partner", "search_read",
+            [[["name", "ilike", name], ["active", "=", True]]],
+            {"fields": ["id", "name"], "limit": 1})
+        return (res[0]["id"], res[0]["name"]) if res else None
+    except Exception:
+        return None
 
 def create_partner(models, uid, api_key, name, vat, street="", phone="", email_addr=""):
     """Crea un nuevo cliente en Odoo y retorna su ID."""

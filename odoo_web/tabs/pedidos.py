@@ -20,6 +20,8 @@ from odoo_client import (
     search_product_by_code_or_name,
     get_ejecutivo_field,
     get_referidos,
+    get_sales_users,
+    find_partner_by_name,
     create_partner,
     OdooError,
     show_odoo_error,
@@ -378,11 +380,40 @@ def render(models, uid, api_key, models_url, is_admin):
                             _xl_ref_default = _xl_ref_opts.index(_rxlname)
                 except Exception:
                     pass
+            # ── Auto-detect Meli (plazo de pago contiene "mercado") ───────────
+            _xl_is_meli = "mercado" in (_xl_pt_sel or "").lower()
+            if _xl_is_meli:
+                _xl_co_key = next((k for k in _xl_ref_map if "canal online" in k.lower()), None)
+                if not _xl_co_key:
+                    _co = find_partner_by_name(models_url, uid, api_key, "CANAL ONLINE")
+                    if _co:
+                        _xl_ref_map[_co[1]] = _co[0]
+                        _xl_ref_opts = ["— Sin referido —"] + list(_xl_ref_map.keys())
+                        _xl_co_key = _co[1]
+                if _xl_co_key and _xl_co_key in _xl_ref_opts:
+                    _xl_ref_default = _xl_ref_opts.index(_xl_co_key)
+
             _xl_ref_sel = st.selectbox(
-                "Referido", _xl_ref_opts, index=_xl_ref_default,
+                "Referido / Ejecutivo de cuenta", _xl_ref_opts, index=_xl_ref_default,
                 key=f"xl_ref_{uf.name}",
-                help="Quién refirió a este cliente",
+                help="Quién refirió a este cliente (para Meli: CANAL ONLINE)",
             )
+
+            # ── Vendedor ───────────────────────────────────────────────────────
+            _xl_vendedores = get_sales_users(models_url, uid, api_key)
+            _xl_vend_map   = {n: i for i, n in _xl_vendedores}
+            _xl_vend_opts  = ["— (sin cambio) —"] + list(_xl_vend_map.keys())
+            _xl_vend_def   = 0
+            if _xl_is_meli:
+                _mv = next((n for n in _xl_vend_map if "musante" in n.lower()), None)
+                if _mv and _mv in _xl_vend_opts:
+                    _xl_vend_def = _xl_vend_opts.index(_mv)
+            _xl_vend_sel = st.selectbox(
+                "Vendedor", _xl_vend_opts, index=_xl_vend_def,
+                key=f"xl_vend_{uf.name}",
+                help="Usuario asignado como Vendedor en Odoo (para Meli: Maria Musante)",
+            )
+            _xl_vend_id = _xl_vend_map.get(_xl_vend_sel)
 
             # ── Datos adicionales del pedido ──────────────────────────────────
             _xl_oc_col1, _xl_oc_col2 = st.columns(2)
@@ -465,6 +496,7 @@ def render(models, uid, api_key, models_url, is_admin):
                             date_order       = _xl_fec_iso,
                             ejecutivo_field  = _xl_ejecutivo_field,
                             ejecutivo_id     = _xl_ref_id,
+                            user_id          = _xl_vend_id,
                         )
                         url = odoo_url("sale.order", _xl_order_id)
                         st.toast("Presupuesto creado en Odoo — pendiente de confirmación", icon="✅")
@@ -857,11 +889,40 @@ def render(models, uid, api_key, models_url, is_admin):
                             _oc_ref_default = _oc_ref_opts.index(_rname)
                 except Exception:
                     pass
+            # ── Auto-detect Meli ───────────────────────────────────────────────
+            _oc_is_meli = "mercado" in (_pt_name or "").lower()
+            if _oc_is_meli:
+                _oc_co_key = next((k for k in _oc_ref_map if "canal online" in k.lower()), None)
+                if not _oc_co_key:
+                    _co2 = find_partner_by_name(models_url, uid, api_key, "CANAL ONLINE")
+                    if _co2:
+                        _oc_ref_map[_co2[1]] = _co2[0]
+                        _oc_ref_opts = ["— Sin referido —"] + list(_oc_ref_map.keys())
+                        _oc_co_key = _co2[1]
+                if _oc_co_key and _oc_co_key in _oc_ref_opts:
+                    _oc_ref_default = _oc_ref_opts.index(_oc_co_key)
+
             _oc_ref_sel = st.selectbox(
-                "Referido", _oc_ref_opts, index=_oc_ref_default,
+                "Referido / Ejecutivo de cuenta", _oc_ref_opts, index=_oc_ref_default,
                 key=f"oc_ref_{uf.name}",
-                help="Quién refirió a este cliente",
+                help="Quién refirió a este cliente (para Meli: CANAL ONLINE)",
             )
+
+            # ── Vendedor ───────────────────────────────────────────────────────
+            _oc_vendedores = get_sales_users(models_url, uid, api_key)
+            _oc_vend_map   = {n: i for i, n in _oc_vendedores}
+            _oc_vend_opts  = ["— (sin cambio) —"] + list(_oc_vend_map.keys())
+            _oc_vend_def   = 0
+            if _oc_is_meli:
+                _mv2 = next((n for n in _oc_vend_map if "musante" in n.lower()), None)
+                if _mv2 and _mv2 in _oc_vend_opts:
+                    _oc_vend_def = _oc_vend_opts.index(_mv2)
+            _oc_vend_sel = st.selectbox(
+                "Vendedor", _oc_vend_opts, index=_oc_vend_def,
+                key=f"oc_vend_{uf.name}",
+                help="Usuario asignado como Vendedor en Odoo (para Meli: Maria Musante)",
+            )
+            _oc_vend_id = _oc_vend_map.get(_oc_vend_sel)
 
             _btn_disabled = not bool(_partner_id_oc)
             if _btn_disabled:
@@ -927,6 +988,7 @@ def render(models, uid, api_key, models_url, is_admin):
                             date_order       = _fec_oc,
                             ejecutivo_field  = _oc_ejecutivo_field,
                             ejecutivo_id     = _ref_id_oc,
+                            user_id          = _oc_vend_id,
                         )
                         url = odoo_url("sale.order", order_id)
                         st.toast("Presupuesto creado en Odoo — pendiente de confirmación", icon="✅")
