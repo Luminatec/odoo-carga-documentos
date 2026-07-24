@@ -868,15 +868,23 @@ def render(models, uid, api_key, models_url, is_admin):
                         key=f"rc_memo_{_rcuit}")
 
                     _rc_neto = _rc_amount - _rc_ajuste_total - _rcncsel_total
-                    _rc_info = f"**Importe neto:** ARS {fmt_ars(_rc_neto)}"
+                    _rc_info = f"**Cheques:** ARS {fmt_ars(_rc_amount)}"
                     if _rc_ajuste_total > 0:
                         _rc_info += f"  ·  Deducciones: ARS {fmt_ars(_rc_ajuste_total)}"
                     if _rcncsel_total > 0:
-                        _rc_info += f"  ·  NC aplicada: ARS {fmt_ars(_rcncsel_total)}"
+                        _rc_info += f"  ·  NC: ARS {fmt_ars(_rcncsel_total)}"
                     if _rcsel_ids:
                         _rc_info += (
-                            f"  ·  {len(_rcsel_ids)} factura(s) seleccionada(s) "
-                            f"(saldo ARS {fmt_ars(_rcsel_saldo)})")
+                            f"  ·  {len(_rcsel_ids)} FC"
+                            f" (saldo ARS {fmt_ars(_rcsel_saldo)})")
+                        # Pendiente = saldo FC - NC - cheques bruto + retenciones
+                        _rc_pendiente = _rcsel_saldo - _rcncsel_total - _rc_amount + _rc_ajuste_total
+                        if abs(_rc_pendiente) < 1.0:
+                            _rc_info += "  ·  **Saldo: CERO**"
+                        elif _rc_pendiente > 0:
+                            _rc_info += f"  ·  Pendiente: ARS {fmt_ars(_rc_pendiente)}"
+                        else:
+                            _rc_info += f"  ·  Excede: ARS {fmt_ars(abs(_rc_pendiente))}"
                     else:
                         _rc_info += "  ·  Sin facturas → se registra como pago a cuenta"
                     st.info(_rc_info)
