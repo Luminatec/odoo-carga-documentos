@@ -204,7 +204,7 @@ def render(models, uid, api_key, models_url, is_admin):
             return rows
         elif fname.endswith((".xlsx", ".xls")):
             try:
-                _dfx = pd.read_excel(BytesIO(file_bytes), header=1, dtype=str).fillna("")
+                _dfx = pd.read_excel(BytesIO(file_bytes), header=0, dtype=str).fillna("")
             except Exception as _xe:
                 st.error(f"No se pudo leer el Excel: {_xe}")
                 return []
