@@ -867,7 +867,7 @@ def render(models, uid, api_key, models_url, is_admin):
                         value=f"Recibo cheques — {_rchs[0]['nombre']}",
                         key=f"rc_memo_{_rcuit}")
 
-                    _rc_neto = _rc_amount - _rc_ajuste_total - _rcncsel_total
+                    _rc_neto = _rc_amount - _rc_ajuste_total
                     _rc_reconcile_fully = False  # se actualiza abajo si pendiente ~ 0
                     _rc_info = f"**Cheques:** ARS {fmt_ars(_rc_amount)}"
                     if _rc_ajuste_total > 0:
