@@ -2027,7 +2027,8 @@ def get_payment_journals(models_url, uid, api_key):
         m = _xmlrpc_proxy(models_url, allow_none=True)
         rows = m.execute_kw(_cfg.ODOO_DB, uid, api_key, "account.journal", "search_read",
             [[]],
-            {"fields": ["id", "name", "currency_id", "type", "active", "company_id"],
+            {"fields": ["id", "name", "currency_id", "type", "active", "company_id",
+                        "bank_account_id", "default_account_id", "code"],
              "order": "name asc", "context": {"active_test": False}})
         result = []
         for r in rows:
@@ -2044,8 +2045,24 @@ def get_payment_journals(models_url, uid, api_key):
             is_foreign = has_cur and not any(k in cur_upper for k in ("ARS", "PESO"))
             if is_foreign and not is_mp:
                 continue
-            cid = (r.get("company_id") or [None, ""])[0]
-            result.append((r["id"], r["name"], cur_name, cid))
+            cid  = (r.get("company_id") or [None, ""])[0]
+            # Construir label descriptivo: si el nombre es genérico ("Bank","Cash"),
+            # usar la cuenta por defecto o el número de cuenta bancaria como label
+            raw_name = r.get("name", "")
+            label    = raw_name
+            if raw_name.strip().lower() in ("bank", "cash"):
+                bank_acc = r.get("bank_account_id")
+                def_acc  = r.get("default_account_id")
+                if bank_acc and isinstance(bank_acc, (list, tuple)) and bank_acc[0]:
+                    # Extraer solo el nombre del banco (después del " - ")
+                    bank_str = str(bank_acc[1] or "")
+                    label = bank_str.split(" - ")[-1].strip() if " - " in bank_str else bank_str
+                elif def_acc and isinstance(def_acc, (list, tuple)) and def_acc[0]:
+                    label = str(def_acc[1] or raw_name)
+                code = (r.get("code") or "").strip()
+                if code and label == raw_name:
+                    label = f"{raw_name} [{code}]"
+            result.append((r["id"], label, cur_name, cid))
         return result   # list of (id, label, currency_name, company_id)
     except Exception as e:
         return []
