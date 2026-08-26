@@ -2386,6 +2386,7 @@ def register_customer_payment(models, uid, api_key,
     Esto garantiza que el recibo aparezca en Clientes > Recibos."""
     try:
         # 1. Obtener las líneas receivable de las facturas seleccionadas
+        #    Filtramos para que todas usen la misma cuenta contable (Odoo no permite mezclarlas)
         inv_line_ids = []
         if move_ids:
             inv_lines = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
@@ -2393,8 +2394,12 @@ def register_customer_payment(models, uid, api_key,
                 [[("move_id", "in", move_ids),
                   ("account_id.account_type", "=", "asset_receivable"),
                   ("reconciled", "=", False)]],
-                {"fields": ["id"], "limit": 100})
-            inv_line_ids = [l["id"] for l in inv_lines]
+                {"fields": ["id", "account_id"], "limit": 100})
+            if inv_lines:
+                # Usar la cuenta de la primera línea y filtrar el resto
+                main_account_id = inv_lines[0]["account_id"][0]
+                inv_line_ids = [l["id"] for l in inv_lines
+                                if l["account_id"][0] == main_account_id]
 
         # 2. Asegurar que el partner no tenga restriccion de empresa
         #    (evita error "Empresas incompatibles" cuando partner.company_id != payment_group.company_id)
