@@ -2387,8 +2387,18 @@ def register_customer_payment(models, uid, api_key,
     try:
         # 1. Obtener las líneas receivable de las facturas seleccionadas
         #    Filtramos para que todas usen la misma cuenta contable (Odoo no permite mezclarlas)
+        #    También obtenemos la empresa de las facturas para forzarla en el grupo de pago
         inv_line_ids = []
+        invoice_company_id = None
         if move_ids:
+            # Traer empresa de la primera factura
+            move_data = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                "account.move", "read",
+                [move_ids[:1]],
+                {"fields": ["company_id"]})
+            if move_data:
+                invoice_company_id = move_data[0]["company_id"][0]
+
             inv_lines = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                 "account.move.line", "search_read",
                 [[("move_id", "in", move_ids),
@@ -2411,12 +2421,15 @@ def register_customer_payment(models, uid, api_key,
             pass  # sin permisos o ya sin restriccion, continuar
 
         # 3. Crear el grupo (solo campos del grupo, sin pagos inline)
+        #    Si hay facturas seleccionadas, usar su empresa para que journal y cuentas coincidan
         group_vals = {
             "payment_type": "receivable",
             "partner_id":   partner_id,
             "currency_id":  currency_id,
             "date":         payment_date,
         }
+        if invoice_company_id:
+            group_vals["company_id"] = invoice_company_id
         if inv_line_ids:
             group_vals["move_line_ids"] = [(6, 0, inv_line_ids)]
         group_id = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
