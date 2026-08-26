@@ -2396,7 +2396,16 @@ def register_customer_payment(models, uid, api_key,
                 {"fields": ["id"], "limit": 100})
             inv_line_ids = [l["id"] for l in inv_lines]
 
-        # 2. Crear el grupo (solo campos del grupo, sin pagos inline)
+        # 2. Asegurar que el partner no tenga restriccion de empresa
+        #    (evita error "Empresas incompatibles" cuando partner.company_id != payment_group.company_id)
+        try:
+            models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                "res.partner", "write",
+                [[partner_id], {"company_id": False}])
+        except Exception:
+            pass  # sin permisos o ya sin restriccion, continuar
+
+        # 3. Crear el grupo (solo campos del grupo, sin pagos inline)
         group_vals = {
             "payment_type": "receivable",
             "partner_id":   partner_id,
