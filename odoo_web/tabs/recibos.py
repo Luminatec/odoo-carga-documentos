@@ -244,10 +244,11 @@ def render(models, uid, api_key, models_url, is_admin):
     _prefs_rc = _load_prefs()
     _pref_jour = _prefs_rc.get("diario_cobros_nombre", "")
     _all_rc_journals = get_payment_journals(models_url, uid, api_key)
+    _rc_journal_fallback = _all_rc_journals[0][0] if _all_rc_journals else None
     _RC_JOURNAL_ID = next(
         (jid for jid, jname, *_ in _all_rc_journals if jname == _pref_jour),
-        73,  # fallback si no hay preferencia configurada
-    ) if _pref_jour else 73
+        _rc_journal_fallback,
+    ) if _pref_jour else _rc_journal_fallback
     _rc_all_banks  = get_all_banks(models_url, uid, api_key)
 
     # ── Uploaders ────────────────────────────────────────────────────────────

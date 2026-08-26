@@ -903,24 +903,23 @@ def _calc_cost_breakdown(po_lines, bills, tc_usd):
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_purchase_journals(models_url, uid, api_key):
-    """Retorna lista de (id, name) de diarios de tipo 'purchase', filtrados por empresa del usuario."""
+    """Retorna lista de (id, name) de diarios de tipo 'purchase' de todas las empresas del usuario."""
     try:
-        common_url = models_url.replace("/object", "/common").replace("xmlrpc/2/object", "xmlrpc/2/common")
         _pj_models = _xmlrpc_proxy(models_url, allow_none=True)
-        # Obtener la empresa actual del usuario para filtrar journals
+        # Traer todas las empresas a las que tiene acceso el usuario (no solo la activa)
         try:
             _udata = _pj_models.execute_kw(_cfg.ODOO_DB, uid, api_key, "res.users", "read",
-                [[uid]], {"fields": ["company_id"]})
-            _cid = _udata[0]["company_id"][0] if _udata else None
+                [[uid]], {"fields": ["company_ids"]})
+            _cids = _udata[0].get("company_ids", []) if _udata else []
         except Exception:
-            _cid = None
-        _domain = [("type", "=", "purchase")]
-        if _cid:
-            _domain.append(("company_id", "=", _cid))
+            _cids = []
+        _domain = [("type", "=", "purchase"), ("active", "=", True)]
+        if _cids:
+            _domain.append(("company_id", "in", _cids))
         rows = _pj_models.execute_kw(
             _cfg.ODOO_DB, uid, api_key, "account.journal", "search_read",
             [_domain],
-            {"fields": ["id", "name", "code", "company_id"], "order": "id asc", "limit": 50})
+            {"fields": ["id", "name", "code", "company_id"], "order": "company_id asc, name asc", "limit": 50})
         result = []
         for r in rows:
             label = r["name"]
@@ -2028,8 +2027,8 @@ def get_payment_journals(models_url, uid, api_key):
         m = _xmlrpc_proxy(models_url, allow_none=True)
         rows = m.execute_kw(_cfg.ODOO_DB, uid, api_key, "account.journal", "search_read",
             [[]],
-            {"fields": ["id", "name", "currency_id", "type", "active"], "order": "name asc",
-             "context": {"active_test": False}})
+            {"fields": ["id", "name", "currency_id", "type", "active", "company_id"],
+             "order": "name asc", "context": {"active_test": False}})
         result = []
         for r in rows:
             if r.get("type") not in ("bank", "cash"):
@@ -2045,8 +2044,9 @@ def get_payment_journals(models_url, uid, api_key):
             is_foreign = has_cur and not any(k in cur_upper for k in ("ARS", "PESO"))
             if is_foreign and not is_mp:
                 continue
-            result.append((r["id"], r["name"], cur_name))
-        return result   # list of (id, label, currency_name)
+            cid = (r.get("company_id") or [None, ""])[0]
+            result.append((r["id"], r["name"], cur_name, cid))
+        return result   # list of (id, label, currency_name, company_id)
     except Exception as e:
         return []
 
@@ -2248,7 +2248,8 @@ def get_customer_unpaid_invoices(models_url, uid, api_key, partner_ids_tuple):
               ("payment_state", "in", ["not_paid", "partial", "in_payment"]),
               ("partner_id", "child_of", list(partner_ids_tuple))]],
             {"fields": ["id", "name", "invoice_date", "invoice_date_due",
-                        "amount_total", "amount_residual", "currency_id", "partner_id"],
+                        "amount_total", "amount_residual", "currency_id", "partner_id",
+                        "company_id"],
              "order": "invoice_date asc", "limit": 300})
         return rows
     except Exception as _e:
@@ -2265,7 +2266,7 @@ def get_customer_pending_credit_notes(models_url, uid, api_key, partner_ids_tupl
               ("state", "=", "posted"),
               ("partner_id", "child_of", list(partner_ids_tuple))]],
             {"fields": ["id", "name", "invoice_date", "amount_total",
-                        "amount_residual", "currency_id", "partner_id"],
+                        "amount_residual", "currency_id", "partner_id", "company_id"],
              "order": "invoice_date asc", "limit": 300})
         # amount_residual en out_refund puede ser negativo en Odoo → normalizar
         result = []
@@ -2386,8 +2387,8 @@ def register_customer_payment(models, uid, api_key,
     Esto garantiza que el recibo aparezca en Clientes > Recibos."""
     try:
         # 1. Obtener las líneas receivable de las facturas seleccionadas
-        #    Filtramos para que todas usen la misma cuenta contable (Odoo no permite mezclarlas)
-        #    También obtenemos la empresa de las facturas para forzarla en el grupo de pago
+        #    - Filtramos move_ids a la empresa de la primera factura (no se puede mezclar)
+        #    - Filtramos líneas por la misma cuenta contable (Odoo no permite mezclarlas)
         inv_line_ids = []
         invoice_company_id = None
         if move_ids:
@@ -2398,6 +2399,17 @@ def register_customer_payment(models, uid, api_key,
                 {"fields": ["company_id"]})
             if move_data:
                 invoice_company_id = move_data[0]["company_id"][0]
+
+            # Filtrar move_ids a los que pertenecen a esa misma empresa
+            if invoice_company_id and len(move_ids) > 1:
+                try:
+                    all_moves = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                        "account.move", "read", [move_ids],
+                        {"fields": ["id", "company_id"]})
+                    move_ids = [m["id"] for m in all_moves
+                                if m["company_id"][0] == invoice_company_id]
+                except Exception:
+                    pass
 
             inv_lines = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                 "account.move.line", "search_read",
@@ -2420,8 +2432,35 @@ def register_customer_payment(models, uid, api_key,
         except Exception:
             pass  # sin permisos o ya sin restriccion, continuar
 
-        # 3. Crear el grupo (solo campos del grupo, sin pagos inline)
-        #    Si hay facturas seleccionadas, usar su empresa para que journal y cuentas coincidan
+        # 3. Ajustar journal para que sea de la misma empresa que las facturas
+        #    Si el journal seleccionado es de una empresa diferente a la de las facturas,
+        #    buscar un journal equivalente (mismo tipo) en la empresa correcta.
+        effective_journal_id = journal_id
+        if invoice_company_id:
+            try:
+                jdata = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                    "account.journal", "read", [[journal_id]],
+                    {"fields": ["company_id", "type", "name"]})
+                if jdata and jdata[0]["company_id"][0] != invoice_company_id:
+                    jtype = jdata[0]["type"]
+                    jname = jdata[0]["name"]
+                    alts = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                        "account.journal", "search_read",
+                        [[("company_id", "=", invoice_company_id),
+                          ("type", "=", jtype),
+                          ("active", "=", True)]],
+                        {"fields": ["id", "name"], "order": "name asc", "limit": 20})
+                    if alts:
+                        # Preferir el journal con nombre más parecido
+                        best = next(
+                            (a for a in alts if jname.lower()[:8] in a["name"].lower()),
+                            alts[0])
+                        effective_journal_id = best["id"]
+            except Exception:
+                pass
+
+        # 4. Crear el grupo (solo campos del grupo, sin pagos inline)
+        #    Forzar empresa de las facturas para que cuentas receivable coincidan
         group_vals = {
             "payment_type": "receivable",
             "partner_id":   partner_id,
@@ -2435,15 +2474,15 @@ def register_customer_payment(models, uid, api_key,
         group_id = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
             "account.payment.group", "create", [group_vals])
 
-        # 3. Crear el payment vinculado al grupo
+        # 5. Crear el payment vinculado al grupo
         #    Nota: en esta instalación el campo se llama "memo" (no "ref")
 
-        # 3a. Buscar la linea de metodo de pago "Cheque de Terceros Existente"
+        # 5a. Buscar la linea de metodo de pago "Cheque de Terceros Existente"
         #     para el journal seleccionado (code: out_third_party_checks = Existing Third Party Checks)
         try:
             pml_lines = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                 "account.payment.method.line", "search_read",
-                [[["journal_id", "=", journal_id],
+                [[["journal_id", "=", effective_journal_id],
                   ["payment_method_id.code", "=", "new_third_party_checks"]]],
                 {"fields": ["id"], "limit": 1})
             pml_id = pml_lines[0]["id"] if pml_lines else None
@@ -2463,7 +2502,7 @@ def register_customer_payment(models, uid, api_key,
             "amount":         _pay_amount,
             "currency_id":    currency_id,
             "date":           payment_date,
-            "journal_id":     journal_id,
+            "journal_id":     effective_journal_id,
             "memo":           memo or "",
             "payment_group_id": group_id,
         }
@@ -2493,9 +2532,11 @@ def register_customer_payment(models, uid, api_key,
             # Cargar todos los diarios generales/cash una sola vez
             _all_jrnls = []
             try:
+                _wh_company_filter = [("company_id", "=", invoice_company_id)] \
+                    if invoice_company_id else []
                 _all_jrnls = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                     "account.journal", "search_read",
-                    [[("type", "in", ["general", "cash"])]],
+                    [[("type", "in", ["general", "cash"])] + _wh_company_filter],
                     {"fields": ["id", "name"], "limit": 100})
             except Exception:
                 pass
