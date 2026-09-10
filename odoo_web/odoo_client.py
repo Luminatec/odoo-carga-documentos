@@ -1061,6 +1061,24 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
     # Las percepciones se agregan VÍA WRITE después de crear la factura
     # (Odoo sobreescribe tax_ids al crear si hay product_id)
 
+    # fix275: limpiar company_id en partner y sus direcciones de entrega
+    # para evitar "empresas incompatibles" cuando Odoo auto-asigna partner_shipping_id
+    if partner_id:
+        try:
+            call(models, uid, api_key, "res.partner", "write",
+                 [[partner_id], {"company_id": False}])
+        except Exception:
+            pass
+        try:
+            child_ids = call(models, uid, api_key, "res.partner", "search",
+                             [[("parent_id", "=", partner_id),
+                               ("type", "in", ["delivery", "contact", "other"])]])
+            if child_ids:
+                call(models, uid, api_key, "res.partner", "write",
+                     [child_ids, {"company_id": False}])
+        except Exception:
+            pass
+
     try:
         move_id = call(models, uid, api_key, "account.move", "create", [vals])
     except OdooError as e:
