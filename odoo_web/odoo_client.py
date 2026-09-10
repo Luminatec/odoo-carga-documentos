@@ -1061,8 +1061,7 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
     # Las percepciones se agregan VÍA WRITE después de crear la factura
     # (Odoo sobreescribe tax_ids al crear si hay product_id)
 
-    # fix275: limpiar company_id en partner y sus direcciones de entrega
-    # para evitar "empresas incompatibles" cuando Odoo auto-asigna partner_shipping_id
+    # fix275b: limpiar company_id en partner y TODOS sus hijos antes de crear
     if partner_id:
         try:
             call(models, uid, api_key, "res.partner", "write",
@@ -1070,19 +1069,42 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
         except Exception:
             pass
         try:
-            child_ids = call(models, uid, api_key, "res.partner", "search",
-                             [[("parent_id", "=", partner_id),
-                               ("type", "in", ["delivery", "contact", "other"])]])
-            if child_ids:
+            # Sin filtro de tipo - limpiar todos los contactos hijo
+            _child_ids = call(models, uid, api_key, "res.partner", "search",
+                              [[("parent_id", "=", partner_id)]])
+            if _child_ids:
                 call(models, uid, api_key, "res.partner", "write",
-                     [child_ids, {"company_id": False}])
+                     [_child_ids, {"company_id": False}])
         except Exception:
             pass
 
     try:
         move_id = call(models, uid, api_key, "account.move", "create", [vals])
     except OdooError as e:
-        raise OdooError(f"No se pudo crear la factura '{ref}': {e}") from e
+        import re as _re
+        _e_str = str(e)
+        # Si el error es por partner_shipping_id incompatible: buscar ese partner, limpiarlo, reintentar
+        if "partner_shipping_id" in _e_str or "Delivery Address" in _e_str:
+            _match = _re.search(r"partner_shipping_id:\s*'([^']+)'", _e_str)
+            if _match:
+                _ship_name = _match.group(1).strip()
+                try:
+                    _ship_ids = call(models, uid, api_key, "res.partner", "search",
+                                     [[("name", "ilike", _ship_name)]])
+                    if _ship_ids:
+                        call(models, uid, api_key, "res.partner", "write",
+                             [_ship_ids, {"company_id": False}])
+                        move_id = call(models, uid, api_key, "account.move", "create", [vals])
+                    else:
+                        raise OdooError(f"No se pudo crear la factura '{ref}': {e}") from e
+                except OdooError:
+                    raise
+                except Exception as _e2:
+                    raise OdooError(f"No se pudo crear la factura '{ref}': {e}") from _e2
+            else:
+                raise OdooError(f"No se pudo crear la factura '{ref}': {e}") from e
+        else:
+            raise OdooError(f"No se pudo crear la factura '{ref}': {e}") from e
 
     # Percepciones: líneas directas + badge + rename labels
     if percepcion_lines and move_id:
