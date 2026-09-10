@@ -1010,15 +1010,37 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
         name, quantity, price_unit, account_id, product_id
     Si se pasa, reemplaza la lógica de línea única (account_id/amount_neto).
     """
-    # journal_id se pasa solo si hay preferencia guardada (user_prefs diario_facturas_nombre)
-    # Si es None, Odoo elige su diario de compras por defecto
+    # fix276: forzar company 6 (LUMINATEC S.R.L.) - co1 es solo consulta
+    # Si el journal es de co1, buscar equivalente en co6; si no hay journal, forzar company_id=6
+    _TARGET_COMPANY = 6
+    _effective_journal_id = journal_id
+    if journal_id:
+        try:
+            _jdata = call(models, uid, api_key, "account.journal", "read",
+                          [[journal_id]], {"fields": ["company_id", "type", "name"]})
+            if _jdata and _jdata[0]["company_id"][0] != _TARGET_COMPANY:
+                _jtype = _jdata[0]["type"]
+                _jname = _jdata[0]["name"]
+                _alts = call(models, uid, api_key, "account.journal", "search_read",
+                             [[("company_id", "=", _TARGET_COMPANY),
+                               ("type", "=", _jtype),
+                               ("active", "=", True)]],
+                             {"fields": ["id", "name"], "order": "name asc", "limit": 20})
+                if _alts:
+                    _best = next(
+                        (a for a in _alts if _jname.lower()[:8] in a["name"].lower()),
+                        _alts[0])
+                    _effective_journal_id = _best["id"]
+        except Exception:
+            pass
 
-    vals = {"move_type": move_type}
+    vals = {"move_type": move_type, "company_id": _TARGET_COMPANY}
     if partner_id:       vals["partner_id"]   = partner_id
     if ref:              vals["ref"]          = ref
     if invoice_date:     vals["invoice_date"] = invoice_date
     if invoice_date_due: vals["invoice_date_due"] = invoice_date_due
-    if journal_id:       vals["journal_id"]   = journal_id
+    if _effective_journal_id:
+        vals["journal_id"] = _effective_journal_id
     if doc_type_id:      vals["l10n_latam_document_type_id"] = doc_type_id
     if currency_id:      vals["currency_id"]  = currency_id
     if invoice_origin:   vals["invoice_origin"] = invoice_origin
