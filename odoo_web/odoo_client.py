@@ -1300,11 +1300,35 @@ def create_landed_cost(models, uid, api_key, picking_ids, cost_lines):
 def create_sale_order(models, uid, api_key, partner_id, note, lines, filename, file_bytes, mimetype,
                       client_order_ref=None, payment_term_id=None, date_order=None,
                       ejecutivo_field=None, ejecutivo_id=None, user_id=None):
-    vals = {"partner_id": partner_id, "note": note or ""}
-    if client_order_ref: vals["client_order_ref"] = client_order_ref
-    if payment_term_id:  vals["payment_term_id"]  = payment_term_id
-    if date_order:       vals["date_order"]        = date_order
-    if user_id:          vals["user_id"]           = user_id
+    # fix276b: validar payment_term_id - si es de otra empresa, buscar equivalente en co6 o descartar
+    _TARGET_COMPANY = 6
+    _effective_pterm = payment_term_id
+    if payment_term_id:
+        try:
+            _pt = call(models, uid, api_key, "account.payment.term", "read",
+                       [[payment_term_id]], {"fields": ["company_id", "name"]})
+            if _pt:
+                _pt_company = _pt[0].get("company_id")
+                _pt_cid = _pt_company[0] if _pt_company else None
+                if _pt_cid and _pt_cid != _TARGET_COMPANY:
+                    _pt_name = _pt[0].get("name", "")
+                    # Buscar plazo de pago con mismo nombre en co6
+                    _alts = call(models, uid, api_key, "account.payment.term", "search_read",
+                                 [[("company_id", "=", _TARGET_COMPANY),
+                                   ("name", "ilike", _pt_name)]],
+                                 {"fields": ["id", "name"], "limit": 5})
+                    if _alts:
+                        _effective_pterm = _alts[0]["id"]
+                    else:
+                        _effective_pterm = None  # descartar, Odoo usará el del partner
+        except Exception:
+            pass
+
+    vals = {"partner_id": partner_id, "note": note or "", "company_id": _TARGET_COMPANY}
+    if client_order_ref:  vals["client_order_ref"] = client_order_ref
+    if _effective_pterm:  vals["payment_term_id"]  = _effective_pterm
+    if date_order:        vals["date_order"]        = date_order
+    if user_id:           vals["user_id"]           = user_id
     if ejecutivo_field and ejecutivo_id:
         vals[ejecutivo_field] = ejecutivo_id
     try:
