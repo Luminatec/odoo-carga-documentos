@@ -2480,7 +2480,8 @@ def register_customer_payment(models, uid, api_key,
                                withholdings=None,
                                writeoff_account_id=None,
                                writeoff_label="Diferencia de redondeo",
-                               reconcile_fully=False):
+                               reconcile_fully=False,
+                               force_company_id=None):
     """Registra un recibo de cobro de cliente usando account.payment.group.
     Flujo correcto para Odoo AR (módulo account_payments_group):
       1. Crear account.payment.group con payment_type='receivable'
@@ -2535,33 +2536,35 @@ def register_customer_payment(models, uid, api_key,
         except Exception:
             pass  # sin permisos o ya sin restriccion, continuar
 
-        # 3. Ajustar journal para que sea de la misma empresa que las facturas
-        #    Si el journal seleccionado es de una empresa diferente, buscar equivalente.
-        #    Siempre usar company 6 (co1 es solo consulta).
-        _TARGET_CO = invoice_company_id or 6
+        # 3. Determinar empresa objetivo y ajustar journal si es necesario.
+        #    force_company_id (ej: 6 desde recibos) tiene prioridad absoluta.
+        #    Si no se fuerza, usar la empresa de las facturas o co6 por defecto.
+        _TARGET_CO = force_company_id or invoice_company_id or 6
         effective_journal_id = journal_id
-        try:
-            jdata = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                "account.journal", "read", [[journal_id]],
-                {"fields": ["company_id", "type", "name"]})
-            if jdata and jdata[0]["company_id"][0] != _TARGET_CO:
-                jtype = jdata[0]["type"]
-                jname = jdata[0]["name"]
-                alts = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                    "account.journal", "search_read",
-                    [[("company_id", "=", _TARGET_CO),
-                      ("type", "=", jtype),
-                      ("active", "=", True)]],
-                    {"fields": ["id", "name"], "order": "name asc", "limit": 20})
-                if alts:
-                    best = next(
-                        (a for a in alts if jname.lower()[:8] in a["name"].lower()),
-                        alts[0])
-                    effective_journal_id = best["id"]
-        except Exception:
-            pass
+        if not force_company_id:
+            # Solo auto-switch si NO hay empresa forzada (evita reemplazar el journal correcto)
+            try:
+                jdata = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                    "account.journal", "read", [[journal_id]],
+                    {"fields": ["company_id", "type", "name"]})
+                if jdata and jdata[0]["company_id"][0] != _TARGET_CO:
+                    jtype = jdata[0]["type"]
+                    jname = jdata[0]["name"]
+                    alts = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                        "account.journal", "search_read",
+                        [[("company_id", "=", _TARGET_CO),
+                          ("type", "=", jtype),
+                          ("active", "=", True)]],
+                        {"fields": ["id", "name"], "order": "name asc", "limit": 20})
+                    if alts:
+                        best = next(
+                            (a for a in alts if jname.lower()[:8] in a["name"].lower()),
+                            alts[0])
+                        effective_journal_id = best["id"]
+            except Exception:
+                pass
 
-        # 4. Crear el grupo — siempre forzar company 6 (co1 es solo consulta)
+        # 4. Crear el grupo siempre con la empresa objetivo
         group_vals = {
             "payment_type": "receivable",
             "partner_id":   partner_id,
