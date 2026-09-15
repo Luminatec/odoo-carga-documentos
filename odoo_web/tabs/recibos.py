@@ -670,7 +670,25 @@ def render(models, uid, api_key, models_url, is_admin):
 
                     # ── Formulario de pago ────────────────────────────────────
                     st.markdown("#### Datos del recibo")
-                    _rc_jour_id = _RC_JOURNAL_ID
+                    # Selector de diario: default = "Cheques a depositar" para Excel de home banking
+                    _rc_jour_opts = [(jid, jname) for jid, jname, *_ in _all_rc_journals]
+                    _rc_jour_labels = [jname for _, jname in _rc_jour_opts]
+                    # Buscar journal de cheques de terceros
+                    _rc_jour_cheques_id = next(
+                        (jid for jid, jname in _rc_jour_opts
+                         if "cheque" in jname.lower() or "third party" in jname.lower()),
+                        _RC_JOURNAL_ID)
+                    _rc_jour_default_idx = next(
+                        (i for i, (jid, _) in enumerate(_rc_jour_opts)
+                         if jid == _rc_jour_cheques_id), 0)
+                    _rc_jour_sel = st.selectbox(
+                        "Diario de cobro",
+                        options=_rc_jour_labels,
+                        index=_rc_jour_default_idx,
+                        key=f"rc_jour_{_rcuit}")
+                    _rc_jour_id = next(
+                        (jid for jid, jname in _rc_jour_opts if jname == _rc_jour_sel),
+                        _RC_JOURNAL_ID)
                     _rcc2, _rcc3 = st.columns([1, 1])
                     _rc_date = _rcc2.date_input(
                         "Fecha de cobro",
