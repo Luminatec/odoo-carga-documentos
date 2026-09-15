@@ -190,11 +190,13 @@ if "odoo_env" not in st.session_state:
 
 # ── Activar entorno correcto en config (se ejecuta en cada rerun) ──────────
 if st.session_state["odoo_env"] == "test":
-    _cfg.ODOO_URL = _cfg.TEST_ODOO_URL
-    _cfg.ODOO_DB  = _cfg.TEST_ODOO_DB
+    _cfg.ODOO_URL        = _cfg.TEST_ODOO_URL
+    _cfg.ODOO_DB         = _cfg.TEST_ODOO_DB
+    _cfg.MAIN_COMPANY_ID = _cfg.TEST_MAIN_COMPANY_ID
 else:
-    _cfg.ODOO_URL = _cfg.PROD_ODOO_URL
-    _cfg.ODOO_DB  = _cfg.PROD_ODOO_DB
+    _cfg.ODOO_URL        = _cfg.PROD_ODOO_URL
+    _cfg.ODOO_DB         = _cfg.PROD_ODOO_DB
+    _cfg.MAIN_COMPANY_ID = _cfg.PROD_MAIN_COMPANY_ID
 
 
 # ═══════════════════════════════════════════════════

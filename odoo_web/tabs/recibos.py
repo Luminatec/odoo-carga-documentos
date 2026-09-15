@@ -1089,7 +1089,7 @@ def render(models, uid, api_key, models_url, is_admin):
                                             writeoff_account_id=_rc_writeoff_account_id,
                                             writeoff_label=_rc_writeoff_label,
                                             reconcile_fully=_rc_reconcile_fully,
-                                            force_company_id=6)
+                                            force_company_id=_cfg.MAIN_COMPANY_ID)
                                         if _rc_ok:
                                             _rc_status.update(
                                                 label="✅ Cobro registrado",

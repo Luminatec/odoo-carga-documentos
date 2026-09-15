@@ -5,14 +5,18 @@ NO uses 'from config import ODOO_DB' — el valor se muta en app.py en cada reru
 """
 
 # ── URLs y bases de datos ───────────────────────────────────────────────────
-PROD_ODOO_URL = "https://gpowerbyte-luminatec.odoo.com"
-PROD_ODOO_DB  = "gpowerbyte-luminatec-master-22753148"
-TEST_ODOO_URL = "https://gpowerbyte-luminatec-test-37832655.dev.odoo.com"
-TEST_ODOO_DB  = "gpowerbyte-luminatec-test-37832655"
+PROD_ODOO_URL        = "https://gpowerbyte-luminatec.odoo.com"
+PROD_ODOO_DB         = "gpowerbyte-luminatec-master-22753148"
+PROD_MAIN_COMPANY_ID = 6   # LUMINATEC S.R.L. (activa) en producción
+
+TEST_ODOO_URL        = "https://gpowerbyte-luminatec-test-37832655.dev.odoo.com"
+TEST_ODOO_DB         = "gpowerbyte-luminatec-test-37832655"
+TEST_MAIN_COMPANY_ID = 6   # LUMINATEC S.R.L. (activa) en test — ajustar si el ID difiere
 
 # Valores activos — app.py los muta al inicio de cada rerun según el entorno
-ODOO_URL = PROD_ODOO_URL
-ODOO_DB  = PROD_ODOO_DB
+ODOO_URL        = PROD_ODOO_URL
+ODOO_DB         = PROD_ODOO_DB
+MAIN_COMPANY_ID = PROD_MAIN_COMPANY_ID  # empresa "activa" que usa la app en toda la lógica
 
 # ── Usuarios admin ─────────────────────────────────────────────────────────
 # ADMIN_EMAILS se construye en app.py (requiere st.secrets).

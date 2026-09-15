@@ -1010,9 +1010,9 @@ def create_vendor_bill(models, uid, api_key, partner_id, ref, invoice_date,
         name, quantity, price_unit, account_id, product_id
     Si se pasa, reemplaza la lógica de línea única (account_id/amount_neto).
     """
-    # fix276: forzar company 6 (LUMINATEC S.R.L.) - co1 es solo consulta
-    # Si el journal es de co1, buscar equivalente en co6; si no hay journal, forzar company_id=6
-    _TARGET_COMPANY = 6
+    # fix276: forzar empresa activa (LUMINATEC S.R.L.) - co1 es solo consulta
+    # Si el journal es de la empresa histórica, buscar equivalente en la empresa activa
+    _TARGET_COMPANY = _cfg.MAIN_COMPANY_ID
     _effective_journal_id = journal_id
     if journal_id:
         try:
@@ -1300,8 +1300,8 @@ def create_landed_cost(models, uid, api_key, picking_ids, cost_lines):
 def create_sale_order(models, uid, api_key, partner_id, note, lines, filename, file_bytes, mimetype,
                       client_order_ref=None, payment_term_id=None, date_order=None,
                       ejecutivo_field=None, ejecutivo_id=None, user_id=None):
-    # fix276b: validar payment_term_id - si es de otra empresa, buscar equivalente en co6 o descartar
-    _TARGET_COMPANY = 6
+    # fix276b: validar payment_term_id - si es de otra empresa, buscar equivalente en empresa activa o descartar
+    _TARGET_COMPANY = _cfg.MAIN_COMPANY_ID
     _effective_pterm = payment_term_id
     if payment_term_id:
         try:
@@ -2551,7 +2551,7 @@ def register_customer_payment(models, uid, api_key,
         # 3. Determinar empresa objetivo.
         #    Si hay facturas: usar su empresa (las receivable lines deben coincidir).
         #    Si no hay facturas (pago a cuenta): usar force_company_id o co6.
-        _TARGET_CO = invoice_company_id if invoice_company_id else (force_company_id or 6)
+        _TARGET_CO = invoice_company_id if invoice_company_id else (force_company_id or _cfg.MAIN_COMPANY_ID)
 
         # Auto-switch journal si es de empresa diferente a _TARGET_CO.
         # Para journals de cheques (terceros): buscar por nombre, no solo por tipo.
