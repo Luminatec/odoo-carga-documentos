@@ -2526,6 +2526,18 @@ def register_customer_payment(models, uid, api_key,
                 main_account_id = inv_lines[0]["account_id"][0]
                 inv_line_ids = [l["id"] for l in inv_lines
                                 if l["account_id"][0] == main_account_id]
+                # fix281: overridar invoice_company_id con la empresa de la cuenta
+                # receivable real (no del move.company_id). Odoo valida que el grupo
+                # de cobro coincida con la empresa de las líneas que incluye,
+                # y puede haber inconsistencia por migración de empresa.
+                try:
+                    _acct_co_data = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                        "account.account", "read", [[main_account_id]],
+                        {"fields": ["company_id"]})
+                    if _acct_co_data:
+                        invoice_company_id = _acct_co_data[0]["company_id"][0]
+                except Exception:
+                    pass  # mantener invoice_company_id anterior
 
         # 2. Asegurar que el partner no tenga restriccion de empresa
         #    (evita error "Empresas incompatibles" cuando partner.company_id != payment_group.company_id)
