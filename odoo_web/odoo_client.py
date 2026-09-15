@@ -2536,35 +2536,48 @@ def register_customer_payment(models, uid, api_key,
         except Exception:
             pass  # sin permisos o ya sin restriccion, continuar
 
-        # 3. Determinar empresa objetivo y ajustar journal si es necesario.
-        #    force_company_id (ej: 6 desde recibos) tiene prioridad absoluta.
-        #    Si no se fuerza, usar la empresa de las facturas o co6 por defecto.
-        _TARGET_CO = force_company_id or invoice_company_id or 6
+        # 3. Determinar empresa objetivo.
+        #    Si hay facturas: usar su empresa (las receivable lines deben coincidir).
+        #    Si no hay facturas (pago a cuenta): usar force_company_id o co6.
+        _TARGET_CO = invoice_company_id if invoice_company_id else (force_company_id or 6)
+
+        # Auto-switch journal si es de empresa diferente a _TARGET_CO.
+        # Para journals de cheques (terceros): buscar por nombre, no solo por tipo.
         effective_journal_id = journal_id
-        if not force_company_id:
-            # Solo auto-switch si NO hay empresa forzada (evita reemplazar el journal correcto)
-            try:
-                jdata = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                    "account.journal", "read", [[journal_id]],
-                    {"fields": ["company_id", "type", "name"]})
-                if jdata and jdata[0]["company_id"][0] != _TARGET_CO:
-                    jtype = jdata[0]["type"]
-                    jname = jdata[0]["name"]
-                    alts = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                        "account.journal", "search_read",
-                        [[("company_id", "=", _TARGET_CO),
-                          ("type", "=", jtype),
-                          ("active", "=", True)]],
-                        {"fields": ["id", "name"], "order": "name asc", "limit": 20})
-                    if alts:
+        try:
+            jdata = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                "account.journal", "read", [[journal_id]],
+                {"fields": ["company_id", "type", "name"]})
+            if jdata and jdata[0]["company_id"][0] != _TARGET_CO:
+                jtype = jdata[0]["type"]
+                jname = jdata[0]["name"]
+                _jname_low = jname.lower()
+                _is_check = ("cheque" in _jname_low or "third party" in _jname_low
+                             or "tercero" in _jname_low)
+                alts = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                    "account.journal", "search_read",
+                    [[("company_id", "=", _TARGET_CO),
+                      ("type", "=", jtype),
+                      ("active", "=", True)]],
+                    {"fields": ["id", "name"], "order": "name asc", "limit": 20})
+                if alts:
+                    if _is_check:
+                        # Priorizar journal de cheques/terceros en la empresa destino
+                        best = next(
+                            (a for a in alts
+                             if any(kw in a["name"].lower()
+                                    for kw in ["cheque", "third party", "tercero"])),
+                            next((a for a in alts if jname.lower()[:6] in a["name"].lower()),
+                                 alts[0]))
+                    else:
                         best = next(
                             (a for a in alts if jname.lower()[:8] in a["name"].lower()),
                             alts[0])
-                        effective_journal_id = best["id"]
-            except Exception:
-                pass
+                    effective_journal_id = best["id"]
+        except Exception:
+            pass
 
-        # 4. Crear el grupo siempre con la empresa objetivo
+        # 4. Crear el grupo con la empresa objetivo
         group_vals = {
             "payment_type": "receivable",
             "partner_id":   partner_id,
@@ -2728,8 +2741,30 @@ def register_customer_payment(models, uid, api_key,
         if inv_line_ids and (writeoff_account_id or reconcile_fully):
             _wo_vals = {"payment_difference_handling": "reconcile"}
             if writeoff_account_id:
-                _wo_vals["writeoff_account_id"] = writeoff_account_id
-                _wo_vals["writeoff_label"] = writeoff_label or "Diferencia de redondeo"
+                # Verificar que la cuenta de write-off sea de la misma empresa que el grupo
+                _effective_wo_acct = writeoff_account_id
+                try:
+                    _wo_acct_data = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                        "account.account", "read", [[writeoff_account_id]],
+                        {"fields": ["company_id", "name", "code"]})
+                    if _wo_acct_data and _wo_acct_data[0]["company_id"][0] != _TARGET_CO:
+                        _wo_name = _wo_acct_data[0]["name"]
+                        _wo_code = str(_wo_acct_data[0].get("code") or "")
+                        # Buscar cuenta equivalente en la empresa del grupo
+                        _wo_alts = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                            "account.account", "search_read",
+                            [[("company_id", "=", _TARGET_CO),
+                              ("name", "ilike", _wo_name[:20])]],
+                            {"fields": ["id", "name"], "limit": 5})
+                        if _wo_alts:
+                            _effective_wo_acct = _wo_alts[0]["id"]
+                        else:
+                            _effective_wo_acct = None  # no encontrado: omitir write-off
+                except Exception:
+                    pass
+                if _effective_wo_acct:
+                    _wo_vals["writeoff_account_id"] = _effective_wo_acct
+                    _wo_vals["writeoff_label"] = writeoff_label or "Diferencia de redondeo"
             try:
                 models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                     "account.payment.group", "write",
