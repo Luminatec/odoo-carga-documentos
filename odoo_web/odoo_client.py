@@ -2536,42 +2536,39 @@ def register_customer_payment(models, uid, api_key,
             pass  # sin permisos o ya sin restriccion, continuar
 
         # 3. Ajustar journal para que sea de la misma empresa que las facturas
-        #    Si el journal seleccionado es de una empresa diferente a la de las facturas,
-        #    buscar un journal equivalente (mismo tipo) en la empresa correcta.
+        #    Si el journal seleccionado es de una empresa diferente, buscar equivalente.
+        #    Siempre usar company 6 (co1 es solo consulta).
+        _TARGET_CO = invoice_company_id or 6
         effective_journal_id = journal_id
-        if invoice_company_id:
-            try:
-                jdata = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                    "account.journal", "read", [[journal_id]],
-                    {"fields": ["company_id", "type", "name"]})
-                if jdata and jdata[0]["company_id"][0] != invoice_company_id:
-                    jtype = jdata[0]["type"]
-                    jname = jdata[0]["name"]
-                    alts = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                        "account.journal", "search_read",
-                        [[("company_id", "=", invoice_company_id),
-                          ("type", "=", jtype),
-                          ("active", "=", True)]],
-                        {"fields": ["id", "name"], "order": "name asc", "limit": 20})
-                    if alts:
-                        # Preferir el journal con nombre más parecido
-                        best = next(
-                            (a for a in alts if jname.lower()[:8] in a["name"].lower()),
-                            alts[0])
-                        effective_journal_id = best["id"]
-            except Exception:
-                pass
+        try:
+            jdata = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                "account.journal", "read", [[journal_id]],
+                {"fields": ["company_id", "type", "name"]})
+            if jdata and jdata[0]["company_id"][0] != _TARGET_CO:
+                jtype = jdata[0]["type"]
+                jname = jdata[0]["name"]
+                alts = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                    "account.journal", "search_read",
+                    [[("company_id", "=", _TARGET_CO),
+                      ("type", "=", jtype),
+                      ("active", "=", True)]],
+                    {"fields": ["id", "name"], "order": "name asc", "limit": 20})
+                if alts:
+                    best = next(
+                        (a for a in alts if jname.lower()[:8] in a["name"].lower()),
+                        alts[0])
+                    effective_journal_id = best["id"]
+        except Exception:
+            pass
 
-        # 4. Crear el grupo (solo campos del grupo, sin pagos inline)
-        #    Forzar empresa de las facturas para que cuentas receivable coincidan
+        # 4. Crear el grupo — siempre forzar company 6 (co1 es solo consulta)
         group_vals = {
             "payment_type": "receivable",
             "partner_id":   partner_id,
             "currency_id":  currency_id,
             "date":         payment_date,
+            "company_id":   _TARGET_CO,
         }
-        if invoice_company_id:
-            group_vals["company_id"] = invoice_company_id
         if inv_line_ids:
             group_vals["move_line_ids"] = [(6, 0, inv_line_ids)]
         group_id = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
