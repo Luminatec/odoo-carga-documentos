@@ -7,8 +7,8 @@ NO uses 'from config import ODOO_DB' — el valor se muta en app.py en cada reru
 # ── URLs y bases de datos ───────────────────────────────────────────────────
 PROD_ODOO_URL = "https://gpowerbyte-luminatec.odoo.com"
 PROD_ODOO_DB  = "gpowerbyte-luminatec-master-22753148"
-TEST_ODOO_URL = "https://gpowerbyte-luminatec-test-31645353.dev.odoo.com"
-TEST_ODOO_DB  = "gpowerbyte-luminatec-test-31645353"
+TEST_ODOO_URL = "https://gpowerbyte-luminatec-test-37832655.dev.odoo.com"
+TEST_ODOO_DB  = "gpowerbyte-luminatec-test-37832655"
 
 # Valores activos — app.py los muta al inicio de cada rerun según el entorno
 ODOO_URL = PROD_ODOO_URL
