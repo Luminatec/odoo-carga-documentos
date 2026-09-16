@@ -2493,8 +2493,12 @@ def register_customer_payment(models, uid, api_key,
         # 1. Obtener las líneas receivable de las facturas seleccionadas
         #    - Filtramos move_ids a la empresa de la primera factura (no se puede mezclar)
         #    - Filtramos líneas por la misma cuenta contable (Odoo no permite mezclarlas)
+        # fix283: búsqueda robusta en 2 pasos para evitar problemas de filtros
+        #   relacionales cross-company (account_id.account_type falla en multi-empresa
+        #   cuando la cuenta es de otra empresa que la del contexto de seguridad).
         inv_line_ids = []
         invoice_company_id = None
+        _move_company_id = None   # empresa del move (puede diferir de la cuenta)
         if move_ids:
             # Traer empresa de la primera factura
             move_data = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
@@ -2503,6 +2507,7 @@ def register_customer_payment(models, uid, api_key,
                 {"fields": ["company_id"]})
             if move_data:
                 invoice_company_id = move_data[0]["company_id"][0]
+                _move_company_id  = invoice_company_id
 
             # Filtrar move_ids a los que pertenecen a esa misma empresa
             if invoice_company_id and len(move_ids) > 1:
@@ -2515,29 +2520,60 @@ def register_customer_payment(models, uid, api_key,
                 except Exception:
                     pass
 
-            inv_lines = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                "account.move.line", "search_read",
-                [[("move_id", "in", move_ids),
-                  ("account_id.account_type", "=", "asset_receivable"),
-                  ("reconciled", "=", False)]],
-                {"fields": ["id", "account_id"], "limit": 100})
+            # fix283 paso 1: traer TODAS las líneas no-reconciliadas del move
+            # sin filtro relacional cross-company.
+            _all_inv_lines = []
+            try:
+                _all_inv_lines = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                    "account.move.line", "search_read",
+                    [[("move_id", "in", move_ids), ("reconciled", "=", False)]],
+                    {"fields": ["id", "account_id"], "limit": 200})
+            except Exception:
+                pass
+
+            # fix283 paso 2: determinar qué cuentas son receivable y su empresa,
+            # leyendo account.account por ID (read no usa filtro de empresa).
+            inv_lines = []
+            _receivable_acct_company = None   # empresa real de la cuenta receivable
+            if _all_inv_lines:
+                _acct_ids = list({l["account_id"][0] for l in _all_inv_lines})
+                try:
+                    _acct_info = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                        "account.account", "read", [_acct_ids],
+                        {"fields": ["account_type", "company_id"]})
+                    _receivable_map = {
+                        d["id"]: d["company_id"][0]
+                        for d in _acct_info
+                        if d.get("account_type") == "asset_receivable"
+                    }
+                    inv_lines = [l for l in _all_inv_lines
+                                 if l["account_id"][0] in _receivable_map]
+                    if inv_lines:
+                        _receivable_acct_company = _receivable_map[inv_lines[0]["account_id"][0]]
+                except Exception:
+                    pass
+
             if inv_lines:
-                # Usar la cuenta de la primera línea y filtrar el resto
                 main_account_id = inv_lines[0]["account_id"][0]
                 inv_line_ids = [l["id"] for l in inv_lines
                                 if l["account_id"][0] == main_account_id]
-                # fix281: overridar invoice_company_id con la empresa de la cuenta
-                # receivable real (no del move.company_id). Odoo valida que el grupo
-                # de cobro coincida con la empresa de las líneas que incluye,
-                # y puede haber inconsistencia por migración de empresa.
-                try:
-                    _acct_co_data = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                        "account.account", "read", [[main_account_id]],
-                        {"fields": ["company_id"]})
-                    if _acct_co_data:
-                        invoice_company_id = _acct_co_data[0]["company_id"][0]
-                except Exception:
-                    pass  # mantener invoice_company_id anterior
+
+                # fix281+283: si la empresa de la CUENTA receivable difiere de la empresa
+                # del MOVE (artefacto de migración), NO se puede incluir esas move lines
+                # en un payment group de ninguna empresa sin causar "empresas incompatibles"
+                # al generar asientos de write-off. En ese caso, registrar como pago a cuenta.
+                if (_receivable_acct_company is not None
+                        and _move_company_id is not None
+                        and _receivable_acct_company != _move_company_id):
+                    # Migración cross-company detectada: limpiar reconciliación automática
+                    inv_line_ids = []
+                    writeoff_account_id = None
+                    reconcile_fully = False
+                    invoice_company_id = _receivable_acct_company  # usar empresa de la cuenta
+                else:
+                    # Usar la empresa de la cuenta receivable real (fix281)
+                    if _receivable_acct_company:
+                        invoice_company_id = _receivable_acct_company
 
         # 2. Asegurar que el partner no tenga restriccion de empresa
         #    (evita error "Empresas incompatibles" cuando partner.company_id != payment_group.company_id)
