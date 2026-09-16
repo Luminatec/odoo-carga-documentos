@@ -2625,6 +2625,36 @@ def register_customer_payment(models, uid, api_key,
         except Exception:
             pass
 
+        # Fix284: si se reciben cheques de terceros, validar que el journal
+        # soporte "new_third_party_checks". Si no, buscar el journal correcto
+        # en _TARGET_CO (protege contra sesión con journal incorrecto guardado
+        # en st.session_state de un intento previo).
+        if cheques:
+            try:
+                _pml_ok = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                    "account.payment.method.line", "search_read",
+                    [[["journal_id", "=", effective_journal_id],
+                      ["payment_method_id.code", "=", "new_third_party_checks"]]],
+                    {"fields": ["id"], "limit": 1})
+                if not _pml_ok:
+                    # Journal actual no soporta cheques de terceros → buscar el correcto
+                    _chq_j = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                        "account.journal", "search_read",
+                        [[("company_id", "=", _TARGET_CO),
+                          ("type", "=", "cash"),
+                          ("active", "=", True)]],
+                        {"fields": ["id", "name"], "order": "name asc", "limit": 50})
+                    _chq_best = next(
+                        (j for j in _chq_j
+                         if any(kw in j["name"].lower()
+                                for kw in ["cheque", "tercero", "third party"])
+                         and "rechazado" not in j["name"].lower()),
+                        None)
+                    if _chq_best:
+                        effective_journal_id = _chq_best["id"]
+            except Exception:
+                pass
+
         # 4. Crear el grupo con la empresa objetivo
         group_vals = {
             "payment_type": "receivable",
