@@ -2628,35 +2628,28 @@ def register_customer_payment(models, uid, api_key,
         except Exception:
             pass
 
-        # Fix284: si se reciben cheques de terceros, validar que el journal
-        # soporte "new_third_party_checks". Si no, buscar el journal correcto
-        # en _TARGET_CO (protege contra sesión con journal incorrecto guardado
-        # en st.session_state de un intento previo).
+        # fix286: para pagos con cheques, buscar el journal correcto DIRECTAMENTE
+        # por payment method "new_third_party_checks" en _TARGET_CO.
+        # Más robusto que nombre-matching: funciona independientemente del tipo
+        # (bank/cash) y del nombre del journal en el origen.
+        _fix286_pml_id = None
         if cheques:
             try:
-                _pml_ok = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                _chq_pmls = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
                     "account.payment.method.line", "search_read",
-                    [[["journal_id", "=", effective_journal_id],
+                    [[["journal_id.company_id", "=", _TARGET_CO],
+                      ["journal_id.active", "=", True],
                       ["payment_method_id.code", "=", "new_third_party_checks"]]],
-                    {"fields": ["id"], "limit": 1})
-                if not _pml_ok:
-                    # Journal actual no soporta cheques de terceros → buscar el correcto
-                    _chq_j = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                        "account.journal", "search_read",
-                        [[("company_id", "=", _TARGET_CO),
-                          ("type", "=", "cash"),
-                          ("active", "=", True)]],
-                        {"fields": ["id", "name"], "order": "name asc", "limit": 50})
-                    # Fix285: excluir "rejected" (inglés) además de "rechazado" (español)
-                    _chq_best = next(
-                        (j for j in _chq_j
-                         if any(kw in j["name"].lower()
-                                for kw in ["cheque", "tercero", "third party"])
-                         and "rechazado" not in j["name"].lower()
-                         and "rejected" not in j["name"].lower()),
-                        None)
-                    if _chq_best:
-                        effective_journal_id = _chq_best["id"]
+                    {"fields": ["id", "journal_id"], "limit": 20})
+                if _chq_pmls:
+                    # Excluir cheques rechazados/rejected
+                    _chq_best_pml = next(
+                        (p for p in _chq_pmls
+                         if "rechazado" not in p["journal_id"][1].lower()
+                         and "rejected" not in p["journal_id"][1].lower()),
+                        _chq_pmls[0])
+                    effective_journal_id = _chq_best_pml["journal_id"][0]
+                    _fix286_pml_id = _chq_best_pml["id"]
             except Exception:
                 pass
 
@@ -2676,17 +2669,20 @@ def register_customer_payment(models, uid, api_key,
         # 5. Crear el payment vinculado al grupo
         #    Nota: en esta instalación el campo se llama "memo" (no "ref")
 
-        # 5a. Buscar la linea de metodo de pago "Cheque de Terceros Existente"
-        #     para el journal seleccionado (code: out_third_party_checks = Existing Third Party Checks)
-        try:
-            pml_lines = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                "account.payment.method.line", "search_read",
-                [[["journal_id", "=", effective_journal_id],
-                  ["payment_method_id.code", "=", "new_third_party_checks"]]],
-                {"fields": ["id"], "limit": 1})
-            pml_id = pml_lines[0]["id"] if pml_lines else None
-        except Exception:
-            pml_id = None
+        # 5a. Buscar la linea de metodo de pago "new_third_party_checks"
+        #     fix286: si ya lo encontramos arriba, reutilizarlo directamente.
+        if _fix286_pml_id:
+            pml_id = _fix286_pml_id
+        else:
+            try:
+                pml_lines = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                    "account.payment.method.line", "search_read",
+                    [[["journal_id", "=", effective_journal_id],
+                      ["payment_method_id.code", "=", "new_third_party_checks"]]],
+                    {"fields": ["id"], "limit": 1})
+                pml_id = pml_lines[0]["id"] if pml_lines else None
+            except Exception:
+                pml_id = None
 
         # Si hay retenciones Y cheques, el pago principal debe ser el monto TOTAL
         # de los cheques. Odoo AR valida: payment.amount == sum(cheques.amount).
