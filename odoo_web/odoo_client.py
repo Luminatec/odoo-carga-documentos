@@ -2607,14 +2607,17 @@ def register_customer_payment(models, uid, api_key,
                     [[("company_id", "=", _TARGET_CO),
                       ("type", "=", jtype),
                       ("active", "=", True)]],
-                    {"fields": ["id", "name"], "order": "name asc", "limit": 20})
+                    {"fields": ["id", "name"], "order": "name asc", "limit": 100})
                 if alts:
                     if _is_check:
                         # Priorizar journal de cheques/terceros en la empresa destino
+                        # Fix285: excluir también "rejected" (inglés) además de "rechazado" (español)
                         best = next(
                             (a for a in alts
                              if any(kw in a["name"].lower()
-                                    for kw in ["cheque", "third party", "tercero"])),
+                                    for kw in ["cheque", "third party", "tercero"])
+                             and "rechazado" not in a["name"].lower()
+                             and "rejected" not in a["name"].lower()),
                             next((a for a in alts if jname.lower()[:6] in a["name"].lower()),
                                  alts[0]))
                     else:
@@ -2644,11 +2647,13 @@ def register_customer_payment(models, uid, api_key,
                           ("type", "=", "cash"),
                           ("active", "=", True)]],
                         {"fields": ["id", "name"], "order": "name asc", "limit": 50})
+                    # Fix285: excluir "rejected" (inglés) además de "rechazado" (español)
                     _chq_best = next(
                         (j for j in _chq_j
                          if any(kw in j["name"].lower()
                                 for kw in ["cheque", "tercero", "third party"])
-                         and "rechazado" not in j["name"].lower()),
+                         and "rechazado" not in j["name"].lower()
+                         and "rejected" not in j["name"].lower()),
                         None)
                     if _chq_best:
                         effective_journal_id = _chq_best["id"]
