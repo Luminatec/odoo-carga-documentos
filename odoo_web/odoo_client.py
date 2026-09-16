@@ -2630,26 +2630,35 @@ def register_customer_payment(models, uid, api_key,
 
         # fix286: para pagos con cheques, buscar el journal correcto DIRECTAMENTE
         # por payment method "new_third_party_checks" en _TARGET_CO.
-        # Más robusto que nombre-matching: funciona independientemente del tipo
-        # (bank/cash) y del nombre del journal en el origen.
+        # Usa 2 pasos sin dot-notation en domains (más compatible con XML-RPC).
         _fix286_pml_id = None
         if cheques:
             try:
-                _chq_pmls = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
-                    "account.payment.method.line", "search_read",
-                    [[["journal_id.company_id", "=", _TARGET_CO],
-                      ["journal_id.active", "=", True],
-                      ["payment_method_id.code", "=", "new_third_party_checks"]]],
-                    {"fields": ["id", "journal_id"], "limit": 20})
-                if _chq_pmls:
-                    # Excluir cheques rechazados/rejected
-                    _chq_best_pml = next(
-                        (p for p in _chq_pmls
-                         if "rechazado" not in p["journal_id"][1].lower()
-                         and "rejected" not in p["journal_id"][1].lower()),
-                        _chq_pmls[0])
-                    effective_journal_id = _chq_best_pml["journal_id"][0]
-                    _fix286_pml_id = _chq_best_pml["id"]
+                # Paso 1: obtener IDs de journals activos en _TARGET_CO
+                _co_jids = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                    "account.journal", "search",
+                    [[("company_id", "=", _TARGET_CO), ("active", "=", True)]],
+                    {})
+                # Paso 2: obtener IDs del método new_third_party_checks
+                _ntc_mids = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                    "account.payment.method", "search",
+                    [[("code", "=", "new_third_party_checks")]],
+                    {})
+                if _co_jids and _ntc_mids:
+                    _chq_pmls = models.execute_kw(_cfg.ODOO_DB, uid, api_key,
+                        "account.payment.method.line", "search_read",
+                        [[["journal_id", "in", _co_jids],
+                          ["payment_method_id", "in", _ntc_mids]]],
+                        {"fields": ["id", "journal_id"], "limit": 20})
+                    if _chq_pmls:
+                        # Excluir cheques rechazados/rejected
+                        _chq_best_pml = next(
+                            (p for p in _chq_pmls
+                             if "rechazado" not in p["journal_id"][1].lower()
+                             and "rejected" not in p["journal_id"][1].lower()),
+                            _chq_pmls[0])
+                        effective_journal_id = _chq_best_pml["journal_id"][0]
+                        _fix286_pml_id = _chq_best_pml["id"]
             except Exception:
                 pass
 
